@@ -1,0 +1,4 @@
+# Permit the dedicated Alice runtime to use Pololu native USB interfaces.
+# Source policy is equivalent to Pololu's official Linux software package.
+SUBSYSTEM=="usb", ATTRS{idVendor}=="1ffb", MODE="0666"
+

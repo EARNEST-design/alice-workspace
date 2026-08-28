@@ -1,0 +1,39 @@
+<!--Pololu Maestro servo controller settings file, http://www.pololu.com/catalog/product/1350-->
+<UscSettings version="1">
+  <NeverSuspend>false</NeverSuspend>
+  <SerialMode>USB_CHAINED</SerialMode>
+  <FixedBaudRate>115385</FixedBaudRate>
+  <SerialTimeout>0</SerialTimeout>
+  <EnableCrc>false</EnableCrc>
+  <SerialDeviceNumber>12</SerialDeviceNumber>
+  <SerialMiniSscOffset>0</SerialMiniSscOffset>
+  <Channels MiniMaestroServoPeriod="80000" ServoMultiplier="4">
+    <!--Period = 20 ms-->
+    <!--Channel 0-->
+    <Channel name="" mode="Servo" min="4928" max="7808" homemode="Goto" home="6480" speed="20" acceleration="25" neutral="6016" range="1905" />
+    <!--Channel 1-->
+    <Channel name="" mode="Servo" min="3712" max="8000" homemode="Goto" home="6007" speed="25" acceleration="25" neutral="6000" range="1905" />
+    <!--Channel 2-->
+    <Channel name="" mode="Servo" min="3712" max="8832" homemode="Goto" home="7440" speed="25" acceleration="25" neutral="5800" range="1905" />
+    <!--Channel 3-->
+    <Channel name="" mode="Servo" min="2880" max="6400" homemode="Goto" home="5626" speed="0" acceleration="0" neutral="6000" range="1905" />
+    <!--Channel 4-->
+    <Channel name="" mode="Servo" min="3840" max="7232" homemode="Goto" home="6173" speed="0" acceleration="0" neutral="6000" range="1905" />
+    <!--Channel 5-->
+    <Channel name="" mode="Servo" min="4032" max="6592" homemode="Goto" home="5918" speed="0" acceleration="0" neutral="5952" range="4191" />
+    <!--Channel 6-->
+    <Channel name="" mode="Servo" min="4608" max="5440" homemode="Goto" home="5059" speed="0" acceleration="11" neutral="5200" range="1905" />
+    <!--Channel 7-->
+    <Channel name="" mode="ServoMultiplied" min="6016" max="8000" homemode="Off" home="0" speed="0" acceleration="25" neutral="6784" range="1905" />
+    <!--Channel 8-->
+    <Channel name="" mode="Servo" min="5632" max="6144" homemode="Goto" home="6000" speed="50" acceleration="10" neutral="5984" range="1905" />
+    <!--Channel 9-->
+    <Channel name="" mode="Servo" min="5120" max="6912" homemode="Goto" home="6499" speed="50" acceleration="10" neutral="6400" range="1905" />
+    <!--Channel 10-->
+    <Channel name="" mode="Servo" min="5696" max="6400" homemode="Goto" home="6000" speed="50" acceleration="10" neutral="5624" range="1905" />
+    <!--Channel 11-->
+    <Channel name="" mode="Servo" min="5120" max="6912" homemode="Goto" home="5524" speed="50" acceleration="10" neutral="5400" range="1905" />
+  </Channels>
+  <Sequences />
+  <Script ScriptDone="true" />
+</UscSettings>
