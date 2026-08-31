@@ -1,18 +1,42 @@
-"""Capability-gated composition for a reviewed Maestro identification run."""
+"""Two-stage, capability-gated Maestro identification composition."""
 
 from __future__ import annotations
 
 import hashlib
+import json
+import platform
+import secrets
+import subprocess
 import threading
 import time
 from collections.abc import Callable, Mapping
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Literal
 
 import yaml  # type: ignore[import-untyped]
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    model_validator,
+)
 
-from alice.experiments.manifest import ArtifactManifest
+from alice.contracts.blendshapes import NonEmptyString, Sha256Hex
+from alice.experiments.artifact_store import publish_generation, sha256_path
+from alice.experiments.manifest import (
+    ArtifactManifest,
+    ArtifactRecord,
+    FailureCategory,
+    FailureRecord,
+    IdentificationObserverProvenance,
+    IdentificationRunMetadata,
+    NegotiatedCameraSettings,
+    RunKind,
+    RunStatus,
+)
 from alice.experiments.system_identification import (
     IdentificationConfig,
     IdentificationObserver,
@@ -20,7 +44,7 @@ from alice.experiments.system_identification import (
 )
 from alice.hardware.adapter import ActuatorAuthorization, AdapterIdentity
 from alice.hardware.maestro_adapter import MaestroAdapter
-from alice.hardware.manifest import HardwareManifest, load_manifest
+from alice.hardware.manifest import HardwareManifest
 from alice.safety.supervisor import (
     OperatorApproval,
     PreflightEvidence,
@@ -30,18 +54,26 @@ from alice.safety.supervisor import (
 )
 
 _PLACEHOLDER_PREFIX = "REQUIRED_"
+_PREFLIGHT_ACK = "I CONFIRM PREFLIGHT WITH MASTER SERVO POWER OFF"
+_APPROVAL_ACK = "I APPROVE READ-ONLY PREFLIGHT WITH SERVO POWER OFF"
+_POWER_ACK = "I CONFIRM MASTER SERVO POWER IS ON AND POWER REMOVAL IS READY"
 
 
 class HardwareIdentificationConfig(IdentificationConfig):
-    """Reviewed hardware-only run configuration with invalid repository secrets."""
+    """Reviewed hardware config; repository placeholders keep it unusable."""
 
     adapter: Literal["maestro"]  # type: ignore[assignment]
-    stable_device_path: str
-    expected_controller_serial: str
-    approval_id: str
+    stable_device_path: NonEmptyString
+    expected_controller_serial: NonEmptyString
+    expected_usb_interface: Literal["00"]
+    approval_id: NonEmptyString
     enable_token: SecretStr
+    electrical_evidence_path: NonEmptyString
+    electrical_evidence_sha256: str
+    electrical_review_max_age_days: Annotated[int, Field(gt=0)]
     home_tolerance_qus: Annotated[int, Field(ge=0)]
     independent_watchdog_ms: Annotated[int, Field(gt=0)]
+    power_enable_challenge_ttl_ms: Annotated[int, Field(gt=0)]
     safety_limits: SafetyLimits
 
     @model_validator(mode="after")
@@ -55,138 +87,106 @@ class HardwareIdentificationConfig(IdentificationConfig):
         return self
 
 
+class ElectricalSafetyEvidence(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["electrical-safety-evidence/v1"]
+    evidence_id: NonEmptyString
+    source: NonEmptyString
+    source_document_sha256: Sha256Hex
+    reviewed_at: AwareDatetime
+    reviewer: NonEmptyString
+    supply_voltage_v: Annotated[float, Field(gt=0, allow_inf_nan=False)]
+    current_limit_a: Annotated[float, Field(gt=0, allow_inf_nan=False)]
+    scope: NonEmptyString
+
+
 class HardwarePreflightAttestation(BaseModel):
-    """Contemporaneous operator facts gathered before opening the command port."""
+    """Contemporaneous operator facts gathered with servo power removed."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    run_id: str
+    run_id: NonEmptyString
+    observed_at: AwareDatetime
     observed_monotonic_ns: Annotated[int, Field(ge=0)]
-    master_servo_power_removed: bool
-    emergency_power_removal_ready: bool
-    electrical_current_limit_verified: bool
-    mechanical_clearance_verified: bool
-    channel_10_linkage_verified: bool
-    command_interface_role_verified: bool
-    no_competing_processes: bool
-    phase_1_camera_accepted: bool
+    source: NonEmptyString
+    operator_acknowledgment: Literal[
+        "I CONFIRM PREFLIGHT WITH MASTER SERVO POWER OFF"
+    ]
+    master_servo_power_removed: Literal[True]
+    emergency_power_removal_ready: Literal[True]
+    mechanical_clearance_verified: Literal[True]
+    channel_10_linkage_verified: Literal[True]
+    command_interface_role_verified: Literal[True]
+    no_competing_processes: Literal[True]
+    phase_1_camera_accepted: Literal[True]
 
     @property
     def requirement_results(self) -> Mapping[str, bool]:
         return {
-            "emergency-power-removal-verified": self.emergency_power_removal_ready,
-            "electrical-current-limit-verified": self.electrical_current_limit_verified,
-            "mechanical-clearance-verified": self.mechanical_clearance_verified,
-            "channel-10-linkage-inspection": self.channel_10_linkage_verified,
-            "maestro-command-interface-role-verified": (
-                self.command_interface_role_verified
-            ),
+            "emergency-power-removal-verified": True,
+            "electrical-current-limit-verified": True,
+            "mechanical-clearance-verified": True,
+            "channel-10-linkage-inspection": True,
+            "maestro-command-interface-role-verified": True,
         }
 
 
 class HardwareApproval(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    approval_id: str
+    approval_id: NonEmptyString
     enable_token: SecretStr
-    config_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    manifest_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    confirmation_text: str
+    run_id: NonEmptyString
+    config_sha256: Sha256Hex
+    manifest_sha256: Sha256Hex
+    electrical_evidence_sha256: Sha256Hex
+    approved_at: AwareDatetime
+    approved_monotonic_ns: Annotated[int, Field(ge=0)]
+    source: NonEmptyString
+    operator_acknowledgment: Literal[
+        "I APPROVE READ-ONLY PREFLIGHT WITH SERVO POWER OFF"
+    ]
+    confirmation_text: NonEmptyString
 
 
-class PreparedHardwareRun(BaseModel):
+class LinuxUsbIdentity(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    run_id: str
-    config_sha256: str
-    manifest_sha256: str
-    confirmation_text: str
+    serial_number: NonEmptyString
+    interface_number: NonEmptyString
+    resolved_tty: NonEmptyString
 
 
-def _sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+class PowerEnableChallenge(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    challenge_id: NonEmptyString
+    run_id: NonEmptyString
+    config_sha256: Sha256Hex
+    manifest_sha256: Sha256Hex
+    electrical_evidence_sha256: Sha256Hex
+    issued_at: AwareDatetime
+    issued_monotonic_ns: Annotated[int, Field(ge=0)]
+    expires_monotonic_ns: Annotated[int, Field(gt=0)]
+    challenge_sha256: Sha256Hex
 
 
-def load_hardware_identification_config(
-    path: str | Path,
-) -> HardwareIdentificationConfig:
-    document = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
-    if not isinstance(document, dict):
-        raise ValueError("hardware identification config must be a mapping")
-    return HardwareIdentificationConfig.model_validate(document)
+class PowerEnableConfirmation(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
-
-def expected_confirmation(run_id: str, config_sha256: str, manifest_sha256: str) -> str:
-    return f"ENABLE {run_id} CONFIG {config_sha256} MANIFEST {manifest_sha256}"
-
-
-def prepare_hardware_identification(
-    *,
-    config_path: str | Path,
-    manifest_path: str | Path,
-    approval: HardwareApproval | None,
-    attestation: HardwarePreflightAttestation,
-    enable_hardware: bool,
-) -> PreparedHardwareRun:
-    """Validate every non-device gate. This function never opens serial."""
-
-    config_file, manifest_file = Path(config_path), Path(manifest_path)
-    config = load_hardware_identification_config(config_file)
-    manifest = load_manifest(manifest_file)
-    config_hash, manifest_hash = _sha256(config_file), _sha256(manifest_file)
-    if not enable_hardware:
-        raise ValueError("explicit --enable-hardware flag is required")
-    config_token = config.enable_token.get_secret_value()
-    has_placeholder = any(
-        value.startswith(_PLACEHOLDER_PREFIX)
-        for value in (config.run_id, config.approval_id, config_token)
-    )
-    if has_placeholder:
-        raise ValueError("repository hardware config contains a REQUIRED placeholder")
-    if approval is None:
-        raise ValueError("run-specific operator approval is required")
-    if (
-        approval.approval_id != config.approval_id
-        or approval.enable_token.get_secret_value() != config_token
-    ):
-        raise ValueError("approval identity or enable token mismatch")
-    if (
-        approval.config_sha256 != config_hash
-        or approval.manifest_sha256 != manifest_hash
-    ):
-        raise ValueError("approval checksum mismatch")
-    expected = expected_confirmation(config.run_id, config_hash, manifest_hash)
-    if approval.confirmation_text != expected:
-        raise ValueError("interactive confirmation does not bind exact hashes")
-    if manifest_hash != config.hardware_manifest_sha256:
-        raise ValueError("hardware manifest file checksum mismatch")
-    if manifest.canonical_sha256 != config.hardware_manifest_canonical_sha256:
-        raise ValueError("hardware manifest canonical checksum mismatch")
-    if manifest.calibration_sha256 != config.calibration_sha256:
-        raise ValueError("calibration checksum mismatch")
-    if config.stable_device_path != manifest.controller.command_device_path:
-        raise ValueError("stable device path mismatch")
-    if config.expected_controller_serial != manifest.controller.serial_number:
-        raise ValueError("controller serial mismatch")
-    if attestation.run_id != config.run_id:
-        raise ValueError("preflight run identity mismatch")
-    age = time.monotonic_ns() - attestation.observed_monotonic_ns
-    if age < 0 or age >= config.safety_limits.preflight_max_age_ns:
-        raise ValueError("preflight attestation is stale")
-    if not attestation.master_servo_power_removed:
-        raise ValueError("master servo power must remain removed during preparation")
-    if not all(attestation.requirement_results.values()):
-        raise ValueError("one or more physical preflight requirements are unmet")
-    if not attestation.no_competing_processes:
-        raise ValueError("competing actuator process check failed")
-    if not attestation.phase_1_camera_accepted:
-        raise ValueError("Phase 1 camera acceptance is required")
-    return PreparedHardwareRun(
-        run_id=config.run_id,
-        config_sha256=config_hash,
-        manifest_sha256=manifest_hash,
-        confirmation_text=expected,
-    )
+    run_id: NonEmptyString
+    challenge_id: NonEmptyString
+    config_sha256: Sha256Hex
+    manifest_sha256: Sha256Hex
+    electrical_evidence_sha256: Sha256Hex
+    challenge_sha256: Sha256Hex
+    confirmed_at: AwareDatetime
+    confirmed_monotonic_ns: Annotated[int, Field(ge=0)]
+    source: NonEmptyString
+    operator_acknowledgment: Literal[
+        "I CONFIRM MASTER SERVO POWER IS ON AND POWER REMOVAL IS READY"
+    ]
 
 
 class IndependentHardwareWatchdog:
@@ -243,7 +243,437 @@ class IndependentHardwareWatchdog:
         try:
             self._revoke()
         finally:
-            self._close()
+            try:
+                self._close()
+            except Exception:
+                pass
+
+
+class PreparedHardwareRun:
+    """Opaque, single-use ownership of a read-only-preflighted serial session."""
+
+    __slots__ = (
+        "_adapter",
+        "_approval",
+        "_config",
+        "_config_bytes",
+        "_electrical_evidence",
+        "_electrical_evidence_bytes",
+        "_electrical_source_bytes",
+        "_lock",
+        "_manifest",
+        "_manifest_bytes",
+        "_preflight",
+        "_prepare_timer",
+        "_started_at",
+        "_state",
+        "_supervisor",
+        "challenge",
+    )
+
+    def __init__(
+        self,
+        *,
+        challenge: PowerEnableChallenge,
+        config: HardwareIdentificationConfig,
+        config_bytes: bytes,
+        manifest: HardwareManifest,
+        manifest_bytes: bytes,
+        electrical_evidence: ElectricalSafetyEvidence,
+        electrical_evidence_bytes: bytes,
+        electrical_source_bytes: bytes,
+        approval: HardwareApproval,
+        preflight: PreflightEvidence,
+        supervisor: SafetySupervisor,
+        adapter: MaestroAdapter,
+    ) -> None:
+        self.challenge = challenge
+        self._config = config
+        self._config_bytes = config_bytes
+        self._manifest = manifest
+        self._manifest_bytes = manifest_bytes
+        self._electrical_evidence = electrical_evidence
+        self._electrical_evidence_bytes = electrical_evidence_bytes
+        self._electrical_source_bytes = electrical_source_bytes
+        self._approval = approval
+        self._preflight = preflight
+        self._supervisor = supervisor
+        self._adapter = adapter
+        self._started_at = datetime.now(UTC)
+        self._lock = threading.Lock()
+        self._state = "prepared"
+        timeout_seconds = max(
+            0.0,
+            (challenge.expires_monotonic_ns - time.monotonic_ns()) / 1_000_000_000,
+        )
+        self._prepare_timer = threading.Timer(timeout_seconds, self._expire)
+        self._prepare_timer.daemon = True
+        self._prepare_timer.start()
+
+    def _consume(self) -> None:
+        with self._lock:
+            if self._state != "prepared":
+                raise ValueError("prepared hardware run is already consumed")
+            self._state = "consumed"
+            self._prepare_timer.cancel()
+
+    def cancel(self) -> None:
+        self._consume()
+        self._cancel_resources()
+
+    def cancel_if_open(self) -> None:
+        with self._lock:
+            if self._state != "prepared":
+                return
+            self._state = "consumed"
+            self._prepare_timer.cancel()
+        self._cancel_resources()
+
+    def _cancel_resources(self) -> None:
+        try:
+            self._supervisor.revoke_external_authority(
+                "prepared hardware run cancelled before power enable"
+            )
+        finally:
+            self._adapter.close()
+
+    def _expire(self) -> None:
+        with self._lock:
+            if self._state != "prepared":
+                return
+            self._state = "consumed"
+        try:
+            self._cancel_resources()
+        except Exception:
+            pass
+
+
+def _sha256_bytes(payload: bytes) -> str:
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _yaml_mapping(payload: bytes, description: str) -> dict[str, object]:
+    document = yaml.safe_load(payload.decode("utf-8"))
+    if not isinstance(document, dict):
+        raise ValueError(f"{description} must be a mapping")
+    return document
+
+
+def load_hardware_identification_config(
+    path: str | Path,
+) -> HardwareIdentificationConfig:
+    payload = Path(path).read_bytes()
+    return HardwareIdentificationConfig.model_validate(
+        _yaml_mapping(payload, "hardware identification config")
+    )
+
+
+def expected_confirmation(
+    run_id: str,
+    config_sha256: str,
+    manifest_sha256: str,
+    electrical_evidence_sha256: str | None = None,
+) -> str:
+    if electrical_evidence_sha256 is None:
+        return f"ENABLE {run_id} CONFIG {config_sha256} MANIFEST {manifest_sha256}"
+    return (
+        f"PREPARE {run_id} CONFIG {config_sha256} MANIFEST {manifest_sha256} "
+        f"ELECTRICAL {electrical_evidence_sha256}"
+    )
+
+
+def _fresh(
+    *,
+    wall: datetime,
+    monotonic_ns: int,
+    now_wall: datetime,
+    now_ns: int,
+    max_age_ns: int,
+    label: str,
+) -> None:
+    wall_age = now_wall - wall
+    monotonic_age = now_ns - monotonic_ns
+    if wall_age < timedelta(0) or monotonic_age < 0:
+        raise ValueError(f"{label} timestamp is in the future")
+    if wall_age >= timedelta(microseconds=max_age_ns / 1_000) or (
+        monotonic_age >= max_age_ns
+    ):
+        raise ValueError(f"{label} is stale")
+
+
+def _resolve_linux_usb_identity(stable_path: str) -> LinuxUsbIdentity:
+    """Resolve actual tty ancestry through sysfs, independent of link naming."""
+
+    link = Path(stable_path)
+    if not link.is_symlink():
+        raise ValueError("stable USB device path is not a symlink")
+    resolved = link.resolve(strict=True)
+    tty_device = Path("/sys/class/tty") / resolved.name / "device"
+    current = tty_device.resolve(strict=True)
+    interface: str | None = None
+    serial: str | None = None
+    for parent in (current, *current.parents):
+        interface_path = parent / "bInterfaceNumber"
+        serial_path = parent / "serial"
+        if interface is None and interface_path.is_file():
+            interface = interface_path.read_text(encoding="ascii").strip().zfill(2)
+        if serial is None and serial_path.is_file():
+            serial = serial_path.read_text(encoding="ascii").strip()
+        if interface is not None and serial is not None:
+            break
+    if interface is None or serial is None:
+        raise ValueError("USB serial/interface identity is unavailable in sysfs")
+    return LinuxUsbIdentity(
+        serial_number=serial,
+        interface_number=interface,
+        resolved_tty=str(resolved),
+    )
+
+
+def _challenge(
+    config: HardwareIdentificationConfig,
+    *,
+    config_hash: str,
+    manifest_hash: str,
+    evidence_hash: str,
+) -> PowerEnableChallenge:
+    issued_at = datetime.now(UTC)
+    issued_ns = time.monotonic_ns()
+    expires_ns = issued_ns + config.power_enable_challenge_ttl_ms * 1_000_000
+    values = {
+        "challenge_id": secrets.token_urlsafe(32),
+        "run_id": config.run_id,
+        "config_sha256": config_hash,
+        "manifest_sha256": manifest_hash,
+        "electrical_evidence_sha256": evidence_hash,
+        "issued_at": issued_at.isoformat(),
+        "issued_monotonic_ns": issued_ns,
+        "expires_monotonic_ns": expires_ns,
+    }
+    digest = _sha256_bytes(
+        json.dumps(values, sort_keys=True, separators=(",", ":")).encode()
+    )
+    return PowerEnableChallenge(
+        challenge_id=str(values["challenge_id"]),
+        run_id=str(values["run_id"]),
+        config_sha256=str(values["config_sha256"]),
+        manifest_sha256=str(values["manifest_sha256"]),
+        electrical_evidence_sha256=str(values["electrical_evidence_sha256"]),
+        issued_at=issued_at,
+        issued_monotonic_ns=issued_ns,
+        expires_monotonic_ns=expires_ns,
+        challenge_sha256=digest,
+    )
+
+
+def prepare_hardware_identification(
+    *,
+    config_path: str | Path,
+    manifest_path: str | Path,
+    approval: HardwareApproval | None,
+    attestation: HardwarePreflightAttestation,
+    enable_hardware: bool,
+) -> PreparedHardwareRun:
+    """Perform power-off gates and read-only device preflight, then pause."""
+
+    # Each mutable input is read exactly once; all later work uses these bytes/objects.
+    config_bytes = Path(config_path).read_bytes()
+    manifest_bytes = Path(manifest_path).read_bytes()
+    config = HardwareIdentificationConfig.model_validate(
+        _yaml_mapping(config_bytes, "hardware identification config")
+    )
+    manifest = HardwareManifest.model_validate(
+        _yaml_mapping(manifest_bytes, "hardware manifest")
+    )
+    if config.electrical_evidence_path.startswith(_PLACEHOLDER_PREFIX):
+        raise ValueError("reviewed electrical evidence path is unresolved")
+    evidence_bytes = Path(config.electrical_evidence_path).read_bytes()
+    evidence = ElectricalSafetyEvidence.model_validate(
+        _yaml_mapping(evidence_bytes, "electrical safety evidence")
+    )
+    electrical_source_bytes = Path(evidence.source).read_bytes()
+    if _sha256_bytes(electrical_source_bytes) != evidence.source_document_sha256:
+        raise ValueError("electrical evidence source document checksum mismatch")
+    config_hash = _sha256_bytes(config_bytes)
+    manifest_hash = _sha256_bytes(manifest_bytes)
+    evidence_hash = _sha256_bytes(evidence_bytes)
+    now_wall, now_ns = datetime.now(UTC), time.monotonic_ns()
+    if not enable_hardware:
+        raise ValueError("explicit --enable-hardware flag is required")
+    token = config.enable_token.get_secret_value()
+    if any(
+        value.startswith(_PLACEHOLDER_PREFIX)
+        for value in (
+            config.run_id,
+            config.approval_id,
+            token,
+            config.electrical_evidence_sha256,
+        )
+    ):
+        raise ValueError("repository hardware config contains a REQUIRED placeholder")
+    if approval is None:
+        raise ValueError("run-specific operator approval is required")
+    if (
+        approval.run_id != config.run_id
+        or approval.approval_id != config.approval_id
+        or approval.enable_token.get_secret_value() != token
+    ):
+        raise ValueError("approval identity or enable token mismatch")
+    if (
+        approval.config_sha256 != config_hash
+        or approval.manifest_sha256 != manifest_hash
+        or approval.electrical_evidence_sha256 != evidence_hash
+        or config.electrical_evidence_sha256 != evidence_hash
+    ):
+        raise ValueError("approval or electrical evidence checksum mismatch")
+    expected = expected_confirmation(
+        config.run_id, config_hash, manifest_hash, evidence_hash
+    )
+    if approval.confirmation_text != expected:
+        raise ValueError("approval confirmation does not bind exact hashes")
+    _fresh(
+        wall=approval.approved_at,
+        monotonic_ns=approval.approved_monotonic_ns,
+        now_wall=now_wall,
+        now_ns=now_ns,
+        max_age_ns=config.safety_limits.approval_max_age_ns,
+        label="operator approval",
+    )
+    _fresh(
+        wall=attestation.observed_at,
+        monotonic_ns=attestation.observed_monotonic_ns,
+        now_wall=now_wall,
+        now_ns=now_ns,
+        max_age_ns=config.safety_limits.preflight_max_age_ns,
+        label="preflight attestation",
+    )
+    if approval.approved_monotonic_ns < attestation.observed_monotonic_ns:
+        raise ValueError("operator approval must follow the preflight attestation")
+    if approval.operator_acknowledgment != _APPROVAL_ACK:
+        raise ValueError("operator approval acknowledgment mismatch")
+    if attestation.operator_acknowledgment != _PREFLIGHT_ACK:
+        raise ValueError("preflight acknowledgment mismatch")
+    if attestation.run_id != config.run_id:
+        raise ValueError("preflight run identity mismatch")
+    evidence_age = now_wall - evidence.reviewed_at
+    if evidence_age < timedelta(0):
+        raise ValueError("electrical safety evidence review is in the future")
+    if evidence_age >= timedelta(days=config.electrical_review_max_age_days):
+        raise ValueError("electrical safety evidence review is stale")
+    if manifest_hash != config.hardware_manifest_sha256:
+        raise ValueError("hardware manifest file checksum mismatch")
+    if manifest.canonical_sha256 != config.hardware_manifest_canonical_sha256:
+        raise ValueError("hardware manifest canonical checksum mismatch")
+    if manifest.calibration_sha256 != config.calibration_sha256:
+        raise ValueError("calibration checksum mismatch")
+    if config.stable_device_path != manifest.controller.command_device_path:
+        raise ValueError("stable device path mismatch")
+    identity = _resolve_linux_usb_identity(config.stable_device_path)
+    if (
+        identity.serial_number != config.expected_controller_serial
+        or identity.interface_number != config.expected_usb_interface
+    ):
+        raise ValueError("actual USB identity does not match reviewed identity")
+
+    supervisor = SafetySupervisor(
+        manifest=manifest, limits=config.safety_limits, clock=time.monotonic_ns
+    )
+    adapter = MaestroAdapter(
+        manifest=manifest,
+        stable_device_path=config.stable_device_path,
+        expected_controller_serial=config.expected_controller_serial,
+        required_enable_token=token,
+        clock=time.monotonic_ns,
+        permit_verifier=supervisor.actuation_permit_verifier,
+        settle_timeout_ns=config.controller_settle_ms * 1_000_000,
+    )
+    try:
+        adapter.open(token)
+        snapshot = adapter.read_only_preflight(config.actuator_names)
+        home_ok = all(
+            abs(snapshot.positions_qus[name] - manifest.actuator(name).home_qus)
+            <= config.home_tolerance_qus
+            for name in config.actuator_names
+        )
+        preflight = PreflightEvidence(
+            run_id=config.run_id,
+            hardware_id=manifest.hardware_id,
+            calibration_sha256=manifest.calibration_sha256,
+            controller_serial=identity.serial_number,
+            requirement_results=attestation.requirement_results,
+            competing_process_detected=False,
+            controller_error_codes=(
+                (snapshot.controller_error_register,)
+                if snapshot.controller_error_register
+                else ()
+            ),
+            home_verified=home_ok,
+            observed_monotonic_ns=snapshot.observed_monotonic_ns,
+        )
+        result = supervisor.preflight(preflight)
+        if not result.accepted or result.state is not RunState.PREFLIGHT:
+            raise RuntimeError("device-reading preflight rejected")
+        return PreparedHardwareRun(
+            challenge=_challenge(
+                config,
+                config_hash=config_hash,
+                manifest_hash=manifest_hash,
+                evidence_hash=evidence_hash,
+            ),
+            config=config,
+            config_bytes=config_bytes,
+            manifest=manifest,
+            manifest_bytes=manifest_bytes,
+            electrical_evidence=evidence,
+            electrical_evidence_bytes=evidence_bytes,
+            electrical_source_bytes=electrical_source_bytes,
+            approval=approval,
+            preflight=preflight,
+            supervisor=supervisor,
+            adapter=adapter,
+        )
+    except BaseException:
+        try:
+            supervisor.revoke_external_authority("hardware preparation failed")
+        except Exception:
+            pass
+        try:
+            adapter.close()
+        except Exception:
+            pass
+        raise
+
+
+def _validate_power_confirmation(
+    challenge: PowerEnableChallenge,
+    confirmation: PowerEnableConfirmation,
+    *,
+    now_wall: datetime,
+    now_ns: int,
+) -> None:
+    bindings = (
+        confirmation.run_id == challenge.run_id
+        and confirmation.challenge_id == challenge.challenge_id
+        and confirmation.config_sha256 == challenge.config_sha256
+        and confirmation.manifest_sha256 == challenge.manifest_sha256
+        and confirmation.electrical_evidence_sha256
+        == challenge.electrical_evidence_sha256
+        and confirmation.challenge_sha256 == challenge.challenge_sha256
+    )
+    if not bindings:
+        raise ValueError("power confirmation is not bound to the prepared challenge")
+    if confirmation.confirmed_monotonic_ns < challenge.issued_monotonic_ns:
+        raise ValueError("power confirmation must occur after preparation")
+    if confirmation.confirmed_monotonic_ns >= challenge.expires_monotonic_ns:
+        raise ValueError("power confirmation is stale")
+    if now_ns >= challenge.expires_monotonic_ns:
+        raise ValueError("prepared power challenge expired")
+    if confirmation.confirmed_at < challenge.issued_at:
+        raise ValueError("power confirmation wall time predates preparation")
+    if confirmation.confirmed_at > now_wall:
+        raise ValueError("power confirmation timestamp is in the future")
+    if confirmation.operator_acknowledgment != _POWER_ACK:
+        raise ValueError("power enable acknowledgment mismatch")
 
 
 class _WatchedAdapter:
@@ -277,7 +707,7 @@ class _WatchedObserver:
         self._watchdog = watchdog
 
     @property
-    def provenance(self):  # type: ignore[no-untyped-def]
+    def provenance(self) -> IdentificationObserverProvenance:
         return self._observer.provenance
 
     def observe(self, *, run_id: str, step_id: str):  # type: ignore[no-untyped-def]
@@ -287,42 +717,119 @@ class _WatchedObserver:
         return result
 
 
-def run_hardware_identification(
-    *,
-    config_path: str | Path,
-    manifest_path: str | Path,
-    output_dir: Path,
-    observer: IdentificationObserver,
-    approval: HardwareApproval | None,
-    attestation: HardwarePreflightAttestation | None,
-    enable_hardware: bool,
-) -> ArtifactManifest:
-    """Trusted hardware root; no adapter, supervisor, transport, or clock seam."""
+def _artifact_record(path: str, payload: bytes) -> ArtifactRecord:
+    return ArtifactRecord(
+        path=path, sha256=_sha256_bytes(payload), size_bytes=len(payload)
+    )
 
-    if attestation is None:
-        raise ValueError("contemporaneous preflight attestation is required")
-    prepare_hardware_identification(
-        config_path=config_path,
-        manifest_path=manifest_path,
-        approval=approval,
-        attestation=attestation,
-        enable_hardware=enable_hardware,
+
+def _git_revision() -> str | None:
+    try:
+        value = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return value or None
+
+
+def _publish_unexpected_failure(
+    prepared: PreparedHardwareRun,
+    *,
+    confirmation: PowerEnableConfirmation,
+    output_dir: Path,
+    error: BaseException,
+) -> None:
+    config = prepared._config
+    failure_payload = json.dumps(
+        {
+            "schema_version": "hardware-failure/v1",
+            "run_id": config.run_id,
+            "error_type": type(error).__name__,
+            "config_sha256": prepared.challenge.config_sha256,
+            "manifest_sha256": prepared.challenge.manifest_sha256,
+            "electrical_evidence_sha256": (
+                prepared.challenge.electrical_evidence_sha256
+            ),
+            "challenge_sha256": prepared.challenge.challenge_sha256,
+            "approval": prepared._approval.model_dump(mode="json"),
+            "power_confirmation": confirmation.model_dump(mode="json"),
+            "electrical_evidence": prepared._electrical_evidence.model_dump(
+                mode="json"
+            ),
+        },
+        sort_keys=True,
+        indent=2,
+    ).encode()
+    artifacts = {
+        "hardware-failure.json": _artifact_record(
+            "hardware-failure.json", failure_payload
+        )
+    }
+    lock_path = Path("uv.lock")
+    manifest = ArtifactManifest(
+        schema_version="artifact-manifest/v1",
+        run_kind=RunKind.ACTUATOR_IDENTIFICATION,
+        run_id=config.run_id,
+        status=RunStatus.ABORTED,
+        started_at=prepared._started_at,
+        ended_at=datetime.now(UTC),
+        observation_count=0,
+        config=config.model_dump(mode="json"),
+        artifacts=artifacts,
+        git_revision=_git_revision(),
+        dependency_lock_path="uv.lock" if lock_path.is_file() else None,
+        dependency_lock_sha256=sha256_path(lock_path) if lock_path.is_file() else None,
+        python_version=platform.python_version(),
+        platform_system=platform.system() or "unknown",
+        platform_release=platform.release() or "unknown",
+        platform_machine=platform.machine() or "unknown",
+        camera_settings=NegotiatedCameraSettings.unavailable(),
+        aborted_reason="hardware identification aborted by unexpected process exit",
+        failure=FailureRecord(
+            category=FailureCategory.INTERRUPTED,
+            error_type=type(error).__name__,
+        ),
+        conclusion=None,
+        identification_metadata=IdentificationRunMetadata(
+            adapter_identity=prepared._adapter.identity,
+            observer=None,
+            expected_observer=config.observer,
+            safety_limits=config.safety_limits,
+            preflight=prepared._preflight,
+            approval=prepared._supervisor.operator_approval,
+            hardware_manifest_path=config.hardware_manifest_path,
+            hardware_manifest_sha256=prepared.challenge.manifest_sha256,
+            hardware_manifest_canonical_sha256=prepared._manifest.canonical_sha256,
+            calibration_sha256=prepared._manifest.calibration_sha256,
+            config_sha256=prepared.challenge.config_sha256,
+        ),
     )
-    assert approval is not None
-    config = load_hardware_identification_config(config_path)
-    manifest: HardwareManifest = load_manifest(manifest_path)
-    supervisor = SafetySupervisor(
-        manifest=manifest, limits=config.safety_limits, clock=time.monotonic_ns
-    )
-    adapter = MaestroAdapter(
-        manifest=manifest,
-        stable_device_path=manifest.controller.command_device_path,
-        expected_controller_serial=manifest.controller.serial_number,
-        required_enable_token=config.enable_token.get_secret_value(),
-        clock=time.monotonic_ns,
-        permit_verifier=supervisor.actuation_permit_verifier,
-        settle_timeout_ns=config.controller_settle_ms * 1_000_000,
-    )
+    files = {
+        "hardware-failure.json": failure_payload,
+        "manifest.json": json.dumps(
+            manifest.model_dump(mode="json"), sort_keys=True, indent=2
+        ).encode(),
+    }
+    publish_generation(output_dir.parent.resolve(), output_dir.name, files)
+
+
+def execute_prepared_hardware_identification(
+    *,
+    prepared: PreparedHardwareRun,
+    observer: IdentificationObserver,
+    output_dir: Path,
+    confirmation: PowerEnableConfirmation,
+) -> ArtifactManifest:
+    """Consume a prepared session only after a new, bound power-on confirmation."""
+
+    prepared._consume()
+    config = prepared._config
+    supervisor = prepared._supervisor
+    adapter = prepared._adapter
     watchdog = IndependentHardwareWatchdog(
         timeout_seconds=config.independent_watchdog_ms / 1_000,
         revoke=lambda: supervisor.revoke_external_authority(
@@ -331,37 +838,17 @@ def run_hardware_identification(
         close=adapter.close,
     )
     try:
-        # Opening is delayed until every non-device gate above has passed.
-        adapter.open(approval.enable_token.get_secret_value())
-        snapshot = adapter.read_only_preflight(config.actuator_names)
-        home_ok = all(
-            abs(snapshot.positions_qus[name] - manifest.actuator(name).home_qus)
-            <= config.home_tolerance_qus
-            for name in config.actuator_names
+        _validate_power_confirmation(
+            prepared.challenge,
+            confirmation,
+            now_wall=datetime.now(UTC),
+            now_ns=time.monotonic_ns(),
         )
-        evidence = PreflightEvidence(
-            run_id=config.run_id,
-            hardware_id=manifest.hardware_id,
-            calibration_sha256=manifest.calibration_sha256,
-            controller_serial=manifest.controller.serial_number,
-            requirement_results=attestation.requirement_results,
-            competing_process_detected=not attestation.no_competing_processes,
-            controller_error_codes=(
-                (snapshot.controller_error_register,)
-                if snapshot.controller_error_register
-                else ()
-            ),
-            home_verified=home_ok,
-            observed_monotonic_ns=snapshot.observed_monotonic_ns,
-        )
-        preflight = supervisor.preflight(evidence)
-        if not preflight.accepted:
-            raise RuntimeError("device-reading preflight rejected")
         armed = supervisor.arm(
             OperatorApproval(
-                approval_id=approval.approval_id,
+                approval_id=prepared._approval.approval_id,
                 run_id=config.run_id,
-                confirmed_monotonic_ns=time.monotonic_ns(),
+                confirmed_monotonic_ns=confirmation.confirmed_monotonic_ns,
             )
         )
         if not armed.accepted or armed.state is not RunState.ARMED:
@@ -375,12 +862,36 @@ def run_hardware_identification(
             output_dir=output_dir,
             clock=time.monotonic_ns,
             sleeper=time.sleep,
+            retained_manifest=prepared._manifest,
+            retained_manifest_sha256=prepared.challenge.manifest_sha256,
         )
-    except BaseException:
-        supervisor.revoke_external_authority(
-            "hardware composition exited exceptionally; position may be unknown"
-        )
+    except BaseException as error:
+        try:
+            supervisor.revoke_external_authority(
+                "hardware execution failed; physical command state may be unknown"
+            )
+        except Exception:
+            pass
+        try:
+            _publish_unexpected_failure(
+                prepared,
+                confirmation=confirmation,
+                output_dir=output_dir,
+                error=error,
+            )
+        except Exception:
+            pass
         raise
     finally:
-        watchdog.stop()
-        adapter.close()
+        try:
+            watchdog.stop()
+        except Exception:
+            pass
+        try:
+            adapter.close()
+        except Exception:
+            pass
+
+
+def cancel_prepared_hardware_identification(prepared: PreparedHardwareRun) -> None:
+    prepared.cancel()

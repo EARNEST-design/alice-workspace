@@ -2,12 +2,16 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from alice.experiments.hardware_cli import main
 
 ROOT = Path(__file__).parents[2]
 
 
-def test_cli_defaults_to_dry_run_and_cannot_execute_set_target(capsys: object) -> None:
+def test_cli_defaults_to_dry_run_and_reports_electrical_blocker(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     result = main(
         [
             "--config",
@@ -18,6 +22,9 @@ def test_cli_defaults_to_dry_run_and_cannot_execute_set_target(capsys: object) -
     )
 
     assert result == 0
+    output = capsys.readouterr().out
+    assert "mode=dry-run" in output
+    assert "electrical_evidence=unresolved" in output
 
 
 def test_cli_refuses_enable_without_interactive_confirmation(capsys: object) -> None:

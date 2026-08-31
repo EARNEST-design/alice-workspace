@@ -39,7 +39,7 @@ from alice.experiments.manifest import (
     RunStatus,
 )
 from alice.hardware.adapter import ActuatorAdapter
-from alice.hardware.manifest import load_manifest
+from alice.hardware.manifest import HardwareManifest, load_manifest
 from alice.hardware.mock_adapter import MockActuatorAdapter, MockAdapterScript
 from alice.safety.supervisor import (
     AbortReason,
@@ -290,6 +290,8 @@ def _run_identification_core(
     output_dir: Path,
     clock: Callable[[], int],
     sleeper: Callable[[float], object],
+    retained_manifest: HardwareManifest | None = None,
+    retained_manifest_sha256: str | None = None,
 ) -> ArtifactManifest:
     """Run the deterministic sequence for a trusted composition root.
 
@@ -324,6 +326,8 @@ def _run_identification_core(
             config=config,
             supervisor=supervisor,
             observer=runtime_observer,
+            retained_manifest=retained_manifest,
+            retained_manifest_sha256=retained_manifest_sha256,
         )
     runtime_identity = adapter.identity
     if composition_problem is not None:
@@ -504,6 +508,8 @@ def _composition_problem(
     config: IdentificationConfig,
     supervisor: SafetySupervisor,
     observer: IdentificationObserverProvenance,
+    retained_manifest: HardwareManifest | None = None,
+    retained_manifest_sha256: str | None = None,
 ) -> tuple[str, str, FailureCategory] | None:
     if observer != config.observer:
         return (
@@ -520,22 +526,32 @@ def _composition_problem(
             "supervisor manifest differs from config",
             FailureCategory.SAFETY_ERROR,
         )
-    manifest_path = Path(config.hardware_manifest_path)
-    if not manifest_path.is_file():
-        return (
-            "manifest-file-missing",
-            "configured hardware manifest does not exist",
-            FailureCategory.SAFETY_ERROR,
-        )
-    try:
-        manifest_sha256 = sha256_path(manifest_path)
-        configured_manifest = load_manifest(manifest_path)
-    except (OSError, ValueError):
-        return (
-            "manifest-file-invalid",
-            "configured hardware manifest could not be read and validated",
-            FailureCategory.SAFETY_ERROR,
-        )
+    if retained_manifest is not None or retained_manifest_sha256 is not None:
+        if retained_manifest is None or retained_manifest_sha256 is None:
+            return (
+                "retained-manifest-incomplete",
+                "trusted composition supplied incomplete retained manifest evidence",
+                FailureCategory.SAFETY_ERROR,
+            )
+        configured_manifest = retained_manifest
+        manifest_sha256 = retained_manifest_sha256
+    else:
+        manifest_path = Path(config.hardware_manifest_path)
+        if not manifest_path.is_file():
+            return (
+                "manifest-file-missing",
+                "configured hardware manifest does not exist",
+                FailureCategory.SAFETY_ERROR,
+            )
+        try:
+            manifest_sha256 = sha256_path(manifest_path)
+            configured_manifest = load_manifest(manifest_path)
+        except (OSError, ValueError):
+            return (
+                "manifest-file-invalid",
+                "configured hardware manifest could not be read and validated",
+                FailureCategory.SAFETY_ERROR,
+            )
     if manifest_sha256 != config.hardware_manifest_sha256:
         return (
             "manifest-file-hash-mismatch",

@@ -8,8 +8,12 @@ hardware_manifest_sha256: 626a37d265bc7f2b055682cc1b1d287b1f0d659040d60ef4e5634e
 hardware_manifest_canonical_sha256: f1f2b5562112a98fdae473d02bd381be3c793e069f03bebdb55a13a5348cf54e
 stable_device_path: /dev/serial/by-id/usb-Pololu_Corporation_Pololu_Mini_Maestro_12-Channel_USB_Servo_Controller_00037376-if00
 expected_controller_serial: "00037376"
+expected_usb_interface: "00"
 approval_id: REQUIRED_RUN_SPECIFIC_APPROVAL_ID
 enable_token: REQUIRED_RUN_SPECIFIC_ENABLE_TOKEN
+electrical_evidence_path: REQUIRED_REVIEWED_ELECTRICAL_EVIDENCE_PATH
+electrical_evidence_sha256: REQUIRED_ELECTRICAL_EVIDENCE_SHA256
+electrical_review_max_age_days: 365
 actuator_names: [mouth_open]
 offsets: [0.05, -0.05]
 samples_per_step: 10
@@ -21,6 +25,7 @@ step_timeout_ms: 10000
 command_ttl_ms: 500
 home_tolerance_qus: 12
 independent_watchdog_ms: 2500
+power_enable_challenge_ttl_ms: 30000
 maximum_visual_variance: 0.01
 home_delta_tolerances: {jawOpen: 0.01}
 recovery_timeout_ms: 10000
