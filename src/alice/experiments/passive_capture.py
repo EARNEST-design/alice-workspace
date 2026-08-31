@@ -62,6 +62,7 @@ class PassiveCaptureConfig(BaseModel):
 
     run_id: NonEmptyString
     camera_id: NonEmptyString
+    camera_device: NonEmptyString | None = None
     requested_width: int = Field(gt=0)
     requested_height: int = Field(gt=0)
     requested_fps: int = Field(gt=0)

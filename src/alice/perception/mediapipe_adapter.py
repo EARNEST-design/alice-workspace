@@ -180,3 +180,9 @@ class MediaPipeBlendshapeAdapter:
             invalid_reason=None,
             scores=scores,
         )
+
+    def close(self) -> None:
+        """Release the underlying MediaPipe task when this adapter owns it."""
+
+        if isinstance(self.detector, MediaPipeTaskDetector):
+            self.detector.close()
