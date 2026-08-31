@@ -12,6 +12,7 @@ class FakeCamera:
         self._index = 0
         self.opened = False
         self.closed = False
+        self.close_count = 0
 
     def open(self) -> None:
         self.opened = True
@@ -22,6 +23,7 @@ class FakeCamera:
         return frame
 
     def close(self) -> None:
+        self.close_count += 1
         self.closed = True
 
 
@@ -30,6 +32,7 @@ class FakePreviewDetector:
         self._detections = detections
         self._index = 0
         self.closed = False
+        self.close_count = 0
         self.rgb_inputs: list[np.ndarray] = []
 
     def detect_preview(self, rgb: np.ndarray) -> PreviewDetection:
@@ -39,6 +42,7 @@ class FakePreviewDetector:
         return detection
 
     def close(self) -> None:
+        self.close_count += 1
         self.closed = True
 
 
@@ -122,7 +126,9 @@ def test_run_preview_draws_mesh_and_top_scores_until_q() -> None:
 
     assert camera.opened is True
     assert camera.closed is True
+    assert camera.close_count == 1
     assert detector.closed is True
+    assert detector.close_count == 1
     assert drawer.mesh_calls == [((0.25, 0.5), (0.75, 0.5))]
     assert drawer.score_calls == [(
         ("browInnerUp", 0.3),

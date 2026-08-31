@@ -97,6 +97,20 @@ def _default_preview_detector_factory(*, model_path: Path) -> MediaPipeTaskDetec
     return MediaPipeTaskDetector.from_model_path(model_path)
 
 
+def _run_cli_preview(
+    frame_source: Any,
+    detector: Any,
+    *,
+    window_title: str,
+) -> None:
+    run_preview(
+        frame_source,
+        detector,
+        window_title=window_title,
+        owns_resources=False,
+    )
+
+
 def _validate_phase_1_preview_camera_device(device: str) -> str:
     validated_device = validate_camera_device_selector(device)
     if validated_device != PHASE_1_PREVIEW_CAMERA_DEVICE:
@@ -115,7 +129,7 @@ def main(
     camera_factory: Callable[..., Any] = OpenCVCamera,
     observer_factory: Callable[..., Any] = MediaPipeBlendshapeAdapter,
     capture_runner: Callable[..., ArtifactManifest] = run_passive_capture,
-    preview_runner: Callable[..., None] = run_preview,
+    preview_runner: Callable[..., None] = _run_cli_preview,
     preview_detector_factory: Callable[..., Any] | None = None,
 ) -> int:
     output = stdout if stdout is not None else sys.stdout

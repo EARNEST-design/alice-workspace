@@ -120,8 +120,9 @@ def run_preview(
     top_score_count: int = 5,
     key_delay_ms: int = 1,
     window_title: str = "alice-camera preview",
+    owns_resources: bool = True,
 ) -> None:
-    """Render a live preview until the operator presses q."""
+    """Render a live preview, closing inputs by default, until q is pressed."""
 
     preview_drawer = drawer or OpenCVPreviewDrawer()
     preview_window = window or OpenCVPreviewWindow()
@@ -161,8 +162,8 @@ def run_preview(
     except BaseException as error:
         body_error = error
     close_error = _close_preview_resources(
-        frame_source,
-        detector,
+        frame_source if owns_resources else None,
+        detector if owns_resources else None,
         preview_window if should_destroy_window else None,
         window_title=window_title,
     )

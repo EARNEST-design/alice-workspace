@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 from alice.experiments.passive_capture import PassiveCaptureConfig
@@ -89,12 +90,14 @@ class FakeCamera:
         self.kwargs = kwargs
         self.opened = False
         self.closed = False
+        self.close_count = 0
         self.close_error: RuntimeError | None = None
 
     def open(self) -> None:
         self.opened = True
 
     def close(self) -> None:
+        self.close_count += 1
         if self.close_error is not None:
             raise self.close_error
         self.closed = True
@@ -104,9 +107,11 @@ class FakeObserver:
     def __init__(self, **kwargs: object) -> None:
         self.kwargs = kwargs
         self.closed = False
+        self.close_count = 0
         self.close_error: RuntimeError | None = None
 
     def close(self) -> None:
+        self.close_count += 1
         if self.close_error is not None:
             raise self.close_error
         self.closed = True
@@ -261,6 +266,7 @@ def test_capture_command_closes_resources_when_run_store_fails(
         )
 
     assert camera.closed is True
+    assert camera.close_count == 1
     assert observer.closed is True
 
 
@@ -508,6 +514,61 @@ def test_preview_command_closes_camera_when_detector_factory_fails_on_default_ru
         )
 
     assert camera.closed is True
+    assert camera.close_count == 1
+
+
+def test_preview_command_default_runner_closes_cli_owned_resources_once(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from alice.perception import preview as preview_module
+
+    model_path = tmp_path / "face_landmarker.task"
+    model_path.write_bytes(b"model")
+
+    class CountingPreviewCamera(FakeCamera):
+        def __init__(self) -> None:
+            super().__init__()
+
+        def read(self) -> object:
+            return SimpleNamespace(bgr=np.zeros((3, 4, 3), dtype=np.uint8))
+
+    class CountingPreviewDetector(FakeObserver):
+        def __init__(self) -> None:
+            super().__init__(model_path=model_path)
+
+        def detect_preview(self, _rgb: np.ndarray) -> object:
+            return SimpleNamespace(face_confidence=None, scores=(), landmarks=())
+
+    class QuitPreviewWindow:
+        def show(self, _title: str, _frame: np.ndarray) -> None:
+            pass
+
+        def wait_key(self, _delay_ms: int) -> int:
+            return ord("q")
+
+        def destroy(self, _title: str) -> None:
+            pass
+
+    camera = CountingPreviewCamera()
+    detector = CountingPreviewDetector()
+    monkeypatch.setattr(preview_module, "OpenCVPreviewWindow", QuitPreviewWindow)
+
+    exit_code = main(
+        [
+            "preview",
+            ALICE_PHASE_1_PREVIEW_DEVICE,
+            "--model-path",
+            str(model_path),
+        ],
+        stdout=io.StringIO(),
+        camera_factory=lambda **_kwargs: camera,
+        preview_detector_factory=lambda **_kwargs: detector,
+    )
+
+    assert exit_code == 0
+    assert camera.close_count == 1
+    assert detector.close_count == 1
 
 
 def test_preview_command_closes_cli_owned_resources_after_custom_runner_returns(
@@ -545,7 +606,9 @@ def test_preview_command_closes_cli_owned_resources_after_custom_runner_returns(
     assert exit_code == 0
     assert preview_calls == [(camera, detector, "Alice Preview")]
     assert camera.closed is True
+    assert camera.close_count == 1
     assert detector.closed is True
+    assert detector.close_count == 1
 
 
 def test_preview_command_preserves_runner_exception_and_closes_both_resources(
@@ -574,7 +637,9 @@ def test_preview_command_preserves_runner_exception_and_closes_both_resources(
         )
 
     assert camera.closed is True
+    assert camera.close_count == 1
     assert detector.closed is True
+    assert detector.close_count == 1
 
 
 def test_preview_command_closes_detector_when_camera_close_fails(
@@ -603,7 +668,9 @@ def test_preview_command_closes_detector_when_camera_close_fails(
             preview_runner=preview_runner,
         )
 
+    assert camera.close_count == 1
     assert detector.closed is True
+    assert detector.close_count == 1
     assert "cleanup failed: camera close failed" in getattr(
         error_info.value, "__notes__", []
     )
