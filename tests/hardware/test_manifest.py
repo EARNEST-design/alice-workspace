@@ -8,7 +8,7 @@ import pytest
 from pydantic import ValidationError
 
 from alice.contracts.actuation import PoseRequest
-from alice.hardware.manifest import load_manifest
+from alice.hardware.manifest import ControllerIdentity, load_manifest
 
 MANIFEST_PATH = Path(__file__).parents[2] / "hardware" / "alice-face-v1.yaml"
 
@@ -17,6 +17,7 @@ def request_for(
     *,
     actuator_name: str = "mouth_open",
     calibration_sha256: str | None = None,
+    issued_monotonic_ns: int = 1_000,
     expires_monotonic_ns: int = 2_000,
 ) -> PoseRequest:
     manifest = load_manifest(MANIFEST_PATH)
@@ -26,7 +27,7 @@ def request_for(
         run_id="run-001",
         hardware_id=manifest.hardware_id,
         calibration_sha256=calibration_sha256 or manifest.calibration_sha256,
-        issued_monotonic_ns=1_000,
+        issued_monotonic_ns=issued_monotonic_ns,
         expires_monotonic_ns=expires_monotonic_ns,
         targets=(
             {
@@ -135,6 +136,54 @@ def test_manifest_rejects_expired_request() -> None:
 
     with pytest.raises(ValueError, match="expired"):
         manifest.validate_request(request_for(), now_monotonic_ns=2_000)
+
+
+def test_manifest_rejects_request_issued_in_the_future() -> None:
+    """Skipping the lower freshness bound would admit impossible future commands."""
+
+    manifest = load_manifest(MANIFEST_PATH)
+
+    with pytest.raises(ValueError, match="issued in the future"):
+        manifest.validate_request(request_for(), now_monotonic_ns=999)
+
+
+def test_manifest_accepts_request_at_its_issue_time_boundary() -> None:
+    """The issue timestamp itself is the inclusive lower validity boundary."""
+
+    manifest = load_manifest(MANIFEST_PATH)
+
+    manifest.validate_request(request_for(), now_monotonic_ns=1_000)
+
+
+def test_calibration_hash_binds_controller_serial_identity() -> None:
+    """Changing controller identity must invalidate commands bound to calibration."""
+
+    manifest = load_manifest(MANIFEST_PATH)
+    changed = manifest.model_copy(
+        update={
+            "controller": ControllerIdentity(
+                kind="pololu-maestro", serial_number="different-controller"
+            )
+        }
+    )
+
+    assert changed.calibration_sha256 != manifest.calibration_sha256
+
+
+@pytest.mark.parametrize("field", ["firmware_speed", "firmware_acceleration"])
+def test_calibration_hash_binds_firmware_motion_limit(field: str) -> None:
+    """Changing controller-side slew limits must invalidate bound commands."""
+
+    manifest = load_manifest(MANIFEST_PATH)
+    actuator = manifest.actuators[0]
+    changed_actuator = actuator.model_copy(
+        update={field: getattr(actuator, field) + 1}
+    )
+    changed = manifest.model_copy(
+        update={"actuators": (changed_actuator, *manifest.actuators[1:])}
+    )
+
+    assert changed.calibration_sha256 != manifest.calibration_sha256
 
 
 def test_manifest_rejects_calibration_hash_mismatch() -> None:

@@ -7,7 +7,12 @@ import math
 import pytest
 from pydantic import ValidationError
 
-from alice.contracts.actuation import ActuatorTarget, PoseRequest
+from alice.contracts.actuation import (
+    ActuatorStatus,
+    ActuatorStatusState,
+    ActuatorTarget,
+    PoseRequest,
+)
 
 CALIBRATION_SHA256 = "a" * 64
 
@@ -25,6 +30,23 @@ def make_request(**overrides: object) -> PoseRequest:
     }
     values.update(overrides)
     return PoseRequest.model_validate(values)
+
+
+def make_status(**overrides: object) -> ActuatorStatus:
+    values: dict[str, object] = {
+        "schema_version": "actuator-status/v1",
+        "request_id": "request-001",
+        "run_id": "run-001",
+        "hardware_id": "alice-face-v1",
+        "calibration_sha256": CALIBRATION_SHA256,
+        "reported_monotonic_ns": 1_500,
+        "state": ActuatorStatusState.APPLIED,
+        "applied_targets": (
+            {"actuator_name": "mouth_open", "normalized_position": 0.0},
+        ),
+    }
+    values.update(overrides)
+    return ActuatorStatus.model_validate(values)
 
 
 @pytest.mark.parametrize("value", [math.nan, math.inf, -math.inf])
@@ -62,3 +84,57 @@ def test_pose_request_reports_expiry_at_the_deadline() -> None:
     assert request.is_expired(now_monotonic_ns=1_999) is False
     assert request.is_expired(now_monotonic_ns=2_000) is True
 
+
+def test_applied_status_requires_at_least_one_applied_target() -> None:
+    """An empty success status must not claim that a requested pose was applied."""
+
+    with pytest.raises(ValidationError, match="applied status requires"):
+        make_status(applied_targets=())
+
+
+@pytest.mark.parametrize(
+    "state", [ActuatorStatusState.REJECTED, ActuatorStatusState.FAULT]
+)
+def test_non_applied_status_rejects_applied_targets(
+    state: ActuatorStatusState,
+) -> None:
+    """A failed status must not ambiguously claim that targets were applied."""
+
+    with pytest.raises(ValidationError, match="cannot carry applied_targets"):
+        make_status(state=state, fault_code="adapter-failure")
+
+
+def test_applied_status_rejects_fault_code() -> None:
+    """A success status carrying a fault must fail closed rather than be ambiguous."""
+
+    with pytest.raises(ValidationError, match="cannot carry a fault_code"):
+        make_status(fault_code="controller-error")
+
+
+@pytest.mark.parametrize(
+    "state", [ActuatorStatusState.REJECTED, ActuatorStatusState.FAULT]
+)
+def test_non_applied_status_requires_fault_code(state: ActuatorStatusState) -> None:
+    """A failed status must identify the rejecting or faulting condition."""
+
+    with pytest.raises(ValidationError, match="requires a fault_code"):
+        make_status(state=state, applied_targets=())
+
+
+@pytest.mark.parametrize(
+    "state", [ActuatorStatusState.REJECTED, ActuatorStatusState.FAULT]
+)
+def test_non_applied_status_accepts_fault_without_targets(
+    state: ActuatorStatusState,
+) -> None:
+    """A failed adapter result has one unambiguous fail-closed representation."""
+
+    status = make_status(
+        state=state,
+        applied_targets=(),
+        fault_code="adapter-failure",
+    )
+
+    assert status.state is state
+    assert status.applied_targets == ()
+    assert status.fault_code == "adapter-failure"

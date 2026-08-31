@@ -134,19 +134,36 @@ class HardwareManifest(BaseModel):
     def calibration_sha256(self) -> Sha256Hex:
         """Hash all fields which define semantic target-to-channel calibration."""
 
-        records = [
-            {
-                "channel": actuator.channel,
-                "firmware_max_qus": actuator.firmware_max_qus,
-                "firmware_min_qus": actuator.firmware_min_qus,
-                "home_qus": actuator.home_qus,
-                "name": actuator.name,
-                "software_max_qus": actuator.software_max_qus,
-                "software_min_qus": actuator.software_min_qus,
-            }
-            for actuator in sorted(self.actuators, key=lambda item: item.name)
-        ]
-        payload = json.dumps(records, sort_keys=True, separators=(",", ":")).encode()
+        calibration = {
+            "schema_version": self.schema_version,
+            "hardware_id": self.hardware_id,
+            "controller": {
+                "kind": self.controller.kind,
+                "serial_number": self.controller.serial_number,
+            },
+            "actuators": [
+                {
+                    "channel": actuator.channel,
+                    "decreasing_effect": actuator.decreasing_effect,
+                    "firmware_acceleration": actuator.firmware_acceleration,
+                    "firmware_max_qus": actuator.firmware_max_qus,
+                    "firmware_min_qus": actuator.firmware_min_qus,
+                    "firmware_speed": actuator.firmware_speed,
+                    "function": actuator.function,
+                    "home_qus": actuator.home_qus,
+                    "increasing_effect": actuator.increasing_effect,
+                    "inspection_required": actuator.inspection_required,
+                    "name": actuator.name,
+                    "preflight_requirement_ids": actuator.preflight_requirement_ids,
+                    "software_max_qus": actuator.software_max_qus,
+                    "software_min_qus": actuator.software_min_qus,
+                }
+                for actuator in sorted(self.actuators, key=lambda item: item.name)
+            ],
+        }
+        payload = json.dumps(
+            calibration, sort_keys=True, separators=(",", ":")
+        ).encode()
         return hashlib.sha256(payload).hexdigest()
 
     @property
@@ -166,6 +183,8 @@ class HardwareManifest(BaseModel):
             raise ValueError("hardware_id mismatch")
         if request.calibration_sha256 != self.calibration_sha256:
             raise ValueError("calibration_sha256 mismatch")
+        if request.issued_monotonic_ns > now_monotonic_ns:
+            raise ValueError("pose request was issued in the future")
         if request.is_expired(now_monotonic_ns=now_monotonic_ns):
             raise ValueError("pose request expired")
         for target in request.targets:

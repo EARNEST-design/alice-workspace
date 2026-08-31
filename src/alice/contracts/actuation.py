@@ -84,9 +84,15 @@ class ActuatorStatus(BaseModel):
         if len(names) != len(set(names)):
             raise ValueError("applied targets must have a unique actuator_name")
         if self.state is ActuatorStatusState.APPLIED:
+            if not self.applied_targets:
+                raise ValueError("an applied status requires applied_targets")
             if self.fault_code is not None:
                 raise ValueError("an applied status cannot carry a fault_code")
-        elif self.fault_code is None:
-            raise ValueError("a rejected or fault status requires a fault_code")
+        else:
+            if self.applied_targets:
+                raise ValueError(
+                    "a rejected or fault status cannot carry applied_targets"
+                )
+            if self.fault_code is None:
+                raise ValueError("a rejected or fault status requires a fault_code")
         return self
-
