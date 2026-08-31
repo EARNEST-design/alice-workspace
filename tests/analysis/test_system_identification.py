@@ -133,6 +133,46 @@ def test_within_session_variance_excludes_between_session_offsets() -> None:
     assert _cell(metrics.signal_to_noise, "jawOpen", "mouth_open").status == "undefined"
 
 
+def test_snr_uses_session_effects_and_rss_over_within_group_degrees_of_freedom() -> (
+    None
+):
+    samples: list[IdentificationSample] = []
+    for session in ("a", "b"):
+        for index, (position, phase, values) in enumerate(
+            (
+                (0.0, "home", (0.0, 0.0)),
+                (0.1, "positive", (1.0, 3.0)),
+                (0.0, "home", (0.0, 0.0)),
+                (-0.1, "negative", (-1.0, 1.0)),
+                (0.0, "home", (0.0, 0.0)),
+            ),
+            1,
+        ):
+            for value in values:
+                samples.append(
+                    IdentificationSample(
+                        session_id=session,
+                        step_id=f"{session}-{index}",
+                        sequence_index=index,
+                        actuator_name="mouth_open",
+                        normalized_position=position,
+                        phase=phase,
+                        blendshapes={"jawOpen": value},
+                    )
+                )
+
+    metrics = estimate_local_jacobian(samples)
+
+    assert metrics.snr_formula_revision == "session-effect-rss-pooled/v1"
+    assert "sum(n_group - 1)" in metrics.snr_formula
+    assert _cell(
+        metrics.within_position_noise_sd, "jawOpen", "mouth_open"
+    ).value == pytest.approx(2**0.5)
+    assert _cell(
+        metrics.signal_to_noise, "jawOpen", "mouth_open"
+    ).value == pytest.approx(1 / (2**0.5))
+
+
 def test_hysteresis_uses_absolute_direction_pairs_and_is_separate_from_home_drift() -> (
     None
 ):
@@ -180,7 +220,7 @@ def test_single_session_bootstrap_is_typed_unavailable_not_zero() -> None:
 
 
 def test_repeat_comparison_preserves_labels_and_missing_values() -> None:
-    reference = estimate_local_jacobian(_samples("a") + _samples("b"))
+    reference = estimate_local_jacobian(_samples("a"))
     repeat_samples = [
         sample.model_copy(
             update={
@@ -191,7 +231,7 @@ def test_repeat_comparison_preserves_labels_and_missing_values() -> None:
                 }
             }
         )
-        for sample in (_samples("c") + _samples("d"))
+        for sample in _samples("c")
     ]
     repeat = estimate_local_jacobian(repeat_samples)
 
@@ -206,7 +246,7 @@ def test_repeat_comparison_preserves_labels_and_missing_values() -> None:
 def test_repeatability_thresholds_fail_pass_and_require_reviewed_configuration() -> (
     None
 ):
-    reference = estimate_local_jacobian(_samples("a") + _samples("b"))
+    reference = estimate_local_jacobian(_samples("a"))
     shifted = [
         sample.model_copy(
             update={
@@ -217,7 +257,7 @@ def test_repeatability_thresholds_fail_pass_and_require_reviewed_configuration()
                 }
             }
         )
-        for sample in (_samples("c") + _samples("d"))
+        for sample in _samples("c")
     ]
     repeat = estimate_local_jacobian(shifted)
     strict = RepeatabilityThresholds.model_validate(
@@ -252,7 +292,7 @@ def test_repeatability_thresholds_fail_pass_and_require_reviewed_configuration()
 
 
 def test_repeatability_exceeded_check_dominates_another_missing_check() -> None:
-    reference = estimate_local_jacobian(_samples("a") + _samples("b"))
+    reference = estimate_local_jacobian(_samples("a"))
     repeat_samples = [
         sample.model_copy(
             update={
@@ -263,7 +303,7 @@ def test_repeatability_exceeded_check_dominates_another_missing_check() -> None:
                 }
             }
         )
-        for sample in (_samples("c") + _samples("d"))
+        for sample in _samples("c")
     ]
     repeat = estimate_local_jacobian(repeat_samples)
     thresholds = RepeatabilityThresholds.model_validate(
@@ -487,6 +527,19 @@ def _artifact_run(
         "maximum_recovery_attempts": 20,
         "random_seeds": [],
         "actuator_names": ["mouth_open"],
+        "observer": {
+            "camera_id": "camera",
+            "detector": "detector",
+            "detector_model_sha256": "a" * 64,
+            "camera_settings": {
+                name: {
+                    "availability": "unavailable",
+                    "value": None,
+                    "set_succeeded": None,
+                }
+                for name in ("width", "height", "fps", "focus", "exposure")
+            },
+        },
     }
     config_sha256 = hashlib.sha256(
         json.dumps(config, sort_keys=True, separators=(",", ":")).encode()
@@ -575,14 +628,21 @@ def _artifact_run(
 def test_artifact_analysis_verifies_inputs_and_publishes_immutable_generation(
     tmp_path: Path,
 ) -> None:
-    run = _artifact_run(tmp_path)
+    run = _artifact_run(tmp_path, run_id="run-a")
+    repeat = _artifact_run(tmp_path, run_id="run-b")
     metrics = analyze_identification_artifacts([run])
     assert _cell(metrics.jacobian, "jawOpen", "mouth_open").value == pytest.approx(2.0)
 
-    manifest, generation = publish_identification_analysis([run], tmp_path / "report")
+    manifest, generation = publish_identification_analysis(
+        reference_run_dir=run,
+        held_out_repeat_run_dir=repeat,
+        output_dir=tmp_path / "report",
+    )
     assert manifest.analysis_kind == "system_identification"
     assert manifest.bootstrap_seed == BOOTSTRAP_SEED
     assert manifest.config.bootstrap_seed == BOOTSTRAP_SEED
+    assert manifest.config.snr_formula_revision == "session-effect-rss-pooled/v1"
+    assert "sum(n_group - 1)" in manifest.config.snr_formula
     assert (
         manifest.config_sha256
         == hashlib.sha256(
@@ -598,7 +658,10 @@ def test_artifact_analysis_verifies_inputs_and_publishes_immutable_generation(
     assert (generation / "actuator-identification-conclusion.md").is_file()
     with pytest.raises(FileExistsError):
         publish_identification_analysis(
-            [run], tmp_path / "report", generation_id=manifest.generation_id
+            reference_run_dir=run,
+            held_out_repeat_run_dir=repeat,
+            output_dir=tmp_path / "report",
+            generation_id=manifest.generation_id,
         )
 
 
@@ -680,6 +743,43 @@ def test_artifact_analysis_rejects_incompatible_sessions(tmp_path: Path) -> None
         analyze_identification_artifacts([first, second])
 
 
+def test_artifact_analysis_refuses_pooling_different_negotiated_camera_state(
+    tmp_path: Path,
+) -> None:
+    first = _artifact_run(tmp_path, run_id="run-a")
+    second = _artifact_run(tmp_path, run_id="run-b")
+    manifest = json.loads((second / "manifest.json").read_text())
+    focus = {"availability": "available", "value": 22.0, "set_succeeded": True}
+    manifest["config"]["observer"]["camera_settings"]["focus"] = focus
+    manifest["identification_metadata"]["observer"]["camera_settings"]["focus"] = focus
+    manifest["identification_metadata"]["expected_observer"]["camera_settings"][
+        "focus"
+    ] = focus
+    manifest["camera_settings"]["focus"] = focus
+    manifest["identification_metadata"]["config_sha256"] = hashlib.sha256(
+        json.dumps(manifest["config"], sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    (second / "manifest.json").write_text(json.dumps(manifest))
+
+    with pytest.raises(ValueError, match="compatibility signature"):
+        analyze_identification_artifacts([first, second])
+
+
+def test_artifact_analysis_rejects_config_observer_identity_mismatch(
+    tmp_path: Path,
+) -> None:
+    run = _artifact_run(tmp_path)
+    manifest = json.loads((run / "manifest.json").read_text())
+    manifest["config"]["observer"]["camera_id"] = "unexpected-camera"
+    manifest["identification_metadata"]["config_sha256"] = hashlib.sha256(
+        json.dumps(manifest["config"], sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    (run / "manifest.json").write_text(json.dumps(manifest))
+
+    with pytest.raises(ValueError, match="observer provenance mismatch"):
+        analyze_identification_artifacts([run])
+
+
 @pytest.mark.parametrize(
     "artifact,mutation",
     (
@@ -717,7 +817,8 @@ def test_artifact_analysis_rejects_cross_artifact_contradictions(
 def test_publication_reads_each_input_manifest_once_and_hashes_exact_bytes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    run = _artifact_run(tmp_path)
+    run = _artifact_run(tmp_path, run_id="run-a")
+    repeat = _artifact_run(tmp_path, run_id="run-b")
     manifest_path = run / "manifest.json"
     original = manifest_path.read_bytes()
     real_read_bytes = Path.read_bytes
@@ -733,7 +834,11 @@ def test_publication_reads_each_input_manifest_once_and_hashes_exact_bytes(
 
     monkeypatch.setattr(Path, "read_bytes", counted_read)
 
-    manifest, _ = publish_identification_analysis([run], tmp_path / "report")
+    manifest, _ = publish_identification_analysis(
+        reference_run_dir=run,
+        held_out_repeat_run_dir=repeat,
+        output_dir=tmp_path / "report",
+    )
 
     assert reads == 1
     assert (
@@ -760,8 +865,9 @@ def test_publication_records_repeatability_thresholds_hash_and_outcome(
     )
 
     manifest, generation = publish_identification_analysis(
-        [first, second],
-        tmp_path / "report",
+        reference_run_dir=first,
+        held_out_repeat_run_dir=second,
+        output_dir=tmp_path / "report",
         repeatability_thresholds=thresholds,
     )
 
@@ -779,3 +885,36 @@ def test_publication_records_repeatability_thresholds_hash_and_outcome(
     assert manifest.conclusion.outcome == "pass"
     repeatability = json.loads((generation / "repeatability.json").read_text())
     assert repeatability["outcome"] == "pass"
+    assert repeatability["reference_run_id"] == "run-a"
+    assert repeatability["repeat_run_id"] == "run-b"
+    assert manifest.reference_run_id == "run-a"
+    assert manifest.held_out_repeat_run_id == "run-b"
+    assert manifest.conclusion.reference_run_id == "run-a"
+    assert manifest.conclusion.held_out_repeat_run_id == "run-b"
+
+
+def test_publication_roles_are_explicit_not_inferred_from_caller_order(
+    tmp_path: Path,
+) -> None:
+    first = _artifact_run(tmp_path, run_id="run-a")
+    second = _artifact_run(tmp_path, run_id="run-b")
+
+    manifest, generation = publish_identification_analysis(
+        reference_run_dir=second,
+        held_out_repeat_run_dir=first,
+        output_dir=tmp_path / "report",
+    )
+
+    assert manifest.reference_run_id == "run-b"
+    assert manifest.held_out_repeat_run_id == "run-a"
+    repeatability = json.loads((generation / "repeatability.json").read_text())
+    assert repeatability["group_assignments"] == [
+        {"role": "reference", "run_id": "run-b"},
+        {"role": "held_out_repeat", "run_id": "run-a"},
+    ]
+    with pytest.raises(ValueError, match="distinct"):
+        publish_identification_analysis(
+            reference_run_dir=first,
+            held_out_repeat_run_dir=first,
+            output_dir=tmp_path / "bad-report",
+        )

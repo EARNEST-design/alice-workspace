@@ -28,6 +28,8 @@ from alice.experiments.artifact_store import publish_generation
 from alice.experiments.manifest import (
     ArtifactManifest,
     ArtifactRecord,
+    IdentificationObserverProvenance,
+    NegotiatedCameraSettings,
     RunKind,
     RunStatus,
 )
@@ -41,6 +43,20 @@ BOOTSTRAP_SEED: Final[Literal[20260831]] = 20260831
 BOOTSTRAP_REPLICATES = 2000
 ANALYZER_REVISION: Final[Literal["system-identification/v1"]] = (
     "system-identification/v1"
+)
+SNR_FORMULA_REVISION: Final[Literal["session-effect-rss-pooled/v1"]] = (
+    "session-effect-rss-pooled/v1"
+)
+SNR_FORMULA: Final[str] = (
+    "signal = mean_session(abs(mean_positive_session - mean_negative_session) / 2); "
+    "noise_sd = sqrt(sum_group(sum((x - mean_group)^2)) / "
+    "sum(n_group - 1)); SNR = signal / noise_sd"
+)
+HYSTERESIS_DEFINITION: Final[str] = (
+    "Home-return hysteresis proxy: within each session, compare absolute mean "
+    "blendshape differences between Home immediately after the positive excursion "
+    "and Home immediately after the negative excursion. This is not a full "
+    "same-target bidirectional loop characterization."
 )
 
 
@@ -149,8 +165,12 @@ class IdentificationMetrics(BaseModel):
     between_session_baseline_variance: NamedMatrix
     position_variance: NamedMatrix
     between_session_position_variance: NamedMatrix
+    within_position_noise_sd: NamedMatrix
     signal_to_noise: NamedMatrix
+    snr_formula_revision: Literal["session-effect-rss-pooled/v1"]
+    snr_formula: NonEmptyString
     hysteresis: NamedMatrix
+    hysteresis_definition: NonEmptyString
     return_to_home_drift: NamedMatrix
     cross_effects: NamedMatrix
     actuator_coupling: NamedMatrix
@@ -169,6 +189,9 @@ class RepeatabilityResult(BaseModel):
     schema_version: Literal["identification-repeatability/v1"]
     reference_seed: int
     repeat_seed: int
+    reference_run_id: NonEmptyString
+    repeat_run_id: NonEmptyString
+    group_assignments: tuple[RunGroupAssignment, RunGroupAssignment]
     absolute_delta: NamedMatrix
     checks: tuple[RepeatabilityCheck, ...] = ()
     outcome: Literal["pass", "fail", "inconclusive"]
@@ -231,6 +254,12 @@ class RepeatabilityCheck(BaseModel):
         return self
 
 
+class RunGroupAssignment(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    run_id: NonEmptyString
+    role: Literal["reference", "held_out_repeat"]
+
+
 RepeatabilityResult.model_rebuild()
 
 
@@ -253,6 +282,9 @@ class IdentificationConclusion(BaseModel):
     outcome: Literal["pass", "fail", "inconclusive"]
     summary: NonEmptyString
     warnings: tuple[str, ...]
+    reference_run_id: NonEmptyString
+    held_out_repeat_run_id: NonEmptyString
+    group_assignments: tuple[RunGroupAssignment, RunGroupAssignment]
 
 
 class IdentificationAnalysisConfig(BaseModel):
@@ -262,6 +294,12 @@ class IdentificationAnalysisConfig(BaseModel):
     bootstrap_replicates: int = Field(gt=0)
     input_config_sha256: tuple[Sha256Hex, ...]
     repeatability_thresholds_sha256: Sha256Hex
+    snr_formula_revision: Literal["session-effect-rss-pooled/v1"]
+    snr_formula: NonEmptyString
+    hysteresis_definition: NonEmptyString
+    reference_run_id: NonEmptyString
+    held_out_repeat_run_id: NonEmptyString
+    group_assignments: tuple[RunGroupAssignment, RunGroupAssignment]
 
 
 class IdentificationCompatibilitySignature(BaseModel):
@@ -275,6 +313,7 @@ class IdentificationCompatibilitySignature(BaseModel):
     camera_id: NonEmptyString
     detector: NonEmptyString
     detector_model_sha256: Sha256Hex
+    camera_settings: NegotiatedCameraSettings
     observation_schema_version: Literal["blendshape-observation/v1"]
     actuator_names: tuple[NonEmptyString, ...]
     offsets: tuple[Annotated[float, Field(allow_inf_nan=False)], ...]
@@ -303,6 +342,9 @@ class IdentificationAnalysisManifest(BaseModel):
     config: IdentificationAnalysisConfig
     config_sha256: Sha256Hex
     bootstrap_seed: Literal[20260831]
+    reference_run_id: NonEmptyString
+    held_out_repeat_run_id: NonEmptyString
+    group_assignments: tuple[RunGroupAssignment, RunGroupAssignment]
     repeatability_thresholds: RepeatabilityThresholds | None
     repeatability_thresholds_sha256: Sha256Hex
     inputs: dict[NonEmptyString, AnalysisInput]
@@ -478,11 +520,34 @@ def estimate_local_jacobian(
     )
 
     snr_cells: list[MatrixCell] = []
+    noise_cells: list[MatrixCell] = []
     hysteresis_cells: list[MatrixCell] = []
     home_drift_cells: list[MatrixCell] = []
     for blendshape in blendshapes:
         for actuator in actuators:
             signal, noise = _effect_and_noise(samples, actuator, blendshape)
+            if noise is None:
+                noise_cells.append(
+                    _missing_cell(
+                        blendshape,
+                        actuator,
+                        (
+                            "within-session-position noise requires positive "
+                            "residual degrees of freedom"
+                        ),
+                    )
+                )
+            else:
+                noise_cells.append(
+                    _estimated_cell(
+                        blendshape,
+                        actuator,
+                        noise,
+                        uncertainty_reason=(
+                            "pooled noise confidence interval is not estimated"
+                        ),
+                    )
+                )
             if signal is None or noise is None:
                 snr_cells.append(
                     _missing_cell(
@@ -530,6 +595,9 @@ def estimate_local_jacobian(
             )
     snr = NamedMatrix(
         row_labels=blendshapes, column_labels=actuators, cells=tuple(snr_cells)
+    )
+    noise_sd = NamedMatrix(
+        row_labels=blendshapes, column_labels=actuators, cells=tuple(noise_cells)
     )
     hysteresis = NamedMatrix(
         row_labels=blendshapes, column_labels=actuators, cells=tuple(hysteresis_cells)
@@ -630,8 +698,12 @@ def estimate_local_jacobian(
         between_session_baseline_variance=between_baseline_variance,
         position_variance=position_variance,
         between_session_position_variance=between_position_variance,
+        within_position_noise_sd=noise_sd,
         signal_to_noise=snr,
+        snr_formula_revision=SNR_FORMULA_REVISION,
+        snr_formula=SNR_FORMULA,
         hysteresis=hysteresis,
+        hysteresis_definition=HYSTERESIS_DEFINITION,
         return_to_home_drift=home_drift,
         cross_effects=jacobian,
         actuator_coupling=coupling,
@@ -651,6 +723,19 @@ def compare_repeat_run(
     repeat: IdentificationMetrics,
     thresholds: RepeatabilityThresholds | None = None,
 ) -> RepeatabilityResult:
+    if len(reference.session_ids) != 1 or len(repeat.session_ids) != 1:
+        raise ValueError(
+            "repeatability requires exactly one reference run and one held-out "
+            "repeat run"
+        )
+    reference_run_id = reference.session_ids[0]
+    repeat_run_id = repeat.session_ids[0]
+    if reference_run_id == repeat_run_id:
+        raise ValueError("reference and held-out repeat run IDs must be distinct")
+    group_assignments = (
+        RunGroupAssignment(run_id=reference_run_id, role="reference"),
+        RunGroupAssignment(run_id=repeat_run_id, role="held_out_repeat"),
+    )
     rows = tuple(
         dict.fromkeys((*reference.jacobian.row_labels, *repeat.jacobian.row_labels))
     )
@@ -758,6 +843,9 @@ def compare_repeat_run(
         schema_version="identification-repeatability/v1",
         reference_seed=reference.bootstrap_seed,
         repeat_seed=repeat.bootstrap_seed,
+        reference_run_id=reference_run_id,
+        repeat_run_id=repeat_run_id,
+        group_assignments=group_assignments,
         absolute_delta=NamedMatrix(
             row_labels=rows, column_labels=columns, cells=tuple(cells)
         ),
@@ -786,55 +874,52 @@ def analyze_identification_artifacts(run_dirs: Sequence[Path]) -> Identification
 
 
 def publish_identification_analysis(
-    run_dirs: Sequence[Path],
-    output_dir: Path,
     *,
+    reference_run_dir: Path,
+    held_out_repeat_run_dir: Path,
+    output_dir: Path,
     generation_id: str | None = None,
     repeatability_thresholds: RepeatabilityThresholds | None = None,
 ) -> tuple[IdentificationAnalysisManifest, Path]:
-    verified = [(Path(path).resolve(), *_verified_run(path)) for path in run_dirs]
-    run_ids = [manifest.run_id for _, _, manifest, _ in verified]
-    if len(run_ids) != len(set(run_ids)):
-        raise ValueError("duplicate run_id in analysis inputs")
-    signatures = {
-        _canonical_model(_compatibility_signature(manifest))
-        for _, _, manifest, _ in verified
-    }
-    if len(signatures) != 1:
+    reference = (
+        reference_run_dir.resolve(),
+        *_verified_run(reference_run_dir),
+    )
+    repeat = (
+        held_out_repeat_run_dir.resolve(),
+        *_verified_run(held_out_repeat_run_dir),
+    )
+    reference_manifest = reference[2]
+    repeat_manifest = repeat[2]
+    if reference_manifest.run_id == repeat_manifest.run_id:
+        raise ValueError("reference and held-out repeat run IDs must be distinct")
+    if _compatibility_signature(reference_manifest) != _compatibility_signature(
+        repeat_manifest
+    ):
         raise ValueError("identification compatibility signature mismatch")
-    samples_by_run = [
-        _samples_from_artifacts(manifest, artifacts)
-        for _, _, manifest, artifacts in verified
-    ]
-    metrics = estimate_local_jacobian(
-        [sample for samples in samples_by_run for sample in samples]
+    reference_samples = _samples_from_artifacts(reference_manifest, reference[3])
+    repeat_samples = _samples_from_artifacts(repeat_manifest, repeat[3])
+    metrics = estimate_local_jacobian([*reference_samples, *repeat_samples])
+    repeatability = compare_repeat_run(
+        estimate_local_jacobian(reference_samples),
+        estimate_local_jacobian(repeat_samples),
+        repeatability_thresholds,
     )
-    repeatability = (
-        compare_repeat_run(
-            estimate_local_jacobian(samples_by_run[0]),
-            estimate_local_jacobian(
-                [sample for samples in samples_by_run[1:] for sample in samples]
-            ),
-            repeatability_thresholds,
-        )
-        if len(samples_by_run) >= 2
-        else None
-    )
-    outcome: Literal["pass", "fail", "inconclusive"] = (
-        repeatability.outcome if repeatability is not None else "inconclusive"
-    )
+    outcome = repeatability.outcome
     conclusion_warnings = tuple(
-        dict.fromkeys(
-            (*metrics.warnings, *((repeatability.warnings) if repeatability else ()))
-        )
+        dict.fromkeys((*metrics.warnings, *repeatability.warnings))
     )
     conclusion = IdentificationConclusion(
         outcome=outcome,
         summary=(
             "System-identification metrics and the configured repeatability gate "
-            f"produced outcome {outcome}."
+            f"for reference {reference_manifest.run_id} and held-out repeat "
+            f"{repeat_manifest.run_id} produced outcome {outcome}."
         ),
         warnings=conclusion_warnings,
+        reference_run_id=reference_manifest.run_id,
+        held_out_repeat_run_id=repeat_manifest.run_id,
+        group_assignments=repeatability.group_assignments,
     )
     template = (
         files("alice.resources")
@@ -851,11 +936,10 @@ def publish_identification_analysis(
         "conclusion.json": _pretty(conclusion.model_dump(mode="json")),
         "actuator-identification-conclusion.md": report.encode(),
     }
-    if repeatability is not None:
-        payloads["repeatability.json"] = _pretty(repeatability.model_dump(mode="json"))
+    payloads["repeatability.json"] = _pretty(repeatability.model_dump(mode="json"))
     inputs: dict[str, AnalysisInput] = {}
     config_hashes: list[str] = []
-    for _, raw_manifest, manifest, artifacts in verified:
+    for _, raw_manifest, manifest, artifacts in (reference, repeat):
         metadata = manifest.identification_metadata
         if metadata is None:  # enforced by ArtifactManifest, retained for typing
             raise ValueError("identification metadata is required")
@@ -873,8 +957,14 @@ def publish_identification_analysis(
         analyzer_revision=ANALYZER_REVISION,
         bootstrap_seed=BOOTSTRAP_SEED,
         bootstrap_replicates=BOOTSTRAP_REPLICATES,
-        input_config_sha256=tuple(sorted(config_hashes)),
+        input_config_sha256=tuple(config_hashes),
         repeatability_thresholds_sha256=threshold_sha256,
+        snr_formula_revision=SNR_FORMULA_REVISION,
+        snr_formula=SNR_FORMULA,
+        hysteresis_definition=HYSTERESIS_DEFINITION,
+        reference_run_id=reference_manifest.run_id,
+        held_out_repeat_run_id=repeat_manifest.run_id,
+        group_assignments=repeatability.group_assignments,
     )
     config_payload = json.dumps(
         analysis_config.model_dump(mode="json"),
@@ -897,6 +987,9 @@ def publish_identification_analysis(
         config=analysis_config,
         config_sha256=config_sha,
         bootstrap_seed=BOOTSTRAP_SEED,
+        reference_run_id=reference_manifest.run_id,
+        held_out_repeat_run_id=repeat_manifest.run_id,
+        group_assignments=repeatability.group_assignments,
         repeatability_thresholds=repeatability_thresholds,
         repeatability_thresholds_sha256=threshold_sha256,
         inputs=inputs,
@@ -927,6 +1020,22 @@ def _verified_run(
         raise ValueError("identification provenance is missing")
     if metadata.observer is None or metadata.observer != metadata.expected_observer:
         raise ValueError("runtime observer provenance is missing or mismatched")
+    try:
+        configured_observer = IdentificationObserverProvenance.model_validate(
+            manifest.config["observer"]
+        )
+    except (KeyError, ValueError) as exc:
+        raise ValueError(
+            "configured observer provenance is incomplete or invalid"
+        ) from exc
+    if (
+        configured_observer != metadata.expected_observer
+        or configured_observer != metadata.observer
+        or manifest.camera_settings != metadata.observer.camera_settings
+    ):
+        raise ValueError(
+            "configured, expected, and runtime observer provenance mismatch"
+        )
     try:
         config_identity_matches = (
             manifest.config["hardware_manifest_sha256"]
@@ -994,6 +1103,7 @@ def _compatibility_signature(
             camera_id=metadata.observer.camera_id,
             detector=metadata.observer.detector,
             detector_model_sha256=metadata.observer.detector_model_sha256,
+            camera_settings=metadata.observer.camera_settings,
             observation_schema_version="blendshape-observation/v1",
             actuator_names=tuple(config["actuator_names"]),
             offsets=tuple(config["offsets"]),
@@ -1013,10 +1123,6 @@ def _compatibility_signature(
         raise ValueError(
             "identification compatibility signature fields are missing or invalid"
         ) from exc
-
-
-def _canonical_model(model: BaseModel) -> bytes:
-    return _canonical_json(model.model_dump(mode="json"))
 
 
 def _canonical_json(value: object) -> bytes:
@@ -1391,30 +1497,40 @@ def _effect_and_noise(
             groups[(sample.session_id, sample.normalized_position)].append(
                 float(sample.blendshapes[blendshape])
             )
-    positive = [
-        value
-        for (session, position), values in groups.items()
-        if position > 0
-        for value in values
-    ]
-    negative = [
-        value
-        for (session, position), values in groups.items()
-        if position < 0
-        for value in values
-    ]
-    if not positive or not negative:
+    session_effects: list[float] = []
+    for session in sorted({key[0] for key in groups}):
+        positive_means = [
+            float(np.mean(values))
+            for (group_session, position), values in groups.items()
+            if group_session == session and position > 0
+        ]
+        negative_means = [
+            float(np.mean(values))
+            for (group_session, position), values in groups.items()
+            if group_session == session and position < 0
+        ]
+        if positive_means and negative_means:
+            session_effects.append(
+                abs(float(np.mean(positive_means)) - float(np.mean(negative_means)))
+                / 2.0
+            )
+    if not session_effects:
         return None, None
-    signal = abs(float(np.mean(positive)) - float(np.mean(negative))) / 2.0
-    residuals = [
-        value - float(np.mean(values)) for values in groups.values() for value in values
-    ]
-    if len(residuals) <= 1:
+    signal = float(np.mean(session_effects))
+    residual_sum_squares = 0.0
+    residual_degrees_of_freedom = 0
+    for values in groups.values():
+        if len(values) < 2:
+            continue
+        group_mean = float(np.mean(values))
+        residual_sum_squares += sum((value - group_mean) ** 2 for value in values)
+        residual_degrees_of_freedom += len(values) - 1
+    if residual_degrees_of_freedom == 0:
         noise = None
-    elif max(abs(value) for value in residuals) <= 1e-12:
+    elif residual_sum_squares <= 1e-24:
         noise = 0.0
     else:
-        noise = float(np.std(residuals, ddof=1))
+        noise = math.sqrt(residual_sum_squares / residual_degrees_of_freedom)
     return signal, noise
 
 
