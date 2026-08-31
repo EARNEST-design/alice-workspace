@@ -33,6 +33,13 @@ class AbortReason(StrEnum):
     CAMERA_LOSS = "camera-loss"
 
 
+class RecoveryWaitReason(StrEnum):
+    MOTION_LIMITS = "motion-limits"
+    POSITION_RECONCILIATION_REQUIRED = "position-reconciliation-required"
+    OPERATOR_INTERVENTION_REQUIRED = "operator-intervention-required"
+    COMMUNICATION_UNAVAILABLE = "communication-unavailable"
+
+
 class SafetyLimits(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -78,6 +85,26 @@ class SafetyFault(BaseModel):
     occurred_monotonic_ns: Annotated[int, Field(ge=0)]
 
 
+class RecoveryWait(BaseModel):
+    """A fail-closed recovery state that cannot yet emit a command."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    reason: RecoveryWaitReason
+    detail: NonEmptyString
+    retry_not_before_monotonic_ns: Annotated[int, Field(ge=0)]
+
+
+class RecoveryAuthorization(BaseModel):
+    """Supervisor authority and correlation for one recovery command."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    sequence_index: Annotated[int, Field(gt=0)]
+    originating_fault_code: NonEmptyString
+    request: PoseRequest
+
+
 class TransitionResult(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -85,6 +112,8 @@ class TransitionResult(BaseModel):
     state: RunState
     fault: SafetyFault | None = None
     recovery_request: PoseRequest | None = None
+    recovery_authorization: RecoveryAuthorization | None = None
+    recovery_wait: RecoveryWait | None = None
 
 
 class AuthorizationDecision(BaseModel):
@@ -95,6 +124,8 @@ class AuthorizationDecision(BaseModel):
     request: PoseRequest | None = None
     fault: SafetyFault | None = None
     recovery_request: PoseRequest | None = None
+    recovery_authorization: RecoveryAuthorization | None = None
+    recovery_wait: RecoveryWait | None = None
 
 
 class SafetySupervisor:
@@ -122,6 +153,11 @@ class SafetySupervisor:
         self._run_id: str | None = None
         self._pending_request: PoseRequest | None = None
         self._recovery_request: PoseRequest | None = None
+        self._recovery_authorization: RecoveryAuthorization | None = None
+        self._recovery_wait: RecoveryWait | None = None
+        self._originating_fault_code: str | None = None
+        self._unknown_actuators: set[str] = set()
+        self._home_confirmation_issued = False
         self._recovery_counter = 0
         self._safe_state_verified = False
         self._committed_targets = {
@@ -130,7 +166,8 @@ class SafetySupervisor:
         self._committed_velocities = {
             actuator.name: 0.0 for actuator in self._manifest.actuators
         }
-        self._last_applied_ns: int | None = None
+        self._last_applied_by_actuator: dict[str, int] = {}
+        self._last_acknowledged_ns: int | None = None
 
     @property
     def state(self) -> RunState:
@@ -150,7 +187,15 @@ class SafetySupervisor:
 
     @property
     def recovery_request(self) -> PoseRequest | None:
-        return self._recovery_request
+        return self._recovery_request if self._recovery_wait is None else None
+
+    @property
+    def recovery_authorization(self) -> RecoveryAuthorization | None:
+        return self._recovery_authorization if self._recovery_wait is None else None
+
+    @property
+    def recovery_wait(self) -> RecoveryWait | None:
+        return self._recovery_wait
 
     @property
     def committed_targets(self) -> Mapping[str, float]:
@@ -158,7 +203,13 @@ class SafetySupervisor:
 
     @property
     def last_applied_monotonic_ns(self) -> int | None:
-        return self._last_applied_ns
+        if not self._last_applied_by_actuator:
+            return None
+        return max(self._last_applied_by_actuator.values())
+
+    @property
+    def last_applied_by_actuator(self) -> Mapping[str, int]:
+        return MappingProxyType(self._last_applied_by_actuator)
 
     @property
     def safe_state_verified(self) -> bool:
@@ -191,6 +242,11 @@ class SafetySupervisor:
         if approval_problem is not None:
             return self._enter_faulted(*approval_problem)
         self._approval = approval
+        self._last_applied_by_actuator = {
+            actuator.name: self._preflight.observed_monotonic_ns
+            for actuator in self._manifest.actuators
+        }
+        self._last_acknowledged_ns = self._preflight.observed_monotonic_ns
         self._state = RunState.ARMED
         return TransitionResult(accepted=True, state=self._state)
 
@@ -202,7 +258,10 @@ class SafetySupervisor:
             return self._begin_abort(*problem)
         now_ns = self._clock()
         self._state = RunState.RUNNING
-        self._last_applied_ns = now_ns
+        self._last_applied_by_actuator = {
+            actuator.name: now_ns for actuator in self._manifest.actuators
+        }
+        self._last_acknowledged_ns = now_ns
         self._committed_targets = {
             actuator.name: 0.0 for actuator in self._manifest.actuators
         }
@@ -230,16 +289,9 @@ class SafetySupervisor:
             return self._abort_authorization(
                 "run-identity-mismatch", "request is for a different run"
             )
-        try:
-            self._manifest.validate_request(request, now_monotonic_ns=now_ns)
-        except ValueError as error:
-            return self._abort_authorization(
-                self._request_error_code(str(error)), str(error)
-            )
-        if now_ns - request.issued_monotonic_ns >= self._limits.command_max_age_ns:
-            return self._abort_authorization(
-                "command-too-old", "request exceeds the supervisor command age limit"
-            )
+        request_problem = self._request_problem(request, now_ns)
+        if request_problem is not None:
+            return self._abort_authorization(*request_problem)
         motion_problem = self._motion_problem(request, now_ns)
         if motion_problem is not None:
             return self._abort_authorization(*motion_problem)
@@ -263,14 +315,16 @@ class SafetySupervisor:
         if problem is not None:
             return self._begin_abort(*problem)
         if status.state is not ActuatorStatusState.APPLIED:
-            return self._begin_abort(
+            self._begin_abort(
                 "controller-error", status.fault_code or "actuator adapter failed"
             )
+            return self._record_reconciliation_status(status)
         if not self._targets_match(status.applied_targets, pending.targets):
-            return self._begin_abort(
+            self._begin_abort(
                 "applied-target-mismatch",
                 "applied targets differ from authorized targets",
             )
+            return self._record_reconciliation_status(status)
         self._commit_applied(pending, status.reported_monotonic_ns)
         self._pending_request = None
         return TransitionResult(accepted=True, state=self._state)
@@ -287,8 +341,8 @@ class SafetySupervisor:
         problem = self._runtime_gate_problem(clock_now_ns)
         if problem is not None:
             return self._begin_abort(*problem)
-        assert self._last_applied_ns is not None
-        if now_ns - self._last_applied_ns >= self._limits.watchdog_timeout_ns:
+        assert self._last_acknowledged_ns is not None
+        if now_ns - self._last_acknowledged_ns >= self._limits.watchdog_timeout_ns:
             return self._begin_abort(
                 "watchdog-expired",
                 "no matching APPLIED status arrived before the watchdog deadline",
@@ -315,12 +369,37 @@ class SafetySupervisor:
         fault = self._make_fault(
             "home-not-confirmed", "matching Home APPLIED status has not been recorded"
         )
-        return TransitionResult(
-            accepted=False,
-            state=self._state,
-            fault=fault,
-            recovery_request=self._recovery_request,
-        )
+        return self._recovery_result(accepted=False, fault=fault)
+
+    def retry_recovery(self, now_ns: int) -> TransitionResult:
+        if self._state is not RunState.ABORTING:
+            return self._invalid_transition("retry_recovery", RunState.ABORTING)
+        if now_ns != self._clock():
+            fault = self._make_fault(
+                "recovery-time-mismatch",
+                "retry timestamp does not match the injected monotonic clock",
+            )
+            return self._recovery_result(accepted=False, fault=fault)
+        if self._pending_request is not None or self._unknown_actuators:
+            return self._recovery_result(accepted=False, fault=self._fault)
+        if self._recovery_authorization is not None:
+            assert self._recovery_request is not None
+            if self._recovery_request.is_expired(now_monotonic_ns=now_ns):
+                fault = self._record_fault(
+                    "recovery-expired-unacknowledged",
+                    "expired recovery application is unknown; status is required",
+                )
+                self._unknown_actuators = {
+                    target.actuator_name for target in self._recovery_request.targets
+                }
+                self._recovery_wait = RecoveryWait(
+                    reason=RecoveryWaitReason.POSITION_RECONCILIATION_REQUIRED,
+                    detail="expired recovery command requires position reconciliation",
+                    retry_not_before_monotonic_ns=now_ns,
+                )
+                return self._recovery_result(accepted=False, fault=fault)
+            return self._recovery_result(accepted=False, fault=self._fault)
+        return self._plan_recovery(accepted=False, fault=self._fault)
 
     def recovery_unavailable(self, detail: str) -> TransitionResult:
         if self._state is not RunState.ABORTING:
@@ -328,6 +407,9 @@ class SafetySupervisor:
         fault = self._record_fault("recovery-unavailable", detail)
         self._state = RunState.FAULTED
         self._safe_state_verified = False
+        self._recovery_request = None
+        self._recovery_authorization = None
+        self._recovery_wait = None
         return TransitionResult(accepted=True, state=self._state, fault=fault)
 
     def acknowledge_fault(self, evidence: PreflightEvidence) -> TransitionResult:
@@ -402,15 +484,18 @@ class SafetySupervisor:
     def _motion_problem(
         self, request: PoseRequest, now_ns: int
     ) -> tuple[str, str] | None:
-        assert self._last_applied_ns is not None
-        elapsed_ns = now_ns - self._last_applied_ns
-        if elapsed_ns <= 0:
-            return "rate-limit-exceeded", "movement has no elapsed applied-state time"
-        elapsed_seconds = elapsed_ns / 1_000_000_000
         for target in request.targets:
             name = target.actuator_name
+            last_applied_ns = self._last_applied_by_actuator[name]
+            elapsed_ns = now_ns - last_applied_ns
+            if elapsed_ns <= 0:
+                return (
+                    "rate-limit-exceeded",
+                    f"{name} movement has no elapsed applied-state time",
+                )
+            elapsed_seconds = elapsed_ns / 1_000_000_000
             delta = target.normalized_position - self._committed_targets[name]
-            if abs(delta) > self._limits.max_step:
+            if abs(delta) > self._limits.max_step + 1e-12:
                 return (
                     "step-limit-exceeded",
                     f"{name} step {abs(delta)} exceeds {self._limits.max_step}",
@@ -454,41 +539,131 @@ class SafetySupervisor:
         return None
 
     def _record_recovery_status(self, status: ActuatorStatus) -> TransitionResult:
+        if self._pending_request is not None and self._recovery_request is None:
+            return self._record_reconciliation_status(status)
         recovery = self._recovery_request
         if recovery is None or not self._status_identity_matches(status, recovery):
             fault = self._record_fault(
                 "recovery-status-mismatch",
-                "status does not match the supervisor-created Home request",
+                "status does not match the authorized recovery request",
             )
-            return TransitionResult(accepted=False, state=self._state, fault=fault)
+            return self._recovery_result(accepted=False, fault=fault)
         if recovery.is_expired(now_monotonic_ns=self._clock()):
             fault = self._record_fault(
                 "recovery-expired",
-                "Home request expired before its APPLIED status was recorded",
+                "recovery request expired before APPLIED status was recorded",
             )
-            return TransitionResult(accepted=False, state=self._state, fault=fault)
+            self._unknown_actuators = {
+                target.actuator_name for target in recovery.targets
+            }
+            self._recovery_request = None
+            self._recovery_authorization = None
+            self._recovery_wait = RecoveryWait(
+                reason=RecoveryWaitReason.OPERATOR_INTERVENTION_REQUIRED,
+                detail="late recovery status cannot establish an authorized position",
+                retry_not_before_monotonic_ns=self._clock(),
+            )
+            return self._recovery_result(accepted=False, fault=fault)
         problem = self._status_problem(status, recovery)
         if problem is not None:
             fault = self._record_fault(*problem)
-            return TransitionResult(accepted=False, state=self._state, fault=fault)
+            return self._recovery_result(accepted=False, fault=fault)
         if status.state is not ActuatorStatusState.APPLIED:
             fault = self._record_fault(
                 "recovery-controller-error",
-                status.fault_code or "Home request was not applied",
+                status.fault_code or "recovery request was not applied",
             )
-            return TransitionResult(accepted=False, state=self._state, fault=fault)
+            self._recovery_request = None
+            self._recovery_authorization = None
+            if status.state is ActuatorStatusState.REJECTED:
+                return self._plan_recovery(accepted=False, fault=fault)
+            target_names = {target.actuator_name for target in recovery.targets}
+            applied_names = {target.actuator_name for target in status.applied_targets}
+            if applied_names == target_names and self._targets_match(
+                status.applied_targets, recovery.targets
+            ):
+                self._commit_applied(recovery, status.reported_monotonic_ns)
+                if all(value == 0.0 for value in self._committed_targets.values()):
+                    self._safe_state_verified = True
+                    self._state = RunState.FAULTED
+                    return TransitionResult(
+                        accepted=False, state=self._state, fault=fault
+                    )
+                return self._plan_recovery(accepted=False, fault=fault)
+            self._unknown_actuators = target_names - applied_names
+            if not self._unknown_actuators:
+                self._unknown_actuators = target_names
+            self._recovery_wait = RecoveryWait(
+                reason=RecoveryWaitReason.OPERATOR_INTERVENTION_REQUIRED,
+                detail="recovery fault left physical position uncertain",
+                retry_not_before_monotonic_ns=self._clock(),
+            )
+            return self._recovery_result(accepted=False, fault=fault)
         if not self._targets_match(status.applied_targets, recovery.targets):
             fault = self._record_fault(
                 "recovery-target-mismatch",
-                "Home status does not report all Home targets",
+                "status does not report the authorized recovery target",
             )
-            return TransitionResult(accepted=False, state=self._state, fault=fault)
+            return self._recovery_result(accepted=False, fault=fault)
         self._commit_applied(recovery, status.reported_monotonic_ns)
-        self._pending_request = None
         self._recovery_request = None
-        self._safe_state_verified = True
-        self._state = RunState.FAULTED
-        return TransitionResult(accepted=True, state=self._state, fault=self._fault)
+        self._recovery_authorization = None
+        if all(value == 0.0 for value in self._committed_targets.values()):
+            self._safe_state_verified = True
+            self._state = RunState.FAULTED
+            self._recovery_wait = None
+            return TransitionResult(accepted=True, state=self._state, fault=self._fault)
+        return self._plan_recovery(accepted=True, fault=self._fault)
+
+    def _record_reconciliation_status(self, status: ActuatorStatus) -> TransitionResult:
+        assert self._pending_request is not None
+        pending = self._pending_request
+        problem = self._status_problem(status, pending)
+        if problem is not None:
+            fault = self._record_fault(*problem)
+            return self._recovery_result(accepted=False, fault=fault)
+        requested = {target.actuator_name: target for target in pending.targets}
+        applied = {target.actuator_name: target for target in status.applied_targets}
+        if any(requested.get(name) != target for name, target in applied.items()):
+            fault = self._record_fault(
+                "reconciliation-target-mismatch",
+                "status reports a target not present in the pending request",
+            )
+            return self._recovery_result(accepted=False, fault=fault)
+        if status.state is ActuatorStatusState.REJECTED:
+            self._unknown_actuators.clear()
+        elif status.state is ActuatorStatusState.APPLIED and applied == requested:
+            self._commit_applied(pending, status.reported_monotonic_ns)
+            self._unknown_actuators.clear()
+        elif status.state is ActuatorStatusState.FAULT:
+            if applied:
+                known_request = pending.model_copy(
+                    update={"targets": tuple(applied.values())}
+                )
+                self._commit_applied(known_request, status.reported_monotonic_ns)
+            self._unknown_actuators = set(requested) - set(applied)
+            if not self._unknown_actuators:
+                self._record_fault(
+                    "controller-error",
+                    status.fault_code or "pending request faulted after application",
+                )
+        else:
+            self._unknown_actuators = set(requested)
+        self._pending_request = None
+        if self._unknown_actuators:
+            fault = self._record_fault(
+                "position-uncertain",
+                f"unreconciled actuators: {sorted(self._unknown_actuators)}",
+            )
+            self._recovery_wait = RecoveryWait(
+                reason=RecoveryWaitReason.OPERATOR_INTERVENTION_REQUIRED,
+                detail=(
+                    "physical position is not known; verify position or remove power"
+                ),
+                retry_not_before_monotonic_ns=self._clock(),
+            )
+            return self._recovery_result(accepted=False, fault=fault)
+        return self._plan_recovery(accepted=True, fault=self._fault)
 
     def _begin_abort(
         self,
@@ -500,15 +675,28 @@ class SafetySupervisor:
         fault = self._record_fault(code, detail)
         self._state = RunState.ABORTING
         self._safe_state_verified = False
-        self._recovery_request = (
-            self._make_home_request() if communication_available else None
-        )
-        return TransitionResult(
-            accepted=False,
-            state=self._state,
-            fault=fault,
-            recovery_request=self._recovery_request,
-        )
+        self._originating_fault_code = code
+        self._recovery_request = None
+        self._recovery_authorization = None
+        self._recovery_wait = None
+        if not communication_available:
+            self._recovery_wait = RecoveryWait(
+                reason=RecoveryWaitReason.COMMUNICATION_UNAVAILABLE,
+                detail="no recovery motion is authorized without communication",
+                retry_not_before_monotonic_ns=self._clock(),
+            )
+            return self._recovery_result(accepted=False, fault=fault)
+        if self._pending_request is not None:
+            self._unknown_actuators = {
+                target.actuator_name for target in self._pending_request.targets
+            }
+            self._recovery_wait = RecoveryWait(
+                reason=RecoveryWaitReason.POSITION_RECONCILIATION_REQUIRED,
+                detail="pending request application is unknown; record its status",
+                retry_not_before_monotonic_ns=self._clock(),
+            )
+            return self._recovery_result(accepted=False, fault=fault)
+        return self._plan_recovery(accepted=False, fault=fault)
 
     def _abort_authorization(self, code: str, detail: str) -> AuthorizationDecision:
         result = self._begin_abort(code, detail)
@@ -517,32 +705,133 @@ class SafetySupervisor:
             state=result.state,
             fault=result.fault,
             recovery_request=result.recovery_request,
+            recovery_authorization=result.recovery_authorization,
+            recovery_wait=result.recovery_wait,
         )
 
-    def _make_home_request(self) -> PoseRequest:
-        assert self._run_id is not None
+    def _plan_recovery(
+        self, *, accepted: bool, fault: SafetyFault | None
+    ) -> TransitionResult:
+        if self._unknown_actuators or self._pending_request is not None:
+            return self._recovery_result(accepted=accepted, fault=fault)
+        non_home = next(
+            (
+                actuator.name
+                for actuator in self._manifest.actuators
+                if self._committed_targets[actuator.name] != 0.0
+            ),
+            None,
+        )
+        actuator_name = non_home or self._manifest.actuators[0].name
+        position = self._committed_targets[actuator_name]
+        if position > 1e-12:
+            target_position = max(0.0, position - self._limits.max_step)
+        elif position < -1e-12:
+            target_position = min(0.0, position + self._limits.max_step)
+        else:
+            target_position = 0.0
+        if abs(target_position) <= 1e-12:
+            target_position = 0.0
+        else:
+            target_position = round(target_position, 12)
         now_ns = self._clock()
+        candidate = self._make_recovery_request(
+            actuator_name=actuator_name,
+            target_position=target_position,
+            now_ns=now_ns,
+        )
+        request_problem = self._request_problem(candidate, now_ns)
+        if request_problem is not None:
+            recovery_fault = self._record_fault(
+                "recovery-request-invalid",
+                f"supervisor-created recovery failed validation: {request_problem[0]}",
+            )
+            self._recovery_wait = RecoveryWait(
+                reason=RecoveryWaitReason.OPERATOR_INTERVENTION_REQUIRED,
+                detail="recovery request validation failed closed",
+                retry_not_before_monotonic_ns=now_ns,
+            )
+            return self._recovery_result(accepted=False, fault=recovery_fault)
+        problem = self._motion_problem(candidate, now_ns)
+        if problem is not None:
+            retry_ns = self._find_safe_recovery_time(candidate, now_ns)
+            if retry_ns is None:
+                recovery_fault = self._record_fault(
+                    "recovery-motion-unsatisfiable",
+                    "no bounded retry time satisfied configured motion limits",
+                )
+                self._recovery_wait = RecoveryWait(
+                    reason=RecoveryWaitReason.OPERATOR_INTERVENTION_REQUIRED,
+                    detail="configured recovery motion limits require intervention",
+                    retry_not_before_monotonic_ns=now_ns,
+                )
+                return self._recovery_result(accepted=False, fault=recovery_fault)
+            self._recovery_wait = RecoveryWait(
+                reason=RecoveryWaitReason.MOTION_LIMITS,
+                detail=f"recovery waits for rate/acceleration limits: {problem[0]}",
+                retry_not_before_monotonic_ns=retry_ns,
+            )
+            return self._recovery_result(accepted=accepted, fault=fault)
         self._recovery_counter += 1
+        assert self._originating_fault_code is not None
+        self._recovery_request = candidate
+        self._recovery_authorization = RecoveryAuthorization(
+            sequence_index=self._recovery_counter,
+            originating_fault_code=self._originating_fault_code,
+            request=candidate,
+        )
+        self._recovery_wait = None
+        return self._recovery_result(accepted=accepted, fault=fault)
+
+    def _make_recovery_request(
+        self, *, actuator_name: str, target_position: float, now_ns: int
+    ) -> PoseRequest:
+        assert self._run_id is not None
         return PoseRequest(
             schema_version="pose-request/v1",
-            request_id=f"safety-home-{self._recovery_counter}-{now_ns}",
+            request_id=f"safety-recovery-{self._recovery_counter + 1}-{now_ns}",
             run_id=self._run_id,
             hardware_id=self._manifest.hardware_id,
             calibration_sha256=self._manifest.calibration_sha256,
             issued_monotonic_ns=now_ns,
             expires_monotonic_ns=now_ns + self._limits.recovery_command_ttl_ns,
-            targets=tuple(
-                ActuatorTarget(actuator_name=actuator.name, normalized_position=0.0)
-                for actuator in self._manifest.actuators
+            targets=(
+                ActuatorTarget(
+                    actuator_name=actuator_name,
+                    normalized_position=target_position,
+                ),
             ),
         )
 
+    def _find_safe_recovery_time(self, request: PoseRequest, now_ns: int) -> int | None:
+        delay_ns = 1
+        for _ in range(64):
+            candidate_ns = now_ns + delay_ns
+            if self._motion_problem(request, candidate_ns) is None:
+                return candidate_ns
+            delay_ns *= 2
+        return None
+
+    def _recovery_result(
+        self, *, accepted: bool, fault: SafetyFault | None
+    ) -> TransitionResult:
+        expose_authorization = self._recovery_wait is None
+        return TransitionResult(
+            accepted=accepted,
+            state=self._state,
+            fault=fault,
+            recovery_request=(self._recovery_request if expose_authorization else None),
+            recovery_authorization=(
+                self._recovery_authorization if expose_authorization else None
+            ),
+            recovery_wait=self._recovery_wait,
+        )
+
     def _commit_applied(self, request: PoseRequest, reported_ns: int) -> None:
-        assert self._last_applied_ns is not None
-        elapsed_ns = reported_ns - self._last_applied_ns
-        elapsed_seconds = elapsed_ns / 1_000_000_000 if elapsed_ns > 0 else None
         for target in request.targets:
             name = target.actuator_name
+            elapsed_ns = reported_ns - self._last_applied_by_actuator[name]
+            elapsed_seconds = elapsed_ns / 1_000_000_000 if elapsed_ns > 0 else None
             previous = self._committed_targets[name]
             self._committed_targets[name] = target.normalized_position
             self._committed_velocities[name] = (
@@ -550,7 +839,8 @@ class SafetySupervisor:
                 if elapsed_seconds is not None
                 else 0.0
             )
-        self._last_applied_ns = reported_ns
+            self._last_applied_by_actuator[name] = reported_ns
+        self._last_acknowledged_ns = reported_ns
 
     @staticmethod
     def _status_identity_matches(status: ActuatorStatus, request: PoseRequest) -> bool:
@@ -580,6 +870,20 @@ class SafetySupervisor:
         if "hardware_id" in message:
             return "hardware-identity-mismatch"
         return "invalid-request"
+
+    def _request_problem(
+        self, request: PoseRequest, now_ns: int
+    ) -> tuple[str, str] | None:
+        try:
+            self._manifest.validate_request(request, now_monotonic_ns=now_ns)
+        except ValueError as error:
+            return self._request_error_code(str(error)), str(error)
+        if now_ns - request.issued_monotonic_ns >= self._limits.command_max_age_ns:
+            return (
+                "command-too-old",
+                "request exceeds the supervisor command age limit",
+            )
+        return None
 
     def _enter_faulted(self, code: str, detail: str) -> TransitionResult:
         fault = self._record_fault(code, detail)
@@ -615,8 +919,13 @@ class SafetySupervisor:
         self._run_id = None
         self._pending_request = None
         self._recovery_request = None
+        self._recovery_authorization = None
+        self._recovery_wait = None
+        self._originating_fault_code = None
+        self._unknown_actuators = set()
         self._safe_state_verified = False
-        self._last_applied_ns = None
+        self._last_applied_by_actuator = {}
+        self._last_acknowledged_ns = None
         self._committed_targets = {
             actuator.name: 0.0 for actuator in self._manifest.actuators
         }
