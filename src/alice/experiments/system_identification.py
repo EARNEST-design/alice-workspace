@@ -290,6 +290,7 @@ def _run_identification_core(
     retained_manifest: HardwareManifest | None = None,
     retained_manifest_sha256: str | None = None,
     hardware_provenance: HardwareIdentificationProvenance | None = None,
+    stage_hardware_completion: bool = False,
 ) -> ArtifactManifest:
     """Run the deterministic sequence for a trusted composition root.
 
@@ -449,7 +450,14 @@ def _run_identification_core(
                         error_type="RecoveryExhausted",
                     )
 
-    files = _artifact_payloads(config=config, log=log, status=status)
+    durable_status = (
+        RunStatus.STAGED
+        if status is RunStatus.COMPLETED and stage_hardware_completion
+        else status
+    )
+    if stage_hardware_completion and hardware_provenance is None:
+        raise ValueError("hardware staging requires typed hardware provenance")
+    files = _artifact_payloads(config=config, log=log, status=durable_status)
     if hardware_provenance is not None:
         files["hardware-provenance.json"] = _json_bytes(
             hardware_provenance.model_dump(mode="json"), indent=2
@@ -461,7 +469,7 @@ def _run_identification_core(
         schema_version="artifact-manifest/v1",
         run_kind=RunKind.ACTUATOR_IDENTIFICATION,
         run_id=config.run_id,
-        status=status,
+        status=durable_status,
         started_at=started_at,
         ended_at=datetime.now(UTC),
         observation_count=len(log.records["observations.jsonl"]),

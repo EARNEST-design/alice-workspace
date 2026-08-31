@@ -1206,6 +1206,13 @@ def _verified_run(
     metadata = manifest.identification_metadata
     if metadata is None:
         raise ValueError("identification provenance is missing")
+    if (
+        metadata.adapter_identity.hardware_capable
+        and metadata.shutdown_provenance is None
+    ):
+        raise ValueError(
+            "hardware analysis requires shutdown and power-removal provenance"
+        )
     if metadata.observer is None or metadata.observer != metadata.expected_observer:
         raise ValueError("runtime observer provenance is missing or mismatched")
     try:

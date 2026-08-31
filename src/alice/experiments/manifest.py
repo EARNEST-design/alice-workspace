@@ -25,6 +25,7 @@ from alice.safety.supervisor import (
 
 class RunStatus(StrEnum):
     COMPLETED = "completed"
+    STAGED = "staged"
     ABORTED = "aborted"
 
 
@@ -189,6 +190,7 @@ class HardwareShutdownProvenance(BaseModel):
     observer_closed: Literal[True]
     motion_ended_monotonic_ns: Annotated[int, Field(ge=0)]
     cleanup_completed_monotonic_ns: Annotated[int, Field(ge=0)]
+    output_identity_sha256: Sha256Hex
     power_removal: PowerRemovalProvenance
 
 
@@ -385,6 +387,31 @@ class ArtifactManifest(BaseModel):
                 raise ValueError(
                     "observations artifact path must be observations.jsonl"
                 )
+            if (
+                self.run_kind is RunKind.ACTUATOR_IDENTIFICATION
+                and self.identification_metadata is not None
+                and self.identification_metadata.adapter_identity.hardware_capable
+                and self.identification_metadata.shutdown_provenance is None
+            ):
+                raise ValueError(
+                    "completed hardware run requires shutdown and "
+                    "power-removal provenance"
+                )
+        elif self.status is RunStatus.STAGED:
+            if (
+                self.run_kind is not RunKind.ACTUATOR_IDENTIFICATION
+                or self.identification_metadata is None
+                or not self.identification_metadata.adapter_identity.hardware_capable
+                or self.identification_metadata.hardware_provenance is None
+                or self.identification_metadata.shutdown_provenance is not None
+                or self.failure is not None
+                or self.aborted_reason is not None
+            ):
+                raise ValueError(
+                    "staged status is only valid for unfinished hardware runs"
+                )
+            if "observations.jsonl" not in self.artifacts:
+                raise ValueError("staged hardware manifest requires observations.jsonl")
         elif self.failure is None or self.aborted_reason is None:
             raise ValueError("aborted manifest requires failure and aborted_reason")
         return self

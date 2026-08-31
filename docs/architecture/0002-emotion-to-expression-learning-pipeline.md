@@ -141,11 +141,16 @@ the initial single-magnitude protocol reports it as typed missing/inconclusive,
 never as zero.
 
 The trusted hardware composition constructs the exact stable C525 camera and
-pinned MediaPipe observer internally. Motion results remain an unpublished
-`pending_power_removal` draft after final Home, watchdog stop, and interface
-cleanup. Only a fresh, hash-bound operator confirmation that master servo power
-is OFF can atomically publish `COMPLETED`. Cleanup uncertainty publishes
-sanitized `ABORTED` evidence and cannot later be upgraded.
+pinned MediaPipe observer internally. It reserves and hash-binds the exact
+output identity before arming. The first durable result of successful motion is
+a `STAGED` manifest plus a typed `pending_power_removal` draft after final Home,
+watchdog stop, and interface cleanup; no durable `COMPLETED` manifest exists in
+that state. Only a fresh, hash-bound operator confirmation that master servo
+power is OFF can atomically publish the sole `COMPLETED` manifest. Invalid or
+stale confirmations and transient publication failures do not consume the
+pending capability. Expiry or explicit abandonment publishes sanitized
+`ABORTED` evidence, removes staged data and authority, and cannot later be
+upgraded.
 
 This composition boundary protects against accidental or in-scope experiment
 bypass. It is not a security boundary against arbitrary malicious Python in the

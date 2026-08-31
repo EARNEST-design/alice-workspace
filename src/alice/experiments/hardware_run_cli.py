@@ -16,15 +16,20 @@ from alice.experiments.hardware_identification import (
     HardwarePreflightAttestation,
     PowerEnableConfirmation,
     PowerRemovalConfirmation,
+    abandon_pending_hardware_identification,
+    cancel_prepared_hardware_identification,
     execute_prepared_hardware_identification,
     finalize_hardware_identification,
     load_hardware_identification_config,
     prepare_hardware_identification,
 )
 
+_load_config = load_hardware_identification_config
 _prepare = prepare_hardware_identification
 _execute = execute_prepared_hardware_identification
 _finalize = finalize_hardware_identification
+_cancel = cancel_prepared_hardware_identification
+_abandon = abandon_pending_hardware_identification
 _input = input
 _POWER_ON: Final[
     Literal["I CONFIRM MASTER SERVO POWER IS ON AND POWER REMOVAL IS READY"]
@@ -51,7 +56,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--output", type=Path)
     parser.add_argument("--enable-hardware", action="store_true")
     args = parser.parse_args(argv)
-    config = load_hardware_identification_config(args.config)
+    config = _load_config(args.config)
     print(
         "mode=verifier-only; no device is opened unless --enable-hardware "
         "passes all gates"
@@ -84,7 +89,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     challenge = prepared.challenge
     print("CHECKPOINT: preparation complete with master servo power OFF")
-    if _input(f"Type exactly to enable power: {_POWER_ON}\n> ") != _POWER_ON:
+    try:
+        power_on_reply = _input(f"Type exactly to enable power: {_POWER_ON}\n> ")
+    except (EOFError, KeyboardInterrupt):
+        _cancel(prepared)
+        print("refused: power-enable confirmation interrupted; preparation cancelled")
+        return 2
+    if power_on_reply != _POWER_ON:
+        _cancel(prepared)
         print("refused: power-enable confirmation mismatch")
         return 2
     power_on = PowerEnableConfirmation(
@@ -101,7 +113,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     pending = _execute(prepared=prepared, output_dir=args.output, confirmation=power_on)
     print("CHECKPOINT: motion ended and interfaces closed; remove master servo power")
-    if _input(f"Type exactly after power is OFF: {_POWER_OFF}\n> ") != _POWER_OFF:
+    try:
+        power_off_reply = _input(f"Type exactly after power is OFF: {_POWER_OFF}\n> ")
+    except (EOFError, KeyboardInterrupt):
+        _abandon(pending)
+        print("incomplete: power-removal confirmation interrupted; run abandoned")
+        return 3
+    if power_off_reply != _POWER_OFF:
+        _abandon(pending)
         print("incomplete: staged evidence remains pending power-removal confirmation")
         return 3
     power_off = PowerRemovalConfirmation(

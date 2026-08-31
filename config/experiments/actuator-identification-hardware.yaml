@@ -28,6 +28,7 @@ command_ttl_ms: 500
 home_tolerance_qus: 12
 independent_watchdog_ms: 2500
 power_enable_challenge_ttl_ms: 30000
+power_removal_confirmation_ttl_ms: 120000
 maximum_visual_variance: 0.01
 home_delta_tolerances: {jawOpen: 0.01}
 recovery_timeout_ms: 10000

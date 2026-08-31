@@ -27,6 +27,7 @@ from alice.experiments.hardware_identification import (
     PowerEnableConfirmation,
     PowerRemovalConfirmation,
     PreparedHardwareHandle,
+    abandon_pending_hardware_identification,
     cancel_prepared_hardware_identification,
     execute_prepared_hardware_identification,
     finalize_hardware_identification,
@@ -521,7 +522,7 @@ def _completed_staged_core(**kwargs: object):
         schema_version="artifact-manifest/v1",
         run_kind=module.RunKind.ACTUATOR_IDENTIFICATION,
         run_id=config.run_id,
-        status=module.RunStatus.COMPLETED,
+        status=module.RunStatus.STAGED,
         started_at=datetime.now(UTC),
         ended_at=datetime.now(UTC),
         observation_count=0,
@@ -569,12 +570,16 @@ def test_completed_run_is_unpublished_until_bound_power_removal_confirmation(
     )
 
     assert pending.draft.status == "pending_power_removal"
-    assert output.exists() is False
+    assert output.is_dir()
+    assert list(output.iterdir()) == []
     staged = next(tmp_path.glob(".run.pending-*/run"))
-    assert (staged / "manifest.json").exists() is False
-    assert json.loads((staged / "draft.json").read_text())["status"] == (
-        "pending_power_removal"
-    )
+    staged_manifest = json.loads((staged / "manifest.json").read_text())
+    assert staged_manifest["status"] == "staged"
+    assert '"status":"completed"' not in (staged / "manifest.json").read_text()
+    with pytest.raises(ValidationError, match="shutdown and power-removal"):
+        module.ArtifactManifest.model_validate(
+            {**staged_manifest, "status": "completed"}
+        )
     final = finalize_hardware_identification(
         pending=pending,
         confirmation=_power_removal_confirmation(pending),
@@ -591,6 +596,160 @@ def test_completed_run_is_unpublished_until_bound_power_removal_confirmation(
             pending=pending,
             confirmation=_power_removal_confirmation(pending),
         )
+
+
+def test_invalid_power_removal_confirmation_does_not_consume_pending_handle(
+    prepared, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    handle, _, _ = prepared
+    monkeypatch.setattr(module, "_run_identification_core", _completed_staged_core)
+    pending = execute_prepared_hardware_identification(
+        prepared=handle,
+        output_dir=tmp_path / "run",
+        confirmation=_power_confirmation(handle.challenge),
+    )
+    invalid = _power_removal_confirmation(pending).model_copy(
+        update={"draft_sha256": "f" * 64}
+    )
+    with pytest.raises(ValueError, match="not bound"):
+        finalize_hardware_identification(pending=pending, confirmation=invalid)
+    final = finalize_hardware_identification(
+        pending=pending, confirmation=_power_removal_confirmation(pending)
+    )
+    assert final.status is module.RunStatus.COMPLETED
+
+
+def test_transient_final_publication_failure_leaves_pending_retryable(
+    prepared, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    handle, _, _ = prepared
+    monkeypatch.setattr(module, "_run_identification_core", _completed_staged_core)
+    pending = execute_prepared_hardware_identification(
+        prepared=handle,
+        output_dir=tmp_path / "run",
+        confirmation=_power_confirmation(handle.challenge),
+    )
+    confirmation = _power_removal_confirmation(pending)
+    original = module._publish_reserved_generation
+    attempts = 0
+
+    def transient(*args: object, **kwargs: object) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise OSError("transient publication failure")
+        original(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(module, "_publish_reserved_generation", transient)
+    with pytest.raises(OSError, match="transient"):
+        finalize_hardware_identification(pending=pending, confirmation=confirmation)
+    assert (tmp_path / "run").is_dir()
+    assert list((tmp_path / "run").iterdir()) == []
+    final = finalize_hardware_identification(
+        pending=pending, confirmation=_power_removal_confirmation(pending)
+    )
+    assert final.status is module.RunStatus.COMPLETED
+
+
+def test_explicit_pending_abandonment_publishes_incomplete_evidence(
+    prepared, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    handle, _, _ = prepared
+    monkeypatch.setattr(module, "_run_identification_core", _completed_staged_core)
+    output = tmp_path / "run"
+    pending = execute_prepared_hardware_identification(
+        prepared=handle,
+        output_dir=output,
+        confirmation=_power_confirmation(handle.challenge),
+    )
+
+    abandon_pending_hardware_identification(pending)
+
+    manifest = json.loads((output / "manifest.json").read_text())
+    assert manifest["status"] == "aborted"
+    evidence = json.loads((output / "pending-abandonment.json").read_text())
+    assert evidence["completion_eligible"] is False
+    assert evidence["power_removal_required"] is True
+    with pytest.raises(ValueError, match="consumed"):
+        finalize_hardware_identification(
+            pending=pending, confirmation=_power_removal_confirmation(pending)
+        )
+
+
+def test_pending_handle_expiry_terminalizes_aborted_and_removes_capability(
+    prepared, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    handle, _, _ = prepared
+    token = handle.issuance_token.get_secret_value()
+    state = module._prepared_registry[token]
+    state._execution_config = state._execution_config.model_copy(
+        update={"power_removal_confirmation_ttl_ms": 20}
+    )
+    monkeypatch.setattr(module, "_run_identification_core", _completed_staged_core)
+    output = tmp_path / "expired"
+    pending = execute_prepared_hardware_identification(
+        prepared=handle,
+        output_dir=output,
+        confirmation=_power_confirmation(handle.challenge),
+    )
+
+    deadline = time.monotonic() + 1.0
+    while not (output / "manifest.json").exists() and time.monotonic() < deadline:
+        time.sleep(0.005)
+
+    assert json.loads((output / "manifest.json").read_text())["status"] == "aborted"
+    with pytest.raises(ValueError, match="consumed"):
+        abandon_pending_hardware_identification(pending)
+
+
+def test_dropped_pending_handle_terminalizes_aborted_via_weakref(
+    prepared, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    handle, _, _ = prepared
+    monkeypatch.setattr(module, "_run_identification_core", _completed_staged_core)
+    output = tmp_path / "dropped"
+    pending = execute_prepared_hardware_identification(
+        prepared=handle,
+        output_dir=output,
+        confirmation=_power_confirmation(handle.challenge),
+    )
+    token = pending.issuance_token.get_secret_value()
+
+    del pending
+    gc.collect()
+    deadline = time.monotonic() + 1.0
+    while not (output / "manifest.json").exists() and time.monotonic() < deadline:
+        time.sleep(0.005)
+
+    assert json.loads((output / "manifest.json").read_text())["status"] == "aborted"
+    assert token not in module._pending_registry
+
+
+def test_existing_output_is_rejected_before_observer_or_motion(
+    prepared, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    handle, _, _ = prepared
+    output = tmp_path / "existing"
+    output.mkdir()
+    observer_opened = False
+
+    def forbidden_observer(**_: object) -> object:
+        nonlocal observer_opened
+        observer_opened = True
+        raise AssertionError
+
+    monkeypatch.setattr(
+        module.ProductionIdentificationObserver, "open", forbidden_observer
+    )
+    with pytest.raises(FileExistsError):
+        execute_prepared_hardware_identification(
+            prepared=handle,
+            output_dir=output,
+            confirmation=_power_confirmation(handle.challenge),
+        )
+    assert observer_opened is False
+    assert RecordingMaestro.instances[-1].writes == 0
+    assert RecordingMaestro.instances[-1].closed is True
 
 
 def test_adapter_cleanup_failure_publishes_aborted_never_completed(
@@ -652,7 +811,7 @@ def test_execution_requires_new_confirmation_and_is_single_use(
             )
             + "\n"
         )
-        return SimpleNamespace(status=module.RunStatus.COMPLETED)
+        return SimpleNamespace(status=module.RunStatus.STAGED)
 
     monkeypatch.setattr(module, "_run_identification_core", fake_core)
     execute_prepared_hardware_identification(
@@ -722,7 +881,7 @@ def test_mutation_after_prepare_does_not_change_execution(
             )
             + "\n"
         )
-        return SimpleNamespace(status=module.RunStatus.COMPLETED)
+        return SimpleNamespace(status=module.RunStatus.STAGED)
 
     monkeypatch.setattr(module, "_run_identification_core", retained_core)
     execute_prepared_hardware_identification(

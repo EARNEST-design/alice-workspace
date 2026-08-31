@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - Mock and replay adapters are the defaults; importing or constructing an adapter never opens a serial device.
-- Hardware completion is a three-stage prepare/execute/finalize lifecycle; execute returns an unpublished `pending_power_removal` capability and only a fresh bound power-OFF confirmation publishes `COMPLETED`.
+- Hardware completion is a three-stage prepare/execute/finalize lifecycle; execute first reserves the output before arming, durably publishes only `STAGED` evidence, and returns a `pending_power_removal` capability. Only a fresh bound power-OFF confirmation publishes the sole `COMPLETED` manifest. Invalid confirmations and transient publication failures remain retryable; expiry or abandonment publishes non-upgradable `ABORTED` evidence.
 - The hardware root constructs the exact C525/MediaPipe observer internally; low-level Python APIs are not a malicious in-process security boundary.
 - No hardware task runs without a separately reviewed bring-up procedure and contemporaneous user approval.
 - Commands use semantic actuator names and carry schema, calibration, timestamp, expiry, and run identity.

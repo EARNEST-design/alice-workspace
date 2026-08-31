@@ -101,6 +101,7 @@ class HardwareIdentificationConfig(IdentificationConfig):
     home_tolerance_qus: Annotated[int, Field(ge=0)]
     independent_watchdog_ms: Annotated[int, Field(gt=0)]
     power_enable_challenge_ttl_ms: Annotated[int, Field(gt=0)]
+    power_removal_confirmation_ttl_ms: Annotated[int, Field(gt=0)]
     safety_limits: SafetyLimits
     camera_device: NonEmptyString
     detector_model_path: NonEmptyString
@@ -134,6 +135,7 @@ class _HardwareExecutionConfig(IdentificationConfig):
     home_tolerance_qus: Annotated[int, Field(ge=0)]
     independent_watchdog_ms: Annotated[int, Field(gt=0)]
     power_enable_challenge_ttl_ms: Annotated[int, Field(gt=0)]
+    power_removal_confirmation_ttl_ms: Annotated[int, Field(gt=0)]
     safety_limits: SafetyLimits
     camera_device: NonEmptyString
     detector_model_path: NonEmptyString
@@ -268,6 +270,8 @@ class HardwareRunDraft(BaseModel):
     observer_closed: Literal[True]
     motion_ended_monotonic_ns: Annotated[int, Field(ge=0)]
     cleanup_completed_monotonic_ns: Annotated[int, Field(ge=0)]
+    expires_monotonic_ns: Annotated[int, Field(gt=0)]
+    output_identity_sha256: Sha256Hex
     draft_sha256: Sha256Hex
 
 
@@ -452,17 +456,95 @@ class _PendingState:
         draft_directory: Path,
         output_dir: Path,
         manifest: ArtifactManifest,
+        reservation: _OutputReservation,
     ) -> None:
         self.prepared = prepared
         self.draft = draft
         self.draft_directory = draft_directory
         self.output_dir = output_dir
         self.manifest = manifest
+        self.reservation = reservation
         self.issuing_pid = os.getpid()
         self.handle_ref: weakref.ReferenceType[PendingPowerRemovalHandle] | None = None
+        self.timer: threading.Timer | None = None
 
 
 _pending_registry: dict[str, _PendingState] = {}
+
+
+@dataclass(frozen=True, slots=True)
+class _OutputReservation:
+    output_dir: Path
+    marker: Path
+    identity_sha256: str
+
+
+def _reserve_output(output_dir: Path, run_id: str) -> _OutputReservation:
+    output = output_dir.absolute()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    if output.exists():
+        raise FileExistsError(f"output destination already exists: {output.name}")
+    identity = _sha256_bytes(f"hardware-output/v1\0{run_id}\0{output}".encode())
+    marker = output.parent / f".alice-output-reservation-{identity[:24]}"
+    descriptor = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            descriptor = -1
+            handle.write(
+                json.dumps(
+                    {
+                        "schema_version": "hardware-output-reservation/v1",
+                        "run_id": run_id,
+                        "output_identity_sha256": identity,
+                    },
+                    sort_keys=True,
+                ).encode()
+            )
+            handle.flush()
+            os.fsync(handle.fileno())
+        fsync_directory(output.parent)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    try:
+        output.mkdir(mode=0o700)
+        fsync_directory(output.parent)
+    except BaseException:
+        marker.unlink(missing_ok=True)
+        raise
+    return _OutputReservation(output, marker, identity)
+
+
+def _release_reservation(
+    reservation: _OutputReservation, *, remove_empty_output: bool = False
+) -> None:
+    if remove_empty_output and reservation.output_dir.is_dir():
+        try:
+            reservation.output_dir.rmdir()
+        except OSError:
+            pass
+    reservation.marker.unlink(missing_ok=True)
+    fsync_directory(reservation.output_dir.parent)
+
+
+def _publish_reserved_generation(
+    reservation: _OutputReservation, files: Mapping[str, bytes]
+) -> None:
+    if (
+        not reservation.marker.is_file()
+        or not reservation.output_dir.is_dir()
+        or any(reservation.output_dir.iterdir())
+    ):
+        raise FileExistsError("reserved output identity is unavailable")
+    stage_id = f"reserved-{secrets.token_hex(16)}"
+    stage = publish_generation(reservation.output_dir.parent, stage_id, files)
+    try:
+        os.replace(stage, reservation.output_dir)
+        fsync_directory(reservation.output_dir.parent)
+    except BaseException:
+        shutil.rmtree(stage, ignore_errors=True)
+        raise
+    _release_reservation(reservation)
 
 
 def _after_fork_child() -> None:
@@ -1037,6 +1119,7 @@ def _publish_unexpected_failure(
     confirmation: PowerEnableConfirmation,
     output_dir: Path,
     error: BaseException,
+    reservation: _OutputReservation | None = None,
 ) -> None:
     config = prepared._execution_config
     provenance = _hardware_provenance(prepared, confirmation)
@@ -1117,7 +1200,10 @@ def _publish_unexpected_failure(
             manifest.model_dump(mode="json"), sort_keys=True, indent=2
         ).encode(),
     }
-    publish_generation(output_dir.parent.resolve(), output_dir.name, files)
+    if reservation is None:
+        publish_generation(output_dir.parent.resolve(), output_dir.name, files)
+    else:
+        _publish_reserved_generation(reservation, files)
 
 
 def _draft_digest(draft: HardwareRunDraft) -> str:
@@ -1152,15 +1238,6 @@ def _final_home_evidence(directory: Path) -> int:
     return int(final_home["monotonic_ns"])
 
 
-def _copy_published_generation(source: Path, output_dir: Path) -> None:
-    files = {
-        str(path.relative_to(source)): path.read_bytes()
-        for path in source.rglob("*")
-        if path.is_file()
-    }
-    publish_generation(output_dir.parent.resolve(), output_dir.name, files)
-
-
 def execute_prepared_hardware_identification(
     *,
     prepared: PreparedHardwareHandle,
@@ -1175,6 +1252,7 @@ def execute_prepared_hardware_identification(
     adapter = state._adapter
     observer: ProductionIdentificationObserver | None = None
     draft_root: Path | None = None
+    reservation: _OutputReservation | None = None
     watchdog = IndependentHardwareWatchdog(
         timeout_seconds=config.independent_watchdog_ms / 1_000,
         revoke=lambda: supervisor.revoke_external_authority(
@@ -1189,6 +1267,7 @@ def execute_prepared_hardware_identification(
             now_wall=datetime.now(UTC),
             now_ns=time.monotonic_ns(),
         )
+        reservation = _reserve_output(output_dir, config.run_id)
         observer = ProductionIdentificationObserver.open(
             camera_device=config.camera_device,
             model_path=Path(config.detector_model_path),
@@ -1206,7 +1285,6 @@ def execute_prepared_hardware_identification(
         )
         if not armed.accepted or armed.state is not RunState.ARMED:
             raise RuntimeError("supervisor arm rejected")
-        output_dir.parent.mkdir(parents=True, exist_ok=True)
         draft_root = Path(
             tempfile.mkdtemp(
                 prefix=f".{output_dir.name}.pending-", dir=output_dir.parent
@@ -1225,10 +1303,18 @@ def execute_prepared_hardware_identification(
             retained_manifest=state._manifest,
             retained_manifest_sha256=state.challenge.manifest_sha256,
             hardware_provenance=_hardware_provenance(state, confirmation),
+            stage_hardware_completion=True,
         )
-        if manifest.status is not RunStatus.COMPLETED:
-            _copy_published_generation(draft_directory, output_dir)
+        if manifest.status is RunStatus.ABORTED:
+            files = {
+                str(path.relative_to(draft_directory)): path.read_bytes()
+                for path in draft_directory.rglob("*")
+                if path.is_file()
+            }
+            _publish_reserved_generation(reservation, files)
             raise RuntimeError("hardware motion run aborted before shutdown gate")
+        if manifest.status is not RunStatus.STAGED:
+            raise RuntimeError("hardware motion run did not produce staged evidence")
         motion_ended_ns = _final_home_evidence(draft_directory)
         watchdog.stop()
         adapter.close()
@@ -1247,6 +1333,10 @@ def execute_prepared_hardware_identification(
             observer_closed=True,
             motion_ended_monotonic_ns=motion_ended_ns,
             cleanup_completed_monotonic_ns=cleanup_ns,
+            expires_monotonic_ns=(
+                cleanup_ns + config.power_removal_confirmation_ttl_ms * 1_000_000
+            ),
+            output_identity_sha256=reservation.identity_sha256,
             draft_sha256="0" * 64,
         )
         draft = provisional.model_copy(
@@ -1258,8 +1348,6 @@ def execute_prepared_hardware_identification(
                 draft.model_dump(mode="json"), sort_keys=True, indent=2
             ).encode(),
         )
-        (draft_directory / "manifest.json").unlink(missing_ok=True)
-        fsync_directory(draft_directory)
         token = secrets.token_urlsafe(48)
         handle = PendingPowerRemovalHandle(draft=draft, issuance_token=SecretStr(token))
         pending_state = _PendingState(
@@ -1268,10 +1356,20 @@ def execute_prepared_hardware_identification(
             draft_directory=draft_directory,
             output_dir=output_dir,
             manifest=manifest,
+            reservation=reservation,
         )
         pending_state.handle_ref = weakref.ref(handle)
         with _registry_lock:
             _pending_registry[token] = pending_state
+        timeout_seconds = max(
+            0.0,
+            (draft.expires_monotonic_ns - time.monotonic_ns()) / 1_000_000_000,
+        )
+        timer = threading.Timer(timeout_seconds, _expire_pending, args=(token,))
+        timer.daemon = True
+        pending_state.timer = timer
+        timer.start()
+        weakref.finalize(handle, _expire_pending, token)
         return handle
     except BaseException as error:
         try:
@@ -1291,25 +1389,30 @@ def execute_prepared_hardware_identification(
                     closer()
                 except Exception:
                     pass
-        if not output_dir.exists():
+        if reservation is not None or not output_dir.exists():
             try:
                 _publish_unexpected_failure(
                     state,
                     confirmation=confirmation,
                     output_dir=output_dir,
                     error=error,
+                    reservation=reservation,
                 )
             except Exception:
                 pass
         if draft_root is not None:
             shutil.rmtree(draft_root, ignore_errors=True)
+        if reservation is not None and reservation.marker.exists():
+            _release_reservation(reservation, remove_empty_output=True)
         raise
 
 
-def _consume_pending(handle: PendingPowerRemovalHandle) -> _PendingState:
+def _pending_authority(
+    handle: PendingPowerRemovalHandle,
+) -> tuple[str, _PendingState]:
     token = handle.issuance_token.get_secret_value()
     with _registry_lock:
-        state = _pending_registry.pop(token, None)
+        state = _pending_registry.get(token)
     if state is None:
         raise ValueError("pending power-removal handle is unknown or consumed")
     if not (
@@ -1320,7 +1423,95 @@ def _consume_pending(handle: PendingPowerRemovalHandle) -> _PendingState:
         and _draft_digest(handle.draft) == handle.draft.draft_sha256
     ):
         raise ValueError("pending power-removal authority is invalid")
+    return token, state
+
+
+def _remove_pending(token: str) -> _PendingState | None:
+    with _registry_lock:
+        state = _pending_registry.pop(token, None)
+    if state is not None and state.timer is not None:
+        state.timer.cancel()
     return state
+
+
+def _pending_aborted_files(
+    state: _PendingState, *, error_type: str
+) -> dict[str, bytes]:
+    failure_payload = json.dumps(
+        {
+            "schema_version": "pending-hardware-abandonment/v1",
+            "run_id": state.draft.run_id,
+            "error_type": error_type,
+            "power_removal_required": True,
+            "completion_eligible": False,
+            "draft_sha256": state.draft.draft_sha256,
+            "output_identity_sha256": state.draft.output_identity_sha256,
+        },
+        sort_keys=True,
+        indent=2,
+    ).encode()
+    artifacts = dict(state.manifest.artifacts)
+    artifacts["pending-abandonment.json"] = _artifact_record(
+        "pending-abandonment.json", failure_payload
+    )
+    aborted = ArtifactManifest.model_validate(
+        {
+            **state.manifest.model_dump(mode="python"),
+            "status": RunStatus.ABORTED,
+            "ended_at": datetime.now(UTC),
+            "artifacts": artifacts,
+            "aborted_reason": (
+                "hardware run incomplete before power-removal finalization"
+            ),
+            "failure": FailureRecord(
+                category=FailureCategory.INTERRUPTED,
+                error_type=error_type,
+            ),
+        }
+    )
+    files = {
+        str(path.relative_to(state.draft_directory)): path.read_bytes()
+        for path in state.draft_directory.rglob("*")
+        if path.is_file() and path.name not in {"manifest.json", "draft.json"}
+    }
+    files["pending-abandonment.json"] = failure_payload
+    files["manifest.json"] = json.dumps(
+        aborted.model_dump(mode="json"), sort_keys=True, indent=2
+    ).encode()
+    return files
+
+
+def _terminalize_pending(token: str, *, error_type: str) -> None:
+    with _registry_lock:
+        state = _pending_registry.get(token)
+    if state is None:
+        return
+    try:
+        _publish_reserved_generation(
+            state.reservation,
+            _pending_aborted_files(state, error_type=error_type),
+        )
+    except Exception:
+        retry = threading.Timer(
+            1.0, _terminalize_pending, kwargs={"token": token, "error_type": error_type}
+        )
+        retry.daemon = True
+        state.timer = retry
+        retry.start()
+        return
+    _remove_pending(token)
+    shutil.rmtree(state.draft_directory.parent, ignore_errors=True)
+
+
+def _expire_pending(token: str) -> None:
+    _terminalize_pending(token, error_type="PowerRemovalConfirmationExpired")
+
+
+def abandon_pending_hardware_identification(
+    pending: PendingPowerRemovalHandle,
+) -> None:
+    token, _ = _pending_authority(pending)
+    _terminalize_pending(token, error_type="PendingHardwareRunAbandoned")
 
 
 def finalize_hardware_identification(
@@ -1330,7 +1521,7 @@ def finalize_hardware_identification(
 ) -> ArtifactManifest:
     """Publish COMPLETED only after a fresh, bound operator power-OFF fact."""
 
-    state = _consume_pending(pending)
+    token, state = _pending_authority(pending)
     draft = state.draft
     if not (
         confirmation.run_id == draft.run_id
@@ -1347,6 +1538,10 @@ def finalize_hardware_identification(
         raise ValueError("power-removal confirmation timestamp is in the future")
     if confirmation.confirmed_monotonic_ns < draft.cleanup_completed_monotonic_ns:
         raise ValueError("power removal must be confirmed after cleanup")
+    if confirmation.confirmed_monotonic_ns >= draft.expires_monotonic_ns or (
+        now_ns >= draft.expires_monotonic_ns
+    ):
+        raise ValueError("power-removal confirmation is stale")
     if now_ns - confirmation.confirmed_monotonic_ns >= 60_000_000_000:
         raise ValueError("power-removal confirmation is stale")
     removal = PowerRemovalProvenance.model_validate(
@@ -1359,13 +1554,16 @@ def finalize_hardware_identification(
         observer_closed=True,
         motion_ended_monotonic_ns=draft.motion_ended_monotonic_ns,
         cleanup_completed_monotonic_ns=draft.cleanup_completed_monotonic_ns,
+        output_identity_sha256=draft.output_identity_sha256,
         power_removal=removal,
     )
     metadata = state.manifest.identification_metadata
     if metadata is None:
         raise RuntimeError("staged hardware manifest lacks identification metadata")
-    final_manifest = state.manifest.model_copy(
-        update={
+    final_manifest = ArtifactManifest.model_validate(
+        {
+            **state.manifest.model_dump(mode="python"),
+            "status": RunStatus.COMPLETED,
             "ended_at": now_wall,
             "identification_metadata": metadata.model_copy(
                 update={"shutdown_provenance": shutdown}
@@ -1380,7 +1578,8 @@ def finalize_hardware_identification(
     files["manifest.json"] = json.dumps(
         final_manifest.model_dump(mode="json"), sort_keys=True, indent=2
     ).encode()
-    publish_generation(state.output_dir.parent.resolve(), state.output_dir.name, files)
+    _publish_reserved_generation(state.reservation, files)
+    _remove_pending(token)
     shutil.rmtree(state.draft_directory.parent, ignore_errors=True)
     return final_manifest
 
