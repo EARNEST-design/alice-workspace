@@ -1,6 +1,7 @@
 import io
 import json
 from datetime import UTC, datetime, timedelta
+from hashlib import sha256
 from pathlib import Path
 
 import pytest
@@ -36,6 +37,64 @@ def _observation(
         scores=tuple(
             BlendshapeScore(name=name, score=score) for name, score in scores
         ),
+    )
+
+
+def _artifact_record_payload(path: Path) -> dict[str, object]:
+    payload = path.read_bytes()
+    return {
+        "path": path.name,
+        "sha256": sha256(payload).hexdigest(),
+        "size_bytes": len(payload),
+    }
+
+
+def _write_manifest(
+    path: Path,
+    *,
+    status: str = "completed",
+    artifacts: dict[str, dict[str, object]] | None = None,
+    conclusion: str | None = None,
+    acceptance_thresholds: dict[str, object] | None = None,
+) -> None:
+    manifest = ArtifactManifest(
+        schema_version="artifact-manifest/v1",
+        run_id="passive-001",
+        status=status,
+        started_at=datetime(2026, 8, 31, 9, 0, 0, tzinfo=UTC),
+        ended_at=datetime(2026, 8, 31, 9, 2, 0, tzinfo=UTC),
+        observation_count=4,
+        config={
+            "run_id": "passive-001",
+            "camera_id": "alice-face-webcam",
+            "requested_width": 640,
+            "requested_height": 480,
+            "requested_fps": 10,
+            "duration_seconds": 120,
+            "sample_count": 4,
+            "sample_interval_ms": 100,
+            "retain_frames": False,
+            "operator_metadata": {
+                "camera_placement": "Tripod at eye level, 45 cm from Alice.",
+                "lighting": "Overhead lab lights only.",
+            },
+            "acceptance_thresholds": acceptance_thresholds,
+        },
+        artifacts=artifacts or {},
+        git_revision="b" * 40,
+        dependency_lock_path="uv.lock",
+        dependency_lock_sha256="c" * 64,
+        python_version="3.13.7",
+        platform_system="Linux",
+        platform_release="6.8.0",
+        platform_machine="x86_64",
+        aborted_reason=None if status == "completed" else "capture aborted",
+        failure=None,
+        conclusion=conclusion,
+    )
+    path.write_text(
+        json.dumps(manifest.model_dump(mode="json"), indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
     )
 
 
@@ -202,6 +261,139 @@ def test_phase_1_acceptance_is_inconclusive_without_thresholds() -> None:
     assert result.failed_thresholds == ()
 
 
+def test_phase_1_acceptance_is_inconclusive_for_no_face_with_category_thresholds(
+) -> None:
+    metrics = analyze_observations(
+        [
+            _observation(
+                frame_index=0,
+                validity=ObservationValidity.NO_FACE,
+                scores=(),
+            ),
+            _observation(
+                frame_index=1,
+                validity=ObservationValidity.NO_FACE,
+                scores=(),
+            ),
+        ]
+    )
+
+    result = phase_1_acceptance(
+        metrics,
+        {
+            "minimum_detection_rate": 0.8,
+            "categories": {
+                "jawOpen": {"maximum_standard_deviation": 0.01},
+            },
+        },
+    )
+
+    assert result.outcome == "inconclusive"
+    assert [check.status for check in result.checks] == [
+        "fail",
+        "inconclusive",
+    ]
+    assert (
+        "no valid frames available for stability analysis"
+        in result.inconclusive_reasons
+    )
+
+
+def test_cli_analysis_refuses_missing_observation_artifact_provenance(
+    tmp_path: Path,
+    valid_observations: list[BlendshapeObservation],
+) -> None:
+    observations_path = tmp_path / "observations.jsonl"
+    observations_path.write_text(
+        "\n".join(
+            json.dumps(observation.model_dump(mode="json"), sort_keys=True)
+            for observation in valid_observations
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    _write_manifest(
+        tmp_path / "manifest.json",
+        artifacts={},
+        conclusion="existing conclusion",
+        acceptance_thresholds={"minimum_detection_rate": 0.7},
+    )
+    before_manifest = (tmp_path / "manifest.json").read_text(encoding="utf-8")
+
+    with pytest.raises(ValueError, match="observations.jsonl artifact"):
+        passive_capture_main(["analyze", str(tmp_path)], stdout=io.StringIO())
+
+    assert (tmp_path / "manifest.json").read_text(encoding="utf-8") == before_manifest
+    assert not (tmp_path / "stability-metrics.json").exists()
+    assert not (tmp_path / "phase-1-conclusion.md").exists()
+
+
+def test_cli_analysis_refuses_observation_artifact_checksum_mismatch(
+    tmp_path: Path,
+    valid_observations: list[BlendshapeObservation],
+) -> None:
+    observations_path = tmp_path / "observations.jsonl"
+    observations_path.write_text(
+        "\n".join(
+            json.dumps(observation.model_dump(mode="json"), sort_keys=True)
+            for observation in valid_observations
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    _write_manifest(
+        tmp_path / "manifest.json",
+        artifacts={
+            "observations.jsonl": {
+                "path": "observations.jsonl",
+                "sha256": "d" * 64,
+                "size_bytes": observations_path.stat().st_size,
+            }
+        },
+        conclusion="existing conclusion",
+        acceptance_thresholds={"minimum_detection_rate": 0.7},
+    )
+    before_manifest = (tmp_path / "manifest.json").read_text(encoding="utf-8")
+
+    with pytest.raises(ValueError, match="checksum mismatch"):
+        passive_capture_main(["analyze", str(tmp_path)], stdout=io.StringIO())
+
+    assert (tmp_path / "manifest.json").read_text(encoding="utf-8") == before_manifest
+    assert not (tmp_path / "stability-metrics.json").exists()
+    assert not (tmp_path / "phase-1-conclusion.md").exists()
+
+
+def test_cli_analysis_refuses_aborted_runs_without_mutating_manifest(
+    tmp_path: Path,
+    valid_observations: list[BlendshapeObservation],
+) -> None:
+    observations_path = tmp_path / "observations.jsonl"
+    observations_path.write_text(
+        "\n".join(
+            json.dumps(observation.model_dump(mode="json"), sort_keys=True)
+            for observation in valid_observations
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    _write_manifest(
+        tmp_path / "manifest.json",
+        status="aborted",
+        artifacts={"observations.jsonl": _artifact_record_payload(observations_path)},
+        conclusion=None,
+        acceptance_thresholds={"minimum_detection_rate": 0.7},
+    )
+    before_manifest = (tmp_path / "manifest.json").read_text(encoding="utf-8")
+
+    with pytest.raises(ValueError, match="completed"):
+        passive_capture_main(["analyze", str(tmp_path)], stdout=io.StringIO())
+
+    assert (tmp_path / "manifest.json").read_text(encoding="utf-8") == before_manifest
+    assert json.loads(before_manifest)["conclusion"] is None
+    assert not (tmp_path / "stability-metrics.json").exists()
+    assert not (tmp_path / "phase-1-conclusion.md").exists()
+
+
 def test_cli_analysis_writes_metrics_and_phase_1_conclusion(
     tmp_path: Path,
     valid_observations: list[BlendshapeObservation],
@@ -215,50 +407,16 @@ def test_cli_analysis_writes_metrics_and_phase_1_conclusion(
         + "\n",
         encoding="utf-8",
     )
-    manifest = ArtifactManifest(
-        schema_version="artifact-manifest/v1",
-        run_id="passive-001",
-        status="completed",
-        started_at=datetime(2026, 8, 31, 9, 0, 0, tzinfo=UTC),
-        ended_at=datetime(2026, 8, 31, 9, 2, 0, tzinfo=UTC),
-        observation_count=4,
-        config={
-            "run_id": "passive-001",
-            "camera_id": "alice-face-webcam",
-            "requested_width": 640,
-            "requested_height": 480,
-            "requested_fps": 10,
-            "duration_seconds": 120,
-            "sample_count": 4,
-            "sample_interval_ms": 100,
-            "retain_frames": False,
-            "operator_metadata": {
-                "camera_placement": "Tripod at eye level, 45 cm from Alice.",
-                "lighting": "Overhead lab lights only.",
-            },
-            "acceptance_thresholds": {
-                "minimum_detection_rate": 0.7,
-                "categories": {
-                    "jawOpen": {"maximum_standard_deviation": 0.01},
-                    "mouthSmile": {"maximum_percentile_range": 0.4},
-                },
+    _write_manifest(
+        tmp_path / "manifest.json",
+        artifacts={"observations.jsonl": _artifact_record_payload(observations_path)},
+        acceptance_thresholds={
+            "minimum_detection_rate": 0.7,
+            "categories": {
+                "jawOpen": {"maximum_standard_deviation": 0.01},
+                "mouthSmile": {"maximum_percentile_range": 0.4},
             },
         },
-        artifacts={},
-        git_revision="b" * 40,
-        dependency_lock_path="uv.lock",
-        dependency_lock_sha256="c" * 64,
-        python_version="3.13.7",
-        platform_system="Linux",
-        platform_release="6.8.0",
-        platform_machine="x86_64",
-        aborted_reason=None,
-        failure=None,
-        conclusion=None,
-    )
-    (tmp_path / "manifest.json").write_text(
-        json.dumps(manifest.model_dump(mode="json"), indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
     )
 
     stdout = io.StringIO()

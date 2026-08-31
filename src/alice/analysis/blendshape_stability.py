@@ -6,6 +6,7 @@ import json
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from enum import StrEnum
+from hashlib import sha256
 from pathlib import Path
 from typing import Any, Literal
 
@@ -173,7 +174,14 @@ def analyze_stability(run_dir: Path) -> StabilityMetrics:
     manifest = ArtifactManifest.model_validate_json(
         (run_path / "manifest.json").read_text(encoding="utf-8")
     )
-    observations = _load_observations(run_path / "observations.jsonl")
+    if manifest.status != "completed":
+        raise ValueError(
+            "only completed manifests may be analyzed: "
+            f"status={manifest.status.value}"
+        )
+
+    observations_path = _verified_observations_path(manifest, run_path)
+    observations = _load_observations(observations_path)
     metrics = analyze_observations(observations)
 
     if manifest.observation_count != metrics.total_frames:
@@ -218,6 +226,24 @@ def phase_1_acceptance(
                 expected=configured.minimum_detection_rate,
                 observed=metrics.detection_rate,
             )
+        )
+
+    if metrics.valid_frames == 0:
+        for category_name, category_thresholds in configured.categories.items():
+            checks.extend(
+                _inconclusive_category_checks(
+                    category_name,
+                    category_thresholds,
+                    "no valid frames available for stability analysis",
+                )
+            )
+        return AcceptanceResult(
+            outcome=AcceptanceOutcome.INCONCLUSIVE,
+            checks=tuple(checks),
+            failed_thresholds=tuple(
+                check for check in checks if check.status is CheckStatus.FAIL
+            ),
+            inconclusive_reasons=("no valid frames available for stability analysis",),
         )
 
     for category_name, category_thresholds in configured.categories.items():
@@ -336,6 +362,35 @@ def _expected_category_names(
     return ()
 
 
+def _verified_observations_path(manifest: ArtifactManifest, run_path: Path) -> Path:
+    artifact = manifest.artifacts.get("observations.jsonl")
+    if artifact is None:
+        raise ValueError("manifest observations.jsonl artifact entry is required")
+    if artifact.path != "observations.jsonl":
+        raise ValueError(
+            "manifest observations.jsonl artifact must reference observations.jsonl"
+        )
+
+    observations_path = run_path / artifact.path
+    if not observations_path.is_file():
+        raise ValueError(f"recorded observations artifact is missing: {artifact.path}")
+
+    observed_size = observations_path.stat().st_size
+    if observed_size != artifact.size_bytes:
+        raise ValueError(
+            "observations.jsonl size mismatch: "
+            f"manifest={artifact.size_bytes} actual={observed_size}"
+        )
+
+    observed_sha256 = _sha256_path(observations_path)
+    if observed_sha256 != artifact.sha256:
+        raise ValueError(
+            "observations.jsonl checksum mismatch: "
+            f"manifest={artifact.sha256} actual={observed_sha256}"
+        )
+    return observations_path
+
+
 def _category_metrics(values: Sequence[float]) -> CategoryStabilityMetrics:
     score_array = np.asarray(values, dtype=float)
     count = int(score_array.size)
@@ -362,6 +417,68 @@ def _category_metrics(values: Sequence[float]) -> CategoryStabilityMetrics:
     )
 
 
+def _inconclusive_category_checks(
+    category_name: str,
+    thresholds: CategoryAcceptanceThresholds,
+    reason: str,
+) -> list[AcceptanceCheck]:
+    checks: list[AcceptanceCheck] = []
+    if thresholds.maximum_standard_deviation is not None:
+        checks.append(
+            _inconclusive_check(
+                metric_path=f"{category_name}.standard_deviation",
+                comparator="<=",
+                expected=thresholds.maximum_standard_deviation,
+                reason=reason,
+            )
+        )
+    if thresholds.maximum_percentile_range is not None:
+        checks.append(
+            _inconclusive_check(
+                metric_path=f"{category_name}.percentile_range",
+                comparator="<=",
+                expected=thresholds.maximum_percentile_range,
+                reason=reason,
+            )
+        )
+    if thresholds.maximum_warmup_drift is not None:
+        checks.append(
+            _inconclusive_check(
+                metric_path=f"{category_name}.warmup_drift",
+                comparator="<=",
+                expected=thresholds.maximum_warmup_drift,
+                reason=reason,
+            )
+        )
+    if thresholds.minimum_lag1_autocorrelation is not None:
+        checks.append(
+            _inconclusive_check(
+                metric_path=f"{category_name}.lag1_autocorrelation",
+                comparator=">=",
+                expected=thresholds.minimum_lag1_autocorrelation,
+                reason=reason,
+            )
+        )
+    return checks
+
+
+def _inconclusive_check(
+    *,
+    metric_path: str,
+    comparator: Literal[">=", "<="],
+    expected: float,
+    reason: str,
+) -> AcceptanceCheck:
+    return AcceptanceCheck(
+        metric_path=metric_path,
+        comparator=comparator,
+        expected=expected,
+        observed=None,
+        status=CheckStatus.INCONCLUSIVE,
+        message=f"{metric_path} is undefined: {reason}",
+    )
+
+
 def _warmup_drift(score_array: np.ndarray) -> float | None:
     count = int(score_array.size)
     if count < 2:
@@ -385,6 +502,14 @@ def _lag1_autocorrelation(score_array: np.ndarray) -> float | None:
     if np.allclose(leading, leading[0]) or np.allclose(lagged, lagged[0]):
         return None
     return float(np.corrcoef(leading, lagged)[0, 1])
+
+
+def _sha256_path(path: Path) -> str:
+    digest = sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _evaluate_check(
