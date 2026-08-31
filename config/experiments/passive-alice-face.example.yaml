@@ -1,0 +1,8 @@
+run_id: "passive-alice-face-2026-08-31"
+camera_id: "usb-Logitech_HD_Pro_Webcam_C920"
+sample_count: 1200
+sample_interval_ms: 100
+retain_frames: false
+operator_metadata:
+  camera_placement: "REQUIRED: record distance, height, angle, and whether Alice's full face fills the frame"
+  lighting: "REQUIRED: record light sources, room lighting state, and exposure/focus mode"
