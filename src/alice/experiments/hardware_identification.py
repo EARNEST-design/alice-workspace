@@ -1,4 +1,4 @@
-"""Two-stage, capability-gated Maestro identification composition."""
+"""Three-stage, capability-gated Maestro identification composition."""
 
 from __future__ import annotations
 
@@ -7,7 +7,9 @@ import json
 import os
 import platform
 import secrets
+import shutil
 import subprocess
+import tempfile
 import threading
 import time
 import weakref
@@ -28,7 +30,12 @@ from pydantic import (
 )
 
 from alice.contracts.blendshapes import NonEmptyString, Sha256Hex
-from alice.experiments.artifact_store import publish_generation, sha256_path
+from alice.experiments.artifact_store import (
+    atomic_write_bytes,
+    fsync_directory,
+    publish_generation,
+    sha256_path,
+)
 from alice.experiments.manifest import (
     ArtifactManifest,
     ArtifactRecord,
@@ -38,12 +45,14 @@ from alice.experiments.manifest import (
     FailureRecord,
     HardwareApprovalProvenance,
     HardwareIdentificationProvenance,
+    HardwareShutdownProvenance,
     IdentificationObserverProvenance,
     IdentificationRunMetadata,
     IndependentWatchdogProvenance,
     NegotiatedCameraSettings,
     PowerChallengeProvenance,
     PowerConfirmationProvenance,
+    PowerRemovalProvenance,
     ReadOnlyControllerPreflightProvenance,
     RunKind,
     RunStatus,
@@ -57,6 +66,11 @@ from alice.experiments.system_identification import (
 from alice.hardware.adapter import ActuatorAuthorization, AdapterIdentity
 from alice.hardware.maestro_adapter import MaestroAdapter, MaestroPreflightSnapshot
 from alice.hardware.manifest import HardwareManifest
+from alice.perception.identification_observer import (
+    C525_CAMERA_ID,
+    C525_DEVICE,
+    ProductionIdentificationObserver,
+)
 from alice.safety.supervisor import (
     OperatorApproval,
     PreflightEvidence,
@@ -69,6 +83,7 @@ _PLACEHOLDER_PREFIX = "REQUIRED_"
 _PREFLIGHT_ACK = "I CONFIRM PREFLIGHT WITH MASTER SERVO POWER OFF"
 _APPROVAL_ACK = "I APPROVE READ-ONLY PREFLIGHT WITH SERVO POWER OFF"
 _POWER_ACK = "I CONFIRM MASTER SERVO POWER IS ON AND POWER REMOVAL IS READY"
+_POWER_REMOVAL_ACK = "I CONFIRM MASTER SERVO POWER IS OFF"
 
 
 class HardwareIdentificationConfig(IdentificationConfig):
@@ -87,6 +102,8 @@ class HardwareIdentificationConfig(IdentificationConfig):
     independent_watchdog_ms: Annotated[int, Field(gt=0)]
     power_enable_challenge_ttl_ms: Annotated[int, Field(gt=0)]
     safety_limits: SafetyLimits
+    camera_device: NonEmptyString
+    detector_model_path: NonEmptyString
 
     @model_validator(mode="after")
     def validate_hardware_identity(self) -> HardwareIdentificationConfig:
@@ -96,6 +113,11 @@ class HardwareIdentificationConfig(IdentificationConfig):
             raise ValueError("reviewed controller serial is required")
         if self.independent_watchdog_ms >= self.step_timeout_ms:
             raise ValueError("independent watchdog must precede the step timeout")
+        if (
+            self.camera_device != C525_DEVICE
+            or self.observer.camera_id != C525_CAMERA_ID
+        ):
+            raise ValueError("exact reviewed C525 observer identity is required")
         return self
 
 
@@ -113,6 +135,8 @@ class _HardwareExecutionConfig(IdentificationConfig):
     independent_watchdog_ms: Annotated[int, Field(gt=0)]
     power_enable_challenge_ttl_ms: Annotated[int, Field(gt=0)]
     safety_limits: SafetyLimits
+    camera_device: NonEmptyString
+    detector_model_path: NonEmptyString
 
 
 class ElectricalSafetyEvidence(BaseModel):
@@ -138,9 +162,7 @@ class HardwarePreflightAttestation(BaseModel):
     observed_at: AwareDatetime
     observed_monotonic_ns: Annotated[int, Field(ge=0)]
     source: NonEmptyString
-    operator_acknowledgment: Literal[
-        "I CONFIRM PREFLIGHT WITH MASTER SERVO POWER OFF"
-    ]
+    operator_acknowledgment: Literal["I CONFIRM PREFLIGHT WITH MASTER SERVO POWER OFF"]
     master_servo_power_removed: Literal[True]
     emergency_power_removal_ready: Literal[True]
     mechanical_clearance_verified: Literal[True]
@@ -217,6 +239,56 @@ class PowerEnableConfirmation(BaseModel):
     ]
 
 
+class PowerRemovalConfirmation(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    run_id: NonEmptyString
+    challenge_id: NonEmptyString
+    config_sha256: Sha256Hex
+    manifest_sha256: Sha256Hex
+    draft_sha256: Sha256Hex
+    confirmed_at: AwareDatetime
+    confirmed_monotonic_ns: Annotated[int, Field(ge=0)]
+    source: NonEmptyString
+    operator_acknowledgment: Literal["I CONFIRM MASTER SERVO POWER IS OFF"]
+
+
+class HardwareRunDraft(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["hardware-run-draft/v1"]
+    status: Literal["pending_power_removal"]
+    run_id: NonEmptyString
+    challenge_id: NonEmptyString
+    config_sha256: Sha256Hex
+    manifest_sha256: Sha256Hex
+    final_home_verified: Literal[True]
+    watchdog_stopped: Literal[True]
+    adapter_closed: Literal[True]
+    observer_closed: Literal[True]
+    motion_ended_monotonic_ns: Annotated[int, Field(ge=0)]
+    cleanup_completed_monotonic_ns: Annotated[int, Field(ge=0)]
+    draft_sha256: Sha256Hex
+
+
+@dataclass(frozen=True, slots=True, weakref_slot=True)
+class PendingPowerRemovalHandle:
+    draft: HardwareRunDraft
+    issuance_token: SecretStr
+
+    def __copy__(self) -> Never:
+        raise TypeError("pending power-removal handles cannot be copied")
+
+    def __deepcopy__(self, memo: object) -> Never:
+        raise TypeError("pending power-removal handles cannot be copied")
+
+    def __reduce__(self) -> Never:
+        raise TypeError("pending power-removal handles cannot be serialized")
+
+    def __reduce_ex__(self, protocol: SupportsIndex) -> Never:
+        raise TypeError("pending power-removal handles cannot be serialized")
+
+
 class IndependentHardwareWatchdog:
     """OS-monotonic, process-local revocation and serial-close authority."""
 
@@ -258,6 +330,8 @@ class IndependentHardwareWatchdog:
             thread = self._thread
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=max(1.0, self._timeout * 2))
+            if thread.is_alive():
+                raise RuntimeError("independent watchdog thread did not stop")
 
     def _run(self) -> None:
         with self._condition:
@@ -369,8 +443,30 @@ _registry_lock = threading.Lock()
 _prepared_registry: dict[str, _PreparedState] = {}
 
 
+class _PendingState:
+    def __init__(
+        self,
+        *,
+        prepared: _PreparedState,
+        draft: HardwareRunDraft,
+        draft_directory: Path,
+        output_dir: Path,
+        manifest: ArtifactManifest,
+    ) -> None:
+        self.prepared = prepared
+        self.draft = draft
+        self.draft_directory = draft_directory
+        self.output_dir = output_dir
+        self.manifest = manifest
+        self.issuing_pid = os.getpid()
+        self.handle_ref: weakref.ReferenceType[PendingPowerRemovalHandle] | None = None
+
+
+_pending_registry: dict[str, _PendingState] = {}
+
+
 def _after_fork_child() -> None:
-    global _prepared_registry
+    global _prepared_registry, _pending_registry
     inherited, _prepared_registry = _prepared_registry, {}
     for token in inherited:
         try:
@@ -378,6 +474,7 @@ def _after_fork_child() -> None:
         except OSError:
             pass
     inherited.clear()
+    _pending_registry = {}
 
 
 if hasattr(os, "register_at_fork"):
@@ -886,9 +983,7 @@ def _hardware_provenance(
     return HardwareIdentificationProvenance(
         approved_raw_config_sha256=state.challenge.config_sha256,
         execution_config_sha256=execution_config_sha256,
-        hardware_approval=HardwareApprovalProvenance.model_validate(
-            approval_values
-        ),
+        hardware_approval=HardwareApprovalProvenance.model_validate(approval_values),
         power_challenge=PowerChallengeProvenance.model_validate(
             state.challenge.model_dump(mode="python")
         ),
@@ -961,6 +1056,8 @@ def _publish_unexpected_failure(
             ),
             "challenge_sha256": prepared.challenge.challenge_sha256,
             "hardware_provenance_sha256": _sha256_bytes(provenance_payload),
+            "power_removal_required": True,
+            "completion_eligible": False,
         },
         sort_keys=True,
         indent=2,
@@ -1023,19 +1120,61 @@ def _publish_unexpected_failure(
     publish_generation(output_dir.parent.resolve(), output_dir.name, files)
 
 
+def _draft_digest(draft: HardwareRunDraft) -> str:
+    payload = draft.model_dump(mode="json", exclude={"draft_sha256"})
+    return _sha256_bytes(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    )
+
+
+def _final_home_evidence(directory: Path) -> int:
+    records = [
+        json.loads(line)
+        for line in (directory / "transitions.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    accepted = [
+        record
+        for record in records
+        if record.get("operation") == "home-verified" and record.get("accepted") is True
+    ]
+    if not accepted:
+        raise RuntimeError("motion did not end at independently verified Home")
+    final_home = accepted[-1]
+    later = records[records.index(final_home) + 1 :]
+    if any(
+        record.get("step_id") != final_home.get("step_id")
+        or record.get("operation") != "complete-run"
+        or record.get("accepted") is not True
+        for record in later
+    ):
+        raise RuntimeError("motion occurred or completion failed after final Home")
+    return int(final_home["monotonic_ns"])
+
+
+def _copy_published_generation(source: Path, output_dir: Path) -> None:
+    files = {
+        str(path.relative_to(source)): path.read_bytes()
+        for path in source.rglob("*")
+        if path.is_file()
+    }
+    publish_generation(output_dir.parent.resolve(), output_dir.name, files)
+
+
 def execute_prepared_hardware_identification(
     *,
     prepared: PreparedHardwareHandle,
-    observer: IdentificationObserver,
     output_dir: Path,
     confirmation: PowerEnableConfirmation,
-) -> ArtifactManifest:
-    """Consume a prepared session only after a new, bound power-on confirmation."""
+) -> PendingPowerRemovalHandle:
+    """Execute through trusted perception, then stage evidence pending power OFF."""
 
     state = _consume_handle(prepared)
     config = state._execution_config
     supervisor = state._supervisor
     adapter = state._adapter
+    observer: ProductionIdentificationObserver | None = None
+    draft_root: Path | None = None
     watchdog = IndependentHardwareWatchdog(
         timeout_seconds=config.independent_watchdog_ms / 1_000,
         revoke=lambda: supervisor.revoke_external_authority(
@@ -1050,6 +1189,14 @@ def execute_prepared_hardware_identification(
             now_wall=datetime.now(UTC),
             now_ns=time.monotonic_ns(),
         )
+        observer = ProductionIdentificationObserver.open(
+            camera_device=config.camera_device,
+            model_path=Path(config.detector_model_path),
+            expected_model_sha256=config.observer.detector_model_sha256,
+            width=int(config.observer.camera_settings.width.value or 0),
+            height=int(config.observer.camera_settings.height.value or 0),
+            fps=float(config.observer.camera_settings.fps.value or 0),
+        )
         armed = supervisor.arm(
             OperatorApproval(
                 approval_id=state._approval.approval_id,
@@ -1059,45 +1206,183 @@ def execute_prepared_hardware_identification(
         )
         if not armed.accepted or armed.state is not RunState.ARMED:
             raise RuntimeError("supervisor arm rejected")
+        output_dir.parent.mkdir(parents=True, exist_ok=True)
+        draft_root = Path(
+            tempfile.mkdtemp(
+                prefix=f".{output_dir.name}.pending-", dir=output_dir.parent
+            )
+        )
+        draft_directory = draft_root / "run"
         watchdog.start()
-        return _run_identification_core(
+        manifest = _run_identification_core(
             config=config,
             observer=_WatchedObserver(observer, watchdog),
             supervisor=supervisor,
             adapter=_WatchedAdapter(adapter, watchdog),
-            output_dir=output_dir,
+            output_dir=draft_directory,
             clock=time.monotonic_ns,
             sleeper=time.sleep,
             retained_manifest=state._manifest,
             retained_manifest_sha256=state.challenge.manifest_sha256,
             hardware_provenance=_hardware_provenance(state, confirmation),
         )
+        if manifest.status is not RunStatus.COMPLETED:
+            _copy_published_generation(draft_directory, output_dir)
+            raise RuntimeError("hardware motion run aborted before shutdown gate")
+        motion_ended_ns = _final_home_evidence(draft_directory)
+        watchdog.stop()
+        adapter.close()
+        observer.close()
+        cleanup_ns = time.monotonic_ns()
+        provisional = HardwareRunDraft(
+            schema_version="hardware-run-draft/v1",
+            status="pending_power_removal",
+            run_id=config.run_id,
+            challenge_id=state.challenge.challenge_id,
+            config_sha256=state.challenge.config_sha256,
+            manifest_sha256=state.challenge.manifest_sha256,
+            final_home_verified=True,
+            watchdog_stopped=True,
+            adapter_closed=True,
+            observer_closed=True,
+            motion_ended_monotonic_ns=motion_ended_ns,
+            cleanup_completed_monotonic_ns=cleanup_ns,
+            draft_sha256="0" * 64,
+        )
+        draft = provisional.model_copy(
+            update={"draft_sha256": _draft_digest(provisional)}
+        )
+        atomic_write_bytes(
+            draft_directory / "draft.json",
+            json.dumps(
+                draft.model_dump(mode="json"), sort_keys=True, indent=2
+            ).encode(),
+        )
+        (draft_directory / "manifest.json").unlink(missing_ok=True)
+        fsync_directory(draft_directory)
+        token = secrets.token_urlsafe(48)
+        handle = PendingPowerRemovalHandle(draft=draft, issuance_token=SecretStr(token))
+        pending_state = _PendingState(
+            prepared=state,
+            draft=draft,
+            draft_directory=draft_directory,
+            output_dir=output_dir,
+            manifest=manifest,
+        )
+        pending_state.handle_ref = weakref.ref(handle)
+        with _registry_lock:
+            _pending_registry[token] = pending_state
+        return handle
     except BaseException as error:
         try:
             supervisor.revoke_external_authority(
-                "hardware execution failed; physical command state may be unknown"
+                "hardware execution or cleanup failed; physical command state "
+                "may be unknown"
             )
         except Exception:
             pass
-        try:
-            _publish_unexpected_failure(
-                state,
-                confirmation=confirmation,
-                output_dir=output_dir,
-                error=error,
-            )
-        except Exception:
-            pass
+        for closer in (
+            watchdog.stop,
+            adapter.close,
+            observer.close if observer else None,
+        ):
+            if closer is not None:
+                try:
+                    closer()
+                except Exception:
+                    pass
+        if not output_dir.exists():
+            try:
+                _publish_unexpected_failure(
+                    state,
+                    confirmation=confirmation,
+                    output_dir=output_dir,
+                    error=error,
+                )
+            except Exception:
+                pass
+        if draft_root is not None:
+            shutil.rmtree(draft_root, ignore_errors=True)
         raise
-    finally:
-        try:
-            watchdog.stop()
-        except Exception:
-            pass
-        try:
-            adapter.close()
-        except Exception:
-            pass
+
+
+def _consume_pending(handle: PendingPowerRemovalHandle) -> _PendingState:
+    token = handle.issuance_token.get_secret_value()
+    with _registry_lock:
+        state = _pending_registry.pop(token, None)
+    if state is None:
+        raise ValueError("pending power-removal handle is unknown or consumed")
+    if not (
+        state.issuing_pid == os.getpid()
+        and state.handle_ref is not None
+        and state.handle_ref() is handle
+        and state.draft == handle.draft
+        and _draft_digest(handle.draft) == handle.draft.draft_sha256
+    ):
+        raise ValueError("pending power-removal authority is invalid")
+    return state
+
+
+def finalize_hardware_identification(
+    *,
+    pending: PendingPowerRemovalHandle,
+    confirmation: PowerRemovalConfirmation,
+) -> ArtifactManifest:
+    """Publish COMPLETED only after a fresh, bound operator power-OFF fact."""
+
+    state = _consume_pending(pending)
+    draft = state.draft
+    if not (
+        confirmation.run_id == draft.run_id
+        and confirmation.challenge_id == draft.challenge_id
+        and confirmation.config_sha256 == draft.config_sha256
+        and confirmation.manifest_sha256 == draft.manifest_sha256
+        and confirmation.draft_sha256 == draft.draft_sha256
+    ):
+        raise ValueError("power-removal confirmation is not bound to the staged draft")
+    now_wall, now_ns = datetime.now(UTC), time.monotonic_ns()
+    if confirmation.confirmed_at > now_wall or (
+        confirmation.confirmed_monotonic_ns > now_ns
+    ):
+        raise ValueError("power-removal confirmation timestamp is in the future")
+    if confirmation.confirmed_monotonic_ns < draft.cleanup_completed_monotonic_ns:
+        raise ValueError("power removal must be confirmed after cleanup")
+    if now_ns - confirmation.confirmed_monotonic_ns >= 60_000_000_000:
+        raise ValueError("power-removal confirmation is stale")
+    removal = PowerRemovalProvenance.model_validate(
+        confirmation.model_dump(mode="python")
+    )
+    shutdown = HardwareShutdownProvenance(
+        final_home_verified=True,
+        watchdog_stopped=True,
+        adapter_closed=True,
+        observer_closed=True,
+        motion_ended_monotonic_ns=draft.motion_ended_monotonic_ns,
+        cleanup_completed_monotonic_ns=draft.cleanup_completed_monotonic_ns,
+        power_removal=removal,
+    )
+    metadata = state.manifest.identification_metadata
+    if metadata is None:
+        raise RuntimeError("staged hardware manifest lacks identification metadata")
+    final_manifest = state.manifest.model_copy(
+        update={
+            "ended_at": now_wall,
+            "identification_metadata": metadata.model_copy(
+                update={"shutdown_provenance": shutdown}
+            ),
+        }
+    )
+    files = {
+        str(path.relative_to(state.draft_directory)): path.read_bytes()
+        for path in state.draft_directory.rglob("*")
+        if path.is_file() and path.name not in {"manifest.json", "draft.json"}
+    }
+    files["manifest.json"] = json.dumps(
+        final_manifest.model_dump(mode="json"), sort_keys=True, indent=2
+    ).encode()
+    publish_generation(state.output_dir.parent.resolve(), state.output_dir.name, files)
+    shutil.rmtree(state.draft_directory.parent, ignore_errors=True)
+    return final_manifest
 
 
 def cancel_prepared_hardware_identification(

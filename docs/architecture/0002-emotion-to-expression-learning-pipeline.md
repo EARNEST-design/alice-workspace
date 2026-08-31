@@ -132,6 +132,26 @@ and all relevant configuration identities. Analyses estimate:
 - local Jacobians with uncertainty across operating regions;
 - timing, settling, and tracking latency.
 
+All reported variance uses the versioned population definition
+`population-ddof0/v1`: `mean((x - mean(x))^2)`, divisor `N`, `ddof=0`.
+Monotonicity is signed Home-to-offset response consistency. Asymmetry is the
+absolute difference between positive and negative one-sided slope magnitudes.
+Saturation is `1 - |outer incremental slope| / |inner Home-to-offset slope|`;
+the initial single-magnitude protocol reports it as typed missing/inconclusive,
+never as zero.
+
+The trusted hardware composition constructs the exact stable C525 camera and
+pinned MediaPipe observer internally. Motion results remain an unpublished
+`pending_power_removal` draft after final Home, watchdog stop, and interface
+cleanup. Only a fresh, hash-bound operator confirmation that master servo power
+is OFF can atomically publish `COMPLETED`. Cleanup uncertainty publishes
+sanitized `ABORTED` evidence and cannot later be upgraded.
+
+This composition boundary protects against accidental or in-scope experiment
+bypass. It is not a security boundary against arbitrary malicious Python in the
+same process importing low-level adapter classes. OS/process isolation and the
+operator-controlled servo-power switch remain authoritative.
+
 Phase 2 passes when the useful and unreliable observable dimensions are known,
 safe command limits are encoded, and a held-out repeat run reproduces the main
 actuator effects within documented tolerances.

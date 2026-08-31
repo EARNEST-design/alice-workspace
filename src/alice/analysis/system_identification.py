@@ -41,16 +41,34 @@ from alice.experiments.system_identification import (
 
 BOOTSTRAP_SEED: Final[Literal[20260831]] = 20260831
 BOOTSTRAP_REPLICATES = 2000
-ANALYZER_REVISION: Final[Literal["system-identification/v1"]] = (
-    "system-identification/v1"
+ANALYZER_REVISION: Final[Literal["system-identification/v2"]] = (
+    "system-identification/v2"
 )
-SNR_FORMULA_REVISION: Final[Literal["session-effect-rss-pooled/v1"]] = (
-    "session-effect-rss-pooled/v1"
+VARIANCE_DEFINITION_REVISION: Final[Literal["population-ddof0/v1"]] = (
+    "population-ddof0/v1"
+)
+VARIANCE_DEFINITION: Final[str] = "mean((x - mean(x))^2); divisor N; ddof=0"
+MONOTONICITY_DEFINITION: Final[str] = (
+    "mean sign agreement of Home-to-positive and Home-to-negative responses "
+    "with their commanded directions; range [0, 1]"
+)
+ASYMMETRY_DEFINITION: Final[str] = (
+    "abs(abs(positive one-sided slope) - abs(negative one-sided slope))"
+)
+SATURATION_DEFINITION_REVISION: Final[Literal["outer-inner-slope-ratio/v1"]] = (
+    "outer-inner-slope-ratio/v1"
+)
+SATURATION_DEFINITION: Final[str] = (
+    "1 - abs(outer incremental slope) / abs(inner Home-to-offset slope); "
+    "positive values indicate slope compression"
+)
+SNR_FORMULA_REVISION: Final[Literal["session-effect-rss-population/v2"]] = (
+    "session-effect-rss-population/v2"
 )
 SNR_FORMULA: Final[str] = (
     "signal = mean_session(abs(mean_positive_session - mean_negative_session) / 2); "
     "noise_sd = sqrt(sum_group(sum((x - mean_group)^2)) / "
-    "sum(n_group - 1)); SNR = signal / noise_sd"
+    "sum(n_group)); SNR = signal / noise_sd; population variance ddof=0"
 )
 HYSTERESIS_DEFINITION: Final[str] = (
     "Home-return hysteresis proxy: within each session, compare absolute mean "
@@ -156,10 +174,12 @@ class NamedMatrix(BaseModel):
 
 class IdentificationMetrics(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
-    schema_version: Literal["identification-metrics/v1"]
+    schema_version: Literal["identification-metrics/v2"]
     bootstrap_seed: Literal[20260831]
     bootstrap_replicates: int
     session_ids: tuple[NonEmptyString, ...]
+    variance_definition_revision: Literal["population-ddof0/v1"]
+    variance_definition: NonEmptyString
     jacobian: NamedMatrix
     baseline_variance: NamedMatrix
     between_session_baseline_variance: NamedMatrix
@@ -167,10 +187,17 @@ class IdentificationMetrics(BaseModel):
     between_session_position_variance: NamedMatrix
     within_position_noise_sd: NamedMatrix
     signal_to_noise: NamedMatrix
-    snr_formula_revision: Literal["session-effect-rss-pooled/v1"]
+    snr_formula_revision: Literal["session-effect-rss-population/v2"]
     snr_formula: NonEmptyString
     hysteresis: NamedMatrix
     hysteresis_definition: NonEmptyString
+    monotonicity: NamedMatrix
+    monotonicity_definition: NonEmptyString
+    asymmetry: NamedMatrix
+    asymmetry_definition: NonEmptyString
+    saturation: NamedMatrix
+    saturation_definition_revision: Literal["outer-inner-slope-ratio/v1"]
+    saturation_definition: NonEmptyString
     return_to_home_drift: NamedMatrix
     cross_effects: NamedMatrix
     actuator_coupling: NamedMatrix
@@ -274,7 +301,7 @@ class AnalyzerIdentity(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     package_version: NonEmptyString
     git_revision: NonEmptyString | None
-    analyzer_revision: Literal["system-identification/v1"]
+    analyzer_revision: Literal["system-identification/v2"]
 
 
 class IdentificationConclusion(BaseModel):
@@ -285,18 +312,27 @@ class IdentificationConclusion(BaseModel):
     reference_run_id: NonEmptyString
     held_out_repeat_run_id: NonEmptyString
     group_assignments: tuple[RunGroupAssignment, RunGroupAssignment]
+    monotonicity_status: Literal["estimated", "inconclusive"]
+    saturation_status: Literal["estimated", "inconclusive"]
+    asymmetry_status: Literal["estimated", "inconclusive"]
 
 
 class IdentificationAnalysisConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
-    analyzer_revision: Literal["system-identification/v1"]
+    analyzer_revision: Literal["system-identification/v2"]
     bootstrap_seed: Literal[20260831]
     bootstrap_replicates: int = Field(gt=0)
     input_config_sha256: tuple[Sha256Hex, ...]
     repeatability_thresholds_sha256: Sha256Hex
-    snr_formula_revision: Literal["session-effect-rss-pooled/v1"]
+    snr_formula_revision: Literal["session-effect-rss-population/v2"]
     snr_formula: NonEmptyString
     hysteresis_definition: NonEmptyString
+    variance_definition_revision: Literal["population-ddof0/v1"]
+    variance_definition: NonEmptyString
+    monotonicity_definition: NonEmptyString
+    asymmetry_definition: NonEmptyString
+    saturation_definition_revision: Literal["outer-inner-slope-ratio/v1"]
+    saturation_definition: NonEmptyString
     reference_run_id: NonEmptyString
     held_out_repeat_run_id: NonEmptyString
     group_assignments: tuple[RunGroupAssignment, RunGroupAssignment]
@@ -688,11 +724,132 @@ def estimate_local_jacobian(
         row_labels=actuators, column_labels=actuators, cells=tuple(coupling_cells)
     )
 
+    monotonicity_cells: list[MatrixCell] = []
+    asymmetry_cells: list[MatrixCell] = []
+    saturation_cells: list[MatrixCell] = []
+    for blendshape in blendshapes:
+        for actuator in actuators:
+            selected = [
+                sample for sample in samples if sample.actuator_name == actuator
+            ]
+            by_position: dict[float, list[float]] = defaultdict(list)
+            for sample in selected:
+                if blendshape in sample.blendshapes:
+                    by_position[sample.normalized_position].append(
+                        float(sample.blendshapes[blendshape])
+                    )
+            means_by_position = {
+                position: float(np.mean(values))
+                for position, values in by_position.items()
+            }
+            home = means_by_position.get(0.0)
+            positive_positions = sorted(
+                position for position in means_by_position if position > 0
+            )
+            negative_positions = sorted(
+                (position for position in means_by_position if position < 0),
+                key=abs,
+            )
+            if home is None or not positive_positions or not negative_positions:
+                reason = "Home and both signed offsets are required"
+                monotonicity_cells.append(_missing_cell(blendshape, actuator, reason))
+                asymmetry_cells.append(_missing_cell(blendshape, actuator, reason))
+            else:
+                positive_slope = (
+                    means_by_position[positive_positions[0]] - home
+                ) / positive_positions[0]
+                negative_slope = (
+                    means_by_position[negative_positions[0]] - home
+                ) / negative_positions[0]
+                expected_sign = np.sign(positive_slope + negative_slope)
+                agreements = (
+                    float(
+                        np.sign(means_by_position[positive_positions[0]] - home)
+                        == expected_sign
+                    ),
+                    float(
+                        np.sign(means_by_position[negative_positions[0]] - home)
+                        == -expected_sign
+                    ),
+                )
+                monotonicity_cells.append(
+                    _estimated_cell(
+                        blendshape,
+                        actuator,
+                        float(np.mean(agreements)),
+                        uncertainty_reason=(
+                            "signed-consistency uncertainty is unavailable"
+                        ),
+                    )
+                )
+                asymmetry_cells.append(
+                    _estimated_cell(
+                        blendshape,
+                        actuator,
+                        abs(abs(positive_slope) - abs(negative_slope)),
+                        uncertainty_reason=(
+                            "one-sided slope asymmetry uncertainty is unavailable"
+                        ),
+                    )
+                )
+            if (
+                home is None
+                or len(positive_positions) < 2
+                or len(negative_positions) < 2
+            ):
+                saturation_cells.append(
+                    _missing_cell(
+                        blendshape,
+                        actuator,
+                        "multiple nonzero magnitudes on both sides are required "
+                        "for saturation",
+                    )
+                )
+            else:
+                ratios: list[float] = []
+                for positions in (positive_positions, negative_positions):
+                    inner, outer = positions[0], positions[1]
+                    inner_slope = (means_by_position[inner] - home) / inner
+                    outer_incremental = (
+                        means_by_position[outer] - means_by_position[inner]
+                    ) / (outer - inner)
+                    if inner_slope != 0:
+                        ratios.append(1.0 - abs(outer_incremental) / abs(inner_slope))
+                saturation_cells.append(
+                    _estimated_cell(
+                        blendshape,
+                        actuator,
+                        float(np.mean(ratios)),
+                        uncertainty_reason="saturation uncertainty is unavailable",
+                    )
+                    if ratios
+                    else _undefined_cell(
+                        blendshape, actuator, "inner slope is zero on both sides"
+                    )
+                )
+    monotonicity = NamedMatrix(
+        row_labels=blendshapes,
+        column_labels=actuators,
+        cells=tuple(monotonicity_cells),
+    )
+    asymmetry = NamedMatrix(
+        row_labels=blendshapes,
+        column_labels=actuators,
+        cells=tuple(asymmetry_cells),
+    )
+    saturation = NamedMatrix(
+        row_labels=blendshapes,
+        column_labels=actuators,
+        cells=tuple(saturation_cells),
+    )
+
     return IdentificationMetrics(
-        schema_version="identification-metrics/v1",
+        schema_version="identification-metrics/v2",
         bootstrap_seed=BOOTSTRAP_SEED,
         bootstrap_replicates=BOOTSTRAP_REPLICATES,
         session_ids=sessions,
+        variance_definition_revision=VARIANCE_DEFINITION_REVISION,
+        variance_definition=VARIANCE_DEFINITION,
         jacobian=jacobian,
         baseline_variance=baseline_variance,
         between_session_baseline_variance=between_baseline_variance,
@@ -704,6 +861,13 @@ def estimate_local_jacobian(
         snr_formula=SNR_FORMULA,
         hysteresis=hysteresis,
         hysteresis_definition=HYSTERESIS_DEFINITION,
+        monotonicity=monotonicity,
+        monotonicity_definition=MONOTONICITY_DEFINITION,
+        asymmetry=asymmetry,
+        asymmetry_definition=ASYMMETRY_DEFINITION,
+        saturation=saturation,
+        saturation_definition_revision=SATURATION_DEFINITION_REVISION,
+        saturation_definition=SATURATION_DEFINITION,
         return_to_home_drift=home_drift,
         cross_effects=jacobian,
         actuator_coupling=coupling,
@@ -920,6 +1084,21 @@ def publish_identification_analysis(
         reference_run_id=reference_manifest.run_id,
         held_out_repeat_run_id=repeat_manifest.run_id,
         group_assignments=repeatability.group_assignments,
+        monotonicity_status=(
+            "estimated"
+            if any(cell.status == "estimated" for cell in metrics.monotonicity.cells)
+            else "inconclusive"
+        ),
+        saturation_status=(
+            "estimated"
+            if any(cell.status == "estimated" for cell in metrics.saturation.cells)
+            else "inconclusive"
+        ),
+        asymmetry_status=(
+            "estimated"
+            if any(cell.status == "estimated" for cell in metrics.asymmetry.cells)
+            else "inconclusive"
+        ),
     )
     template = (
         files("alice.resources")
@@ -930,6 +1109,9 @@ def publish_identification_analysis(
         outcome=conclusion.outcome,
         summary=conclusion.summary,
         warnings="\n".join(f"- {item}" for item in conclusion.warnings) or "- None",
+        monotonicity_status=conclusion.monotonicity_status,
+        saturation_status=conclusion.saturation_status,
+        asymmetry_status=conclusion.asymmetry_status,
     )
     payloads = {
         "identification-metrics.json": _pretty(metrics.model_dump(mode="json")),
@@ -962,6 +1144,12 @@ def publish_identification_analysis(
         snr_formula_revision=SNR_FORMULA_REVISION,
         snr_formula=SNR_FORMULA,
         hysteresis_definition=HYSTERESIS_DEFINITION,
+        variance_definition_revision=VARIANCE_DEFINITION_REVISION,
+        variance_definition=VARIANCE_DEFINITION,
+        monotonicity_definition=MONOTONICITY_DEFINITION,
+        asymmetry_definition=ASYMMETRY_DEFINITION,
+        saturation_definition_revision=SATURATION_DEFINITION_REVISION,
+        saturation_definition=SATURATION_DEFINITION,
         reference_run_id=reference_manifest.run_id,
         held_out_repeat_run_id=repeat_manifest.run_id,
         group_assignments=repeatability.group_assignments,
@@ -1288,7 +1476,7 @@ def _samples_from_artifacts(
             )
         for name, values in observed_by_name.items():
             expected_mean = float(np.mean(values))
-            expected_variance = float(np.var(values, ddof=1))
+            expected_variance = float(np.var(values, ddof=0))
             if not math.isclose(
                 recorded_means[name], expected_mean, abs_tol=1e-12
             ) or not math.isclose(
@@ -1518,19 +1706,19 @@ def _effect_and_noise(
         return None, None
     signal = float(np.mean(session_effects))
     residual_sum_squares = 0.0
-    residual_degrees_of_freedom = 0
+    residual_population_count = 0
     for values in groups.values():
         if len(values) < 2:
             continue
         group_mean = float(np.mean(values))
         residual_sum_squares += sum((value - group_mean) ** 2 for value in values)
-        residual_degrees_of_freedom += len(values) - 1
-    if residual_degrees_of_freedom == 0:
+        residual_population_count += len(values)
+    if residual_population_count == 0:
         noise = None
     elif residual_sum_squares <= 1e-24:
         noise = 0.0
     else:
-        noise = math.sqrt(residual_sum_squares / residual_degrees_of_freedom)
+        noise = math.sqrt(residual_sum_squares / residual_population_count)
     return signal, noise
 
 
@@ -1572,7 +1760,7 @@ def _variance_cell(row: str, column: str, values: Sequence[float]) -> MatrixCell
     return _estimated_cell(
         row,
         column,
-        float(np.var(values, ddof=1)),
+        float(np.var(values, ddof=0)),
         uncertainty_reason="variance confidence interval is not estimated",
     )
 
@@ -1590,7 +1778,7 @@ def _variance_components(
             step_groups[(sample.session_id, sample.step_id)].append(value)
             session_groups[sample.session_id].append(value)
     within = [
-        float(np.var(values, ddof=1))
+        float(np.var(values, ddof=0))
         for values in step_groups.values()
         if len(values) >= 2
     ]
@@ -1606,7 +1794,7 @@ def _variance_components(
     session_means = [float(np.mean(values)) for values in session_groups.values()]
     if len(session_means) >= 2:
         between_metric = _estimated_metric(
-            float(np.var(session_means, ddof=1)),
+            float(np.var(session_means, ddof=0)),
             "between-session variance confidence interval is not estimated",
         )
     else:

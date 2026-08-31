@@ -130,10 +130,12 @@ def test_run_preview_draws_mesh_and_top_scores_until_q() -> None:
     assert detector.closed is True
     assert detector.close_count == 1
     assert drawer.mesh_calls == [((0.25, 0.5), (0.75, 0.5))]
-    assert drawer.score_calls == [(
-        ("browInnerUp", 0.3),
-        ("jawOpen", 0.2),
-    )]
+    assert drawer.score_calls == [
+        (
+            ("browInnerUp", 0.3),
+            ("jawOpen", 0.2),
+        )
+    ]
     assert drawer.status_calls == ["face confidence: 0.880"]
     assert window.destroyed_titles == ["Alice Preview"]
     assert window.shown[0][0] == "Alice Preview"

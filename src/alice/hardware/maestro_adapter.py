@@ -87,7 +87,12 @@ def _default_transport_factory(path: str, timeout_seconds: float) -> SerialTrans
 
 
 class MaestroAdapter:
-    """Maestro adapter which cannot connect during import or construction."""
+    """Advanced low-level adapter; use only from the trusted hardware root.
+
+    Construction is disconnected, but this class is not an in-process security
+    boundary. Application and experiment code must use the reviewed staged
+    hardware-identification composition instead of instantiating it directly.
+    """
 
     def __init__(
         self,
@@ -189,11 +194,13 @@ class MaestroAdapter:
                 definition = self._manifest.actuator(current_name)
                 target_qus = definition.target_qus(target.normalized_position)
                 self._write_all(encode_set_target(definition.channel, target_qus))
-                controller_samples.extend(self._wait_for_target(
-                    actuator_name=current_name,
-                    channel=definition.channel,
-                    target_qus=target_qus,
-                ))
+                controller_samples.extend(
+                    self._wait_for_target(
+                        actuator_name=current_name,
+                        channel=definition.channel,
+                        target_qus=target_qus,
+                    )
+                )
                 confirmed.append(target)
             self._write_all(encode_get_errors())
             errors = parse_error_register(self._read_exact(2))

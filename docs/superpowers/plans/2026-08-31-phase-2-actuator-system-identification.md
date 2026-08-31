@@ -13,6 +13,8 @@
 ## Global Constraints
 
 - Mock and replay adapters are the defaults; importing or constructing an adapter never opens a serial device.
+- Hardware completion is a three-stage prepare/execute/finalize lifecycle; execute returns an unpublished `pending_power_removal` capability and only a fresh bound power-OFF confirmation publishes `COMPLETED`.
+- The hardware root constructs the exact C525/MediaPipe observer internally; low-level Python APIs are not a malicious in-process security boundary.
 - No hardware task runs without a separately reviewed bring-up procedure and contemporaneous user approval.
 - Commands use semantic actuator names and carry schema, calibration, timestamp, expiry, and run identity.
 - Dimension mismatch, non-finite values, stale commands, unknown identities, and out-of-limit targets fail closed.
@@ -207,6 +209,11 @@ Expected: FAIL because analysis does not exist.
 - [ ] **Step 3: Implement analysis and machine-readable metrics**
 
 Use session-grouped samples, preserve actuator and blendshape names, emit NumPy arrays only internally, and serialize named matrices with explicit row/column labels. Report uncertainty rather than replacing missing effects with zero.
+
+Use the versioned population variance definition (`ddof=0`) consistently.
+Serialize named monotonicity, one-sided slope asymmetry, and outer/inner slope
+saturation formulas. A single-magnitude protocol must report saturation as
+typed missing/inconclusive.
 
 - [ ] **Step 4: Verify and commit**
 

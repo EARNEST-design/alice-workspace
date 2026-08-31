@@ -104,6 +104,84 @@ def test_reports_variance_snr_hysteresis_cross_effects_and_settling() -> None:
     assert metrics.total_command_to_visual_settled_ms.value == pytest.approx(8.0)
 
 
+def test_all_reported_variance_uses_versioned_population_definition() -> None:
+    samples = [
+        IdentificationSample(
+            session_id="session-a",
+            step_id="positive",
+            sequence_index=1,
+            actuator_name="mouth_open",
+            normalized_position=0.1,
+            phase="positive",
+            blendshapes={"jawOpen": value},
+        )
+        for value in (0.1, 0.2, 0.4)
+    ]
+    samples += [
+        IdentificationSample(
+            session_id="session-a",
+            step_id=f"home-{index}",
+            sequence_index=index + 2,
+            actuator_name="mouth_open",
+            normalized_position=position,
+            phase=phase,
+            blendshapes={"jawOpen": value},
+        )
+        for index, (position, phase, value) in enumerate(
+            ((0.0, "home", 0.0), (-0.1, "negative", -0.2))
+        )
+    ]
+
+    metrics = estimate_local_jacobian(samples)
+
+    assert metrics.variance_definition_revision == "population-ddof0/v1"
+    assert metrics.variance_definition == "mean((x - mean(x))^2); divisor N; ddof=0"
+    assert _cell(
+        metrics.position_variance, "jawOpen", "mouth_open:+0.1"
+    ).value == pytest.approx(0.015555555555555557)
+
+
+def test_monotonicity_asymmetry_and_single_magnitude_saturation_are_typed() -> None:
+    metrics = estimate_local_jacobian(_samples("session-a"))
+
+    assert _cell(metrics.monotonicity, "jawOpen", "mouth_open").value == 1.0
+    assert _cell(metrics.asymmetry, "jawOpen", "mouth_open").status == "estimated"
+    saturation = _cell(metrics.saturation, "jawOpen", "mouth_open")
+    assert saturation.status == "missing"
+    assert "multiple nonzero magnitudes" in (saturation.reason or "")
+
+
+def test_saturation_uses_named_outer_to_inner_slope_ratio() -> None:
+    samples: list[IdentificationSample] = []
+    for index, (position, phase, value) in enumerate(
+        (
+            (0.0, "home", 0.0),
+            (0.05, "positive", 0.10),
+            (0.10, "positive", 0.15),
+            (-0.05, "negative", -0.10),
+            (-0.10, "negative", -0.15),
+        )
+    ):
+        samples.append(
+            IdentificationSample(
+                session_id="session-a",
+                step_id=f"step-{index}",
+                sequence_index=index,
+                actuator_name="mouth_open",
+                normalized_position=position,
+                phase=phase,
+                blendshapes={"jawOpen": value},
+            )
+        )
+
+    metrics = estimate_local_jacobian(samples)
+
+    assert metrics.saturation_definition_revision == "outer-inner-slope-ratio/v1"
+    assert _cell(metrics.saturation, "jawOpen", "mouth_open").value == pytest.approx(
+        0.5
+    )
+
+
 def test_within_session_variance_excludes_between_session_offsets() -> None:
     first = _samples("session-a")
     second = [
@@ -133,9 +211,7 @@ def test_within_session_variance_excludes_between_session_offsets() -> None:
     assert _cell(metrics.signal_to_noise, "jawOpen", "mouth_open").status == "undefined"
 
 
-def test_snr_uses_session_effects_and_rss_over_within_group_degrees_of_freedom() -> (
-    None
-):
+def test_snr_uses_session_effects_and_population_rss() -> None:
     samples: list[IdentificationSample] = []
     for session in ("a", "b"):
         for index, (position, phase, values) in enumerate(
@@ -163,14 +239,14 @@ def test_snr_uses_session_effects_and_rss_over_within_group_degrees_of_freedom()
 
     metrics = estimate_local_jacobian(samples)
 
-    assert metrics.snr_formula_revision == "session-effect-rss-pooled/v1"
-    assert "sum(n_group - 1)" in metrics.snr_formula
+    assert metrics.snr_formula_revision == "session-effect-rss-population/v2"
+    assert "sum(n_group)" in metrics.snr_formula
     assert _cell(
         metrics.within_position_noise_sd, "jawOpen", "mouth_open"
-    ).value == pytest.approx(2**0.5)
+    ).value == pytest.approx(1.0)
     assert _cell(
         metrics.signal_to_noise, "jawOpen", "mouth_open"
-    ).value == pytest.approx(1 / (2**0.5))
+    ).value == pytest.approx(1.0)
 
 
 def test_hysteresis_uses_absolute_direction_pairs_and_is_separate_from_home_drift() -> (
@@ -625,6 +701,43 @@ def _artifact_run(
     return run
 
 
+def test_real_artifact_round_trip_accepts_population_variance_semantics(
+    tmp_path: Path,
+) -> None:
+    run = _artifact_run(tmp_path)
+    observations = [
+        json.loads(line)
+        for line in (run / "observations.jsonl").read_text().splitlines()
+    ]
+    positive = [record for record in observations if record["step_id"] == "step-0002"]
+    for record, value in zip(positive, (0.1, 0.2, 0.4), strict=True):
+        record["observation"]["scores"][0]["score"] = value
+    _rewrite_artifact(run, "observations.jsonl", observations)
+    visual = [
+        json.loads(line)
+        for line in (run / "visual-settling.jsonl").read_text().splitlines()
+    ]
+    decision = next(
+        item["decision"] for item in visual if item["step_id"] == "step-0002"
+    )
+    decision["means"][0]["value"] = 0.23333333333333334
+    decision["variances"][0]["value"] = 0.015555555555555557
+    _rewrite_artifact(run, "visual-settling.jsonl", visual)
+    manifest = json.loads((run / "manifest.json").read_text())
+    manifest["config"]["maximum_visual_variance"] = 0.02
+    config_hash = hashlib.sha256(
+        json.dumps(manifest["config"], sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    manifest["identification_metadata"]["config_sha256"] = config_hash
+    (run / "manifest.json").write_text(json.dumps(manifest))
+
+    metrics = analyze_identification_artifacts([run])
+
+    assert _cell(
+        metrics.position_variance, "jawOpen", "mouth_open:+0.1"
+    ).value == pytest.approx(0.015555555555555557)
+
+
 def test_artifact_analysis_verifies_inputs_and_publishes_immutable_generation(
     tmp_path: Path,
 ) -> None:
@@ -641,8 +754,15 @@ def test_artifact_analysis_verifies_inputs_and_publishes_immutable_generation(
     assert manifest.analysis_kind == "system_identification"
     assert manifest.bootstrap_seed == BOOTSTRAP_SEED
     assert manifest.config.bootstrap_seed == BOOTSTRAP_SEED
-    assert manifest.config.snr_formula_revision == "session-effect-rss-pooled/v1"
-    assert "sum(n_group - 1)" in manifest.config.snr_formula
+    assert manifest.config.snr_formula_revision == "session-effect-rss-population/v2"
+    assert "sum(n_group)" in manifest.config.snr_formula
+    assert manifest.config.variance_definition_revision == "population-ddof0/v1"
+    assert manifest.config.saturation_definition_revision == (
+        "outer-inner-slope-ratio/v1"
+    )
+    assert manifest.conclusion.monotonicity_status == "estimated"
+    assert manifest.conclusion.saturation_status == "inconclusive"
+    assert manifest.conclusion.asymmetry_status == "estimated"
     assert (
         manifest.config_sha256
         == hashlib.sha256(

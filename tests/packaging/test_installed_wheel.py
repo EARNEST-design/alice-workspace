@@ -63,6 +63,12 @@ def test_built_wheel_runs_entry_points_without_repository_files(
         cwd=outside_repository,
         env=clean_env,
     )
+    hardware_run_help = _run(
+        str(environment / "bin" / "alice-hardware-run"),
+        "--help",
+        cwd=outside_repository,
+        env=clean_env,
+    )
     probe = _run(
         str(environment / "bin" / "python"),
         "-c",
@@ -84,6 +90,7 @@ def test_built_wheel_runs_entry_points_without_repository_files(
     assert "alice-camera" in camera_help
     assert "alice-passive-capture" in passive_help
     assert "Phase 2 hardware" in hardware_help
+    assert "Guarded Phase 2" in hardware_run_help
     assert "['opencv-contrib-python']" in probe
     assert "# Passive Blendshape Conclusion" in probe
     assert "# Actuator-identification conclusion" in probe

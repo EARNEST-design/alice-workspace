@@ -166,6 +166,32 @@ class PowerConfirmationProvenance(BaseModel):
     operator_acknowledgment: NonEmptyString
 
 
+class PowerRemovalProvenance(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    run_id: NonEmptyString
+    challenge_id: NonEmptyString
+    config_sha256: Sha256Hex
+    manifest_sha256: Sha256Hex
+    draft_sha256: Sha256Hex
+    confirmed_at: AwareDatetime
+    confirmed_monotonic_ns: Annotated[int, Field(ge=0)]
+    source: NonEmptyString
+    operator_acknowledgment: NonEmptyString
+
+
+class HardwareShutdownProvenance(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    final_home_verified: Literal[True]
+    watchdog_stopped: Literal[True]
+    adapter_closed: Literal[True]
+    observer_closed: Literal[True]
+    motion_ended_monotonic_ns: Annotated[int, Field(ge=0)]
+    cleanup_completed_monotonic_ns: Annotated[int, Field(ge=0)]
+    power_removal: PowerRemovalProvenance
+
+
 class ElectricalSafetyProvenance(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -253,8 +279,7 @@ class HardwareIdentificationProvenance(BaseModel):
         ):
             raise ValueError("hardware provenance run identity mismatch")
         if not (
-            self.power_challenge.challenge_id
-            == self.power_confirmation.challenge_id
+            self.power_challenge.challenge_id == self.power_confirmation.challenge_id
             and self.power_challenge.challenge_sha256
             == self.power_confirmation.challenge_sha256
         ):
@@ -279,13 +304,13 @@ class IdentificationRunMetadata(BaseModel):
     calibration_sha256: Sha256Hex
     config_sha256: Sha256Hex
     hardware_provenance: HardwareIdentificationProvenance | None = None
+    shutdown_provenance: HardwareShutdownProvenance | None = None
 
     @model_validator(mode="after")
     def validate_hardware_config_identity(self) -> IdentificationRunMetadata:
         if (
             self.hardware_provenance is not None
-            and self.config_sha256
-            != self.hardware_provenance.execution_config_sha256
+            and self.config_sha256 != self.hardware_provenance.execution_config_sha256
         ):
             raise ValueError("execution config checksum does not match provenance")
         return self

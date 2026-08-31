@@ -98,8 +98,8 @@ class OpenCVCamera(FrameSource):
         self.width = width
         self.height = height
         self.fps = fps
-        self._capture_factory = (
-            capture_factory or cast(CaptureFactory, cv2.VideoCapture)
+        self._capture_factory = capture_factory or cast(
+            CaptureFactory, cv2.VideoCapture
         )
         self._now = now or (lambda: datetime.now(UTC))
         self._monotonic_ns = monotonic_ns or time.monotonic_ns

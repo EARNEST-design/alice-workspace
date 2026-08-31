@@ -46,7 +46,7 @@ With master servo power OFF:
    ```
 
 10. Review the exact file hashes. A second invocation with `--enable-hardware` still performs validation only; type the full hash-bound phrase when prompted. This is not execution approval.
-11. Record typed wall-clock and monotonic timestamps, source, and exact operator acknowledgment in both `HardwarePreflightAttestation` and `HardwareApproval`. Approval binds the exact config, manifest, and electrical-evidence hashes and expires after the configured age. Only the trusted application may call the two-stage composition; neither stage accepts an adapter, transport, supervisor, clock, resolver, factory, or dynamic import seam.
+11. Record typed wall-clock and monotonic timestamps, source, and exact operator acknowledgment in both `HardwarePreflightAttestation` and `HardwareApproval`. Approval binds the exact config, manifest, and electrical-evidence hashes and expires after the configured age. Only the trusted application may call the staged composition; it constructs the exact stable C525 and pinned MediaPipe detector internally and accepts no observer, camera, detector, adapter, transport, supervisor, clock, resolver, factory, or dynamic import seam.
 
 ## Device-reading preflight (explicit, still no motion command)
 
@@ -64,8 +64,19 @@ After preparation returns—and only then—the operator may turn the master ser
 
 Observe Alice continuously. The runner commands channel 6 only: Home, `+0.05`, Home, `-0.05`, Home. It waits for controller-output and camera settling before each sample and independently verifies each Home. Never continue after a fault.
 
+Use the installed `alice-hardware-run` command for the approved run. It visibly
+pauses after preparation for the power-ON acknowledgment, executes, then pauses
+again for physical power removal. It creates confirmation timestamps only after
+the corresponding operator input. The repository placeholder config is
+verifier-only and cannot enter preparation.
+
 Recovery to Home is permitted only while the supervisor knows the complete applied command state and communications remain healthy. If command state is ambiguous, a write/read fails, the adapter is poisoned, or the watchdog closes it, software must not guess or send recovery motion: revoke all permits, close serial, remove servo power, and require manual inspection plus a new preflight.
 
 ## Abort and completion evidence
 
-Stop on any controller error; Home miss; visual variance breach; face/camera loss; timeout; unexpected movement/noise/heat; binding; competing process; hash/identity change; or operator request. Preserve only derived blendshape/actuator artifacts and manifests—no raw face imagery. A completed run must end with independently verified Home, error register zero, adapter closed, and servo power removed. Successful and failed manifests checksum a typed, non-secret hardware-provenance artifact containing the exact raw approved config hash, approval identity, challenge and power confirmation, structured electrical evidence, resolved USB identity, read-only controller results, and independent-watchdog limits. Enable tokens, issuance capabilities, and free-form approval confirmation text are never serialized. Any `BaseException` after execution begins triggers best-effort permit revocation, serial close, safe terminalization, and atomic publication of a sanitized Phase 2 failure manifest; the original exception remains primary. Record faults even when the run aborts.
+Stop on any controller error; Home miss; visual variance breach; face/camera loss; timeout; unexpected movement/noise/heat; binding; competing process; hash/identity change; or operator request. Preserve only derived blendshape/actuator artifacts and manifests—no raw face imagery. After motion ends at independently verified Home, the watchdog, Maestro adapter, camera, and detector must close successfully. The result is still an unpublished `pending_power_removal` draft. Remove master servo power, then enter the exact power-OFF acknowledgment; a fresh `PowerRemovalConfirmation` binds the run, challenge, config, manifest, draft hash, wall time, monotonic time, and source. Only finalization atomically publishes `COMPLETED` with typed shutdown provenance. Cleanup uncertainty publishes sanitized `ABORTED`/incomplete evidence, requires physical power removal, and can never be upgraded to completed. Successful and failed manifests contain typed, non-secret provenance. Enable tokens, issuance capabilities, and free-form approval confirmation text are never serialized. Any `BaseException` after execution begins triggers best-effort permit revocation, serial close, safe terminalization, and atomic publication of a sanitized Phase 2 failure manifest; the original exception remains primary. Record faults even when the run aborts.
+
+The trusted Python composition prevents accidental experiment-code bypass; it
+does not defend against arbitrary malicious in-process Python importing the
+low-level Maestro class. Run only reviewed code in a dedicated process. The OS
+process boundary and operator power-removal control are authoritative.

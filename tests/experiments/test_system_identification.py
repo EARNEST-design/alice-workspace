@@ -253,9 +253,9 @@ def config(manifest: HardwareManifest, **updates: Any) -> IdentificationConfig:
         "hardware_id": manifest.hardware_id,
         "calibration_sha256": manifest.calibration_sha256,
         "hardware_manifest_path": str(manifest_path),
-        "hardware_manifest_sha256": __import__("hashlib").sha256(
-            manifest_path.read_bytes()
-        ).hexdigest(),
+        "hardware_manifest_sha256": __import__("hashlib")
+        .sha256(manifest_path.read_bytes())
+        .hexdigest(),
         "hardware_manifest_canonical_sha256": manifest.canonical_sha256,
         "actuator_names": ("mouth_open",),
         "offsets": (0.1, -0.1),
@@ -300,9 +300,7 @@ def config(manifest: HardwareManifest, **updates: Any) -> IdentificationConfig:
     return IdentificationConfig.model_validate(values)
 
 
-def armed_supervisor(
-    manifest: HardwareManifest, clock: FakeClock
-) -> SafetySupervisor:
+def armed_supervisor(manifest: HardwareManifest, clock: FakeClock) -> SafetySupervisor:
     supervisor = SafetySupervisor(
         manifest=manifest,
         limits=SafetyLimits(
@@ -415,9 +413,11 @@ def test_exact_sequence_waits_for_status_and_settling_and_correlates_artifacts(
     ]
     statuses = jsonl(run_dir, "statuses.jsonl")
     observations = jsonl(run_dir, "observations.jsonl")
-    assert {item["step_id"] for item in commands} == {
-        item["step_id"] for item in statuses
-    } == {item["step_id"] for item in observations}
+    assert (
+        {item["step_id"] for item in commands}
+        == {item["step_id"] for item in statuses}
+        == {item["step_id"] for item in observations}
+    )
     status_time = {item["step_id"]: item["monotonic_ns"] for item in statuses}
     for item in observations:
         assert item["observation"]["monotonic_ns"] >= (
@@ -452,9 +452,10 @@ def test_exact_sequence_waits_for_status_and_settling_and_correlates_artifacts(
     assert metadata["safety_limits"]["watchdog_timeout_ns"] == 5_000_000_000
     assert metadata["preflight"]["run_id"] == config(manifest).run_id
     assert metadata["approval"]["approval_id"] == "mock-approval"
-    assert metadata["hardware_manifest_sha256"] == config(
-        manifest
-    ).hardware_manifest_sha256
+    assert (
+        metadata["hardware_manifest_sha256"]
+        == config(manifest).hardware_manifest_sha256
+    )
     assert stored_manifest["camera_settings"]["width"]["value"] == 640
 
 
@@ -571,9 +572,12 @@ def test_private_core_records_raw_config_and_checksummed_hardware_provenance(
     assert result.identification_metadata.config_sha256 == execution_config_sha256
     assert result.identification_metadata.hardware_provenance == provenance
     record = result.artifacts["hardware-provenance.json"]
-    assert record.sha256 == hashlib.sha256(
-        (run_dir / "hardware-provenance.json").read_bytes()
-    ).hexdigest()
+    assert (
+        record.sha256
+        == hashlib.sha256(
+            (run_dir / "hardware-provenance.json").read_bytes()
+        ).hexdigest()
+    )
     metrics = analyze_identification_artifacts([run_dir])
     assert metrics.session_ids == ("mock-identification-001",)
 

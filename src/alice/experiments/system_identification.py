@@ -70,9 +70,7 @@ class IdentificationStep(BaseModel):
 
     step_id: NonEmptyString
     actuator_name: NonEmptyString
-    normalized_position: Annotated[
-        float, Field(ge=-1.0, le=1.0, allow_inf_nan=False)
-    ]
+    normalized_position: Annotated[float, Field(ge=-1.0, le=1.0, allow_inf_nan=False)]
     phase: Literal["home", "positive", "negative"]
 
     @model_validator(mode="after")
@@ -145,9 +143,7 @@ class IdentificationConfig(BaseModel):
     sample_interval_ms: int = Field(ge=0)
     step_timeout_ms: int = Field(gt=0)
     command_ttl_ms: int = Field(gt=0)
-    maximum_visual_variance: Annotated[
-        float, Field(ge=0.0, allow_inf_nan=False)
-    ]
+    maximum_visual_variance: Annotated[float, Field(ge=0.0, allow_inf_nan=False)]
     home_delta_tolerances: Mapping[
         NonEmptyString, Annotated[float, Field(ge=0.0, allow_inf_nan=False)]
     ]
@@ -518,7 +514,7 @@ def _composition_problem(
     retained_manifest: HardwareManifest | None = None,
     retained_manifest_sha256: str | None = None,
 ) -> tuple[str, str, FailureCategory] | None:
-    if observer != config.observer:
+    if not _observer_provenance_matches(config.observer, observer):
         return (
             "observer-identity-mismatch",
             "runtime observer provenance differs from reviewed config",
@@ -583,6 +579,27 @@ def _composition_problem(
     return None
 
 
+def _observer_provenance_matches(
+    expected: IdentificationObserverProvenance,
+    actual: IdentificationObserverProvenance,
+) -> bool:
+    if (
+        actual.camera_id != expected.camera_id
+        or actual.detector != expected.detector
+        or actual.detector_model_sha256 != expected.detector_model_sha256
+    ):
+        return False
+    for name in ("width", "height", "fps", "focus", "exposure"):
+        expected_setting = getattr(expected.camera_settings, name)
+        actual_setting = getattr(actual.camera_settings, name)
+        if (
+            expected_setting.availability.value == "available"
+            and actual_setting != expected_setting
+        ):
+            return False
+    return True
+
+
 def _config_sha256(config: IdentificationConfig) -> str:
     payload = json.dumps(
         config.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
@@ -594,9 +611,7 @@ def _steps(config: IdentificationConfig) -> tuple[IdentificationStep, ...]:
     steps: list[IdentificationStep] = []
     index = 0
     for actuator_name in config.actuator_names:
-        sequence: tuple[
-            tuple[float, Literal["home", "positive", "negative"]], ...
-        ] = (
+        sequence: tuple[tuple[float, Literal["home", "positive", "negative"]], ...] = (
             (0.0, "home"),
             (config.offsets[0], "positive"),
             (0.0, "home"),
@@ -848,8 +863,7 @@ def _validate_observation(
     if (
         observation.camera_id != config.observer.camera_id
         or observation.detector != config.observer.detector
-        or observation.detector_model_sha256
-        != config.observer.detector_model_sha256
+        or observation.detector_model_sha256 != config.observer.detector_model_sha256
     ):
         raise _ControlledAbort(
             "observer-identity-mismatch",
@@ -984,8 +998,10 @@ def _visual_decision(
                 for item in means
                 if item.name in reference
             )
-            exact_schema = {item.name for item in means} == set(reference) == set(
-                config.home_delta_tolerances
+            exact_schema = (
+                {item.name for item in means}
+                == set(reference)
+                == set(config.home_delta_tolerances)
             )
             baseline_accepted = exact_schema and all(
                 item.value <= config.home_delta_tolerances[item.name]
@@ -1537,12 +1553,15 @@ def _safe_error_type(value: str) -> str:
 
 def _git_revision() -> str | None:
     try:
-        return subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=2,
-        ).stdout.strip() or None
+        return (
+            subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=2,
+            ).stdout.strip()
+            or None
+        )
     except (OSError, subprocess.SubprocessError):
         return None

@@ -172,15 +172,15 @@ def test_capture_retains_frames_only_with_approval(
             "policy_id": "raw-policy",
             "mode": "raw_frames",
             "retention_duration_days": 30,
-                "raw_approval": {
-                    "approval_id": "privacy-approval-001",
-                    "scope": "Alice robot-face calibration frames only",
-                    "approval_source": "reviewed test procedure",
-                    "consent_provenance": "robot owner; no participant present",
-                    "approved_at": "2026-08-30T00:00:00Z",
-                    "expires_at": "2026-09-30T00:00:00Z",
-                    "retention_duration_days": 30,
-                },
+            "raw_approval": {
+                "approval_id": "privacy-approval-001",
+                "scope": "Alice robot-face calibration frames only",
+                "approval_source": "reviewed test procedure",
+                "consent_provenance": "robot owner; no participant present",
+                "approved_at": "2026-08-30T00:00:00Z",
+                "expires_at": "2026-09-30T00:00:00Z",
+                "retention_duration_days": 30,
+            },
         },
     )
 
@@ -559,9 +559,7 @@ def test_capture_aborts_when_observation_exceeds_configured_maximum_age(
         def observe(self, frame: CapturedFrame, run_id: str) -> BlendshapeObservation:
             observation = super().observe(frame, run_id)
             return observation.model_copy(
-                update={
-                    "observed_at": frame.captured_at + timedelta(milliseconds=251)
-                }
+                update={"observed_at": frame.captured_at + timedelta(milliseconds=251)}
             )
 
     frames = [

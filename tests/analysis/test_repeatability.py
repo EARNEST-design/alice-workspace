@@ -119,9 +119,7 @@ def _write_run(run_dir: Path, run_id: str, scores: tuple[float, ...]) -> None:
         "config": {
             "maximum_observation_age_ms": 250,
             "acceptance_thresholds": None,
-            "repeatability_thresholds": {
-                "maximum_mean_delta": {"jawOpen": 0.2}
-            },
+            "repeatability_thresholds": {"maximum_mean_delta": {"jawOpen": 0.2}},
         },
         "artifacts": {
             "observations.jsonl": {
@@ -186,7 +184,8 @@ def test_compare_cli_publishes_checksummed_repeatability_generation(
     ]
     for artifact_name in ("repeatability-metrics.json", "acceptance.json"):
         record = analysis_manifest["artifacts"][artifact_name]
-        assert sha256((generation_dir / artifact_name).read_bytes()).hexdigest() == (
-            record["sha256"]
+        assert (
+            sha256((generation_dir / artifact_name).read_bytes()).hexdigest()
+            == (record["sha256"])
         )
     assert "pass" in stdout.getvalue()

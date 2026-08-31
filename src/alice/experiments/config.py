@@ -111,12 +111,9 @@ class RetentionPolicy(BaseModel):
             raise ValueError("raw_approval is not allowed for derived-only retention")
         if (
             self.raw_approval is not None
-            and self.retention_duration_days
-            > self.raw_approval.retention_duration_days
+            and self.retention_duration_days > self.raw_approval.retention_duration_days
         ):
-            raise ValueError(
-                "retention duration exceeds approved retention duration"
-            )
+            raise ValueError("retention duration exceeds approved retention duration")
         return self
 
 

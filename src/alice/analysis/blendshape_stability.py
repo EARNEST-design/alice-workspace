@@ -157,8 +157,7 @@ def analyze_observations(
     total_frames = len(observation_list)
     valid_frames = len(valid_observations)
     categories = {
-        name: _category_metrics(values)
-        for name, values in category_scores.items()
+        name: _category_metrics(values) for name, values in category_scores.items()
     }
     detection_rate = 0.0 if total_frames == 0 else valid_frames / total_frames
     correlation_matrix = _correlation_matrix(category_scores, category_names)
@@ -191,8 +190,7 @@ def analyze_stability(run_dir: Path) -> StabilityMetrics:
     )
     if manifest.status != "completed":
         raise ValueError(
-            "only completed manifests may be analyzed: "
-            f"status={manifest.status.value}"
+            f"only completed manifests may be analyzed: status={manifest.status.value}"
         )
 
     observations_path = _verified_observations_path(manifest, run_path)
@@ -643,8 +641,7 @@ def _evaluate_check(
         observed=observed,
         status=status,
         message=(
-            f"{metric_path} {comparator} {expected:.6f} "
-            f"(observed {observed:.6f})"
+            f"{metric_path} {comparator} {expected:.6f} (observed {observed:.6f})"
         ),
     )
 

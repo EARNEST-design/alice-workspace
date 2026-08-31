@@ -114,9 +114,7 @@ def repeatability_acceptance(
     checks: list[AcceptanceCheck] = []
     for category_name, expected in sorted(configured.maximum_mean_delta.items()):
         category = metrics.categories.get(category_name)
-        observed = (
-            None if category is None else category.maximum_pairwise_mean_delta
-        )
+        observed = None if category is None else category.maximum_pairwise_mean_delta
         if observed is None:
             checks.append(
                 AcceptanceCheck(
@@ -155,9 +153,7 @@ def repeatability_acceptance(
         outcome = AcceptanceOutcome.INCONCLUSIVE
     else:
         outcome = AcceptanceOutcome.PASS
-    reasons = (
-        ("one or more repeatability metrics were undefined",) if undefined else ()
-    )
+    reasons = ("one or more repeatability metrics were undefined",) if undefined else ()
     if not checks:
         reasons = ("no repeatability thresholds configured",)
     return AcceptanceResult(

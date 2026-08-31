@@ -105,9 +105,7 @@ def test_fault_status_preserves_partially_applied_targets() -> None:
     status = make_status(
         state=ActuatorStatusState.FAULT,
         fault_code="partial-write",
-        applied_targets=(
-            {"actuator_name": "mouth_open", "normalized_position": 0.1},
-        ),
+        applied_targets=({"actuator_name": "mouth_open", "normalized_position": 0.1},),
     )
 
     assert status.applied_targets == (

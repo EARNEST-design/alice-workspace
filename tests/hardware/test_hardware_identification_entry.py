@@ -11,6 +11,7 @@ import time
 from dataclasses import fields, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -24,9 +25,11 @@ from alice.experiments.hardware_identification import (
     HardwarePreflightAttestation,
     LinuxUsbIdentity,
     PowerEnableConfirmation,
+    PowerRemovalConfirmation,
     PreparedHardwareHandle,
     cancel_prepared_hardware_identification,
     execute_prepared_hardware_identification,
+    finalize_hardware_identification,
     load_hardware_identification_config,
     prepare_hardware_identification,
 )
@@ -81,6 +84,23 @@ class RecordingMaestro:
         os.close(self._pipe_writer)
 
 
+class FakeProductionObserver:
+    def __init__(self) -> None:
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+
+@pytest.fixture(autouse=True)
+def no_real_perception(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        module.ProductionIdentificationObserver,
+        "open",
+        lambda **_: FakeProductionObserver(),
+    )
+
+
 def _fd_is_closed(fd: int) -> bool:
     try:
         os.fstat(fd)
@@ -111,9 +131,7 @@ def _make_files(tmp_path: Path) -> tuple[Path, Path, ElectricalSafetyEvidence]:
         CONFIG_TEMPLATE.read_text()
         .replace("REQUIRED_RUN_SPECIFIC_RUN_ID", "hardware-run-20260901-001")
         .replace("REQUIRED_RUN_SPECIFIC_APPROVAL_ID", "review-20260901-operator")
-        .replace(
-            "REQUIRED_RUN_SPECIFIC_ENABLE_TOKEN", "run-secret-not-in-repository"
-        )
+        .replace("REQUIRED_RUN_SPECIFIC_ENABLE_TOKEN", "run-secret-not-in-repository")
         .replace("REQUIRED_REVIEWED_ELECTRICAL_EVIDENCE_PATH", str(evidence_path))
         .replace("REQUIRED_ELECTRICAL_EVIDENCE_SHA256", evidence_hash)
     )
@@ -192,23 +210,31 @@ def prepared(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         pass
 
 
-def test_public_lifecycle_has_two_stages_and_no_combined_runner() -> None:
+def test_public_lifecycle_has_three_stages_and_no_injection_seams() -> None:
     assert not hasattr(module, "run_hardware_identification")
     for function in (
         prepare_hardware_identification,
         execute_prepared_hardware_identification,
+        finalize_hardware_identification,
     ):
         parameters = inspect.signature(function).parameters
-        assert not {
-            "adapter",
-            "adapter_factory",
-            "transport",
-            "transport_factory",
-            "supervisor",
-            "clock",
-            "sleeper",
-            "resolver",
-        } & parameters.keys()
+        assert (
+            not {
+                "adapter",
+                "adapter_factory",
+                "transport",
+                "transport_factory",
+                "supervisor",
+                "clock",
+                "sleeper",
+                "resolver",
+                "observer",
+                "camera",
+                "detector",
+                "factory",
+            }
+            & parameters.keys()
+        )
     assert [item.name for item in fields(PreparedHardwareHandle)] == [
         "challenge",
         "issuance_token",
@@ -234,7 +260,6 @@ def test_forged_or_wrong_process_handle_is_rejected_without_io(tmp_path: Path) -
     with pytest.raises(ValueError, match="unknown"):
         execute_prepared_hardware_identification(
             prepared=forged,
-            observer=object(),
             output_dir=tmp_path / "unused",
             confirmation=_power_confirmation(challenge),
         )
@@ -255,7 +280,6 @@ def test_challenge_is_frozen_and_mutated_copy_burns_prepared_authority(
     with pytest.raises(ValueError, match="authority"):
         execute_prepared_hardware_identification(
             prepared=copied,
-            observer=object(),
             output_dir=tmp_path / "unused",
             confirmation=_power_confirmation(copied.challenge),
         )
@@ -449,6 +473,161 @@ def _power_confirmation(challenge) -> PowerEnableConfirmation:
     )
 
 
+def _completed_staged_core(**kwargs: object):
+    output = kwargs["output_dir"]
+    config = kwargs["config"]
+    adapter = kwargs["adapter"]
+    provenance = kwargs["hardware_provenance"]
+    assert isinstance(output, Path)
+    output.mkdir()
+    transition_payload = (
+        json.dumps(
+            {
+                "run_id": config.run_id,
+                "step_id": "final-home",
+                "operation": "home-verified",
+                "accepted": True,
+                "monotonic_ns": time.monotonic_ns(),
+            }
+        )
+        + "\n"
+    ).encode()
+    observations_payload = b""
+    (output / "transitions.jsonl").write_bytes(transition_payload)
+    (output / "observations.jsonl").write_bytes(observations_payload)
+    records = {
+        "transitions.jsonl": module._artifact_record(
+            "transitions.jsonl", transition_payload
+        ),
+        "observations.jsonl": module._artifact_record(
+            "observations.jsonl", observations_payload
+        ),
+    }
+    metadata = module.IdentificationRunMetadata(
+        adapter_identity=adapter.identity,
+        observer=config.observer,
+        expected_observer=config.observer,
+        safety_limits=config.safety_limits,
+        preflight=None,
+        approval=None,
+        hardware_manifest_path=config.hardware_manifest_path,
+        hardware_manifest_sha256=config.hardware_manifest_sha256,
+        hardware_manifest_canonical_sha256=config.hardware_manifest_canonical_sha256,
+        calibration_sha256=config.calibration_sha256,
+        config_sha256=provenance.execution_config_sha256,
+        hardware_provenance=provenance,
+    )
+    manifest = module.ArtifactManifest(
+        schema_version="artifact-manifest/v1",
+        run_kind=module.RunKind.ACTUATOR_IDENTIFICATION,
+        run_id=config.run_id,
+        status=module.RunStatus.COMPLETED,
+        started_at=datetime.now(UTC),
+        ended_at=datetime.now(UTC),
+        observation_count=0,
+        config=config.model_dump(mode="json"),
+        artifacts=records,
+        git_revision=None,
+        dependency_lock_path=None,
+        dependency_lock_sha256=None,
+        python_version="test",
+        platform_system="test",
+        platform_release="test",
+        platform_machine="test",
+        camera_settings=config.observer.camera_settings,
+        identification_metadata=metadata,
+    )
+    (output / "manifest.json").write_text(manifest.model_dump_json())
+    return manifest
+
+
+def _power_removal_confirmation(pending) -> PowerRemovalConfirmation:
+    return PowerRemovalConfirmation(
+        run_id=pending.draft.run_id,
+        challenge_id=pending.draft.challenge_id,
+        config_sha256=pending.draft.config_sha256,
+        manifest_sha256=pending.draft.manifest_sha256,
+        draft_sha256=pending.draft.draft_sha256,
+        confirmed_at=datetime.now(UTC),
+        confirmed_monotonic_ns=time.monotonic_ns(),
+        source="operator at master servo switch",
+        operator_acknowledgment="I CONFIRM MASTER SERVO POWER IS OFF",
+    )
+
+
+def test_completed_run_is_unpublished_until_bound_power_removal_confirmation(
+    prepared, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    handle, _, _ = prepared
+    monkeypatch.setattr(module, "_run_identification_core", _completed_staged_core)
+    output = tmp_path / "run"
+
+    pending = execute_prepared_hardware_identification(
+        prepared=handle,
+        output_dir=output,
+        confirmation=_power_confirmation(handle.challenge),
+    )
+
+    assert pending.draft.status == "pending_power_removal"
+    assert output.exists() is False
+    staged = next(tmp_path.glob(".run.pending-*/run"))
+    assert (staged / "manifest.json").exists() is False
+    assert json.loads((staged / "draft.json").read_text())["status"] == (
+        "pending_power_removal"
+    )
+    final = finalize_hardware_identification(
+        pending=pending,
+        confirmation=_power_removal_confirmation(pending),
+    )
+    assert final.status is module.RunStatus.COMPLETED
+    assert output.is_dir()
+    shutdown = final.identification_metadata.shutdown_provenance
+    assert shutdown.final_home_verified is True
+    assert shutdown.watchdog_stopped is True
+    assert shutdown.adapter_closed is True
+    assert shutdown.power_removal.operator_acknowledgment.endswith("POWER IS OFF")
+    with pytest.raises(ValueError, match="consumed"):
+        finalize_hardware_identification(
+            pending=pending,
+            confirmation=_power_removal_confirmation(pending),
+        )
+
+
+def test_adapter_cleanup_failure_publishes_aborted_never_completed(
+    prepared, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    handle, _, _ = prepared
+    monkeypatch.setattr(module, "_run_identification_core", _completed_staged_core)
+    adapter = RecordingMaestro.instances[-1]
+    original_close = adapter.close
+    calls = 0
+
+    def failing_close() -> None:
+        nonlocal calls
+        calls += 1
+        original_close()
+        raise RuntimeError("private cleanup detail")
+
+    adapter.close = failing_close  # type: ignore[method-assign]
+    output = tmp_path / "cleanup-failed"
+
+    with pytest.raises(RuntimeError, match="private cleanup detail"):
+        execute_prepared_hardware_identification(
+            prepared=handle,
+            output_dir=output,
+            confirmation=_power_confirmation(handle.challenge),
+        )
+
+    manifest = json.loads((output / "manifest.json").read_text())
+    assert manifest["status"] == "aborted"
+    assert manifest["failure"]["error_type"] == "RuntimeError"
+    assert "private cleanup detail" not in json.dumps(manifest)
+    failure = json.loads((output / "hardware-failure.json").read_text())
+    assert failure["power_removal_required"] is True
+    assert failure["completion_eligible"] is False
+    assert calls >= 1
+
+
 def test_execution_requires_new_confirmation_and_is_single_use(
     prepared, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -460,12 +639,24 @@ def test_execution_requires_new_confirmation_and_is_single_use(
         nonlocal called
         called = True
         captured.update(kwargs)
-        return object()
+        output = kwargs["output_dir"]
+        assert isinstance(output, Path)
+        output.mkdir()
+        (output / "transitions.jsonl").write_text(
+            json.dumps(
+                {
+                    "operation": "home-verified",
+                    "accepted": True,
+                    "monotonic_ns": time.monotonic_ns(),
+                }
+            )
+            + "\n"
+        )
+        return SimpleNamespace(status=module.RunStatus.COMPLETED)
 
     monkeypatch.setattr(module, "_run_identification_core", fake_core)
     execute_prepared_hardware_identification(
         prepared=result,
-        observer=object(),
         output_dir=tmp_path / "run",
         confirmation=_power_confirmation(result.challenge),
     )
@@ -474,9 +665,7 @@ def test_execution_requires_new_confirmation_and_is_single_use(
     assert "enable_token" not in stored_config
     assert "run-secret-not-in-repository" not in json.dumps(stored_config)
     provenance = captured["hardware_provenance"]
-    assert (
-        provenance.approved_raw_config_sha256 == result.challenge.config_sha256
-    )
+    assert provenance.approved_raw_config_sha256 == result.challenge.config_sha256
     execution_hash = hashlib.sha256(
         json.dumps(stored_config, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
@@ -492,7 +681,6 @@ def test_execution_requires_new_confirmation_and_is_single_use(
     with pytest.raises(ValueError, match="consumed"):
         execute_prepared_hardware_identification(
             prepared=result,
-            observer=object(),
             output_dir=tmp_path / "again",
             confirmation=_power_confirmation(result.challenge),
         )
@@ -506,7 +694,6 @@ def test_pre_prepare_power_confirmation_is_rejected(prepared, tmp_path: Path) ->
     with pytest.raises(ValueError, match="after preparation"):
         execute_prepared_hardware_identification(
             prepared=result,
-            observer=object(),
             output_dir=tmp_path / "run",
             confirmation=confirmation,
         )
@@ -522,12 +709,24 @@ def test_mutation_after_prepare_does_not_change_execution(
 
     def retained_core(**kwargs: object) -> object:
         captured.update(kwargs)
-        return object()
+        output = kwargs["output_dir"]
+        assert isinstance(output, Path)
+        output.mkdir()
+        (output / "transitions.jsonl").write_text(
+            json.dumps(
+                {
+                    "operation": "home-verified",
+                    "accepted": True,
+                    "monotonic_ns": time.monotonic_ns(),
+                }
+            )
+            + "\n"
+        )
+        return SimpleNamespace(status=module.RunStatus.COMPLETED)
 
     monkeypatch.setattr(module, "_run_identification_core", retained_core)
     execute_prepared_hardware_identification(
         prepared=result,
-        observer=object(),
         output_dir=tmp_path / "run",
         confirmation=_power_confirmation(result.challenge),
     )
@@ -606,7 +805,6 @@ def test_keyboard_interrupt_publishes_sanitized_failure(
     with pytest.raises(KeyboardInterrupt, match="secret detail"):
         execute_prepared_hardware_identification(
             prepared=result,
-            observer=object(),
             output_dir=output,
             confirmation=_power_confirmation(result.challenge),
         )
@@ -689,6 +887,24 @@ def test_watchdog_revokes_then_closes_on_os_monotonic_deadline() -> None:
     assert events == ["revoke", "close"]
 
 
+def test_watchdog_stop_fails_if_thread_does_not_terminate() -> None:
+    watchdog = module.IndependentHardwareWatchdog(
+        timeout_seconds=0.01, revoke=lambda: None, close=lambda: None
+    )
+
+    class StuckThread:
+        def is_alive(self) -> bool:
+            return True
+
+        def join(self, timeout: float) -> None:
+            assert timeout > 0
+
+    watchdog._thread = StuckThread()  # type: ignore[assignment]
+
+    with pytest.raises(RuntimeError, match="did not stop"):
+        watchdog.stop()
+
+
 def test_serial_runtime_failure_is_published_without_replacing_primary(
     prepared, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -702,7 +918,6 @@ def test_serial_runtime_failure_is_published_without_replacing_primary(
     with pytest.raises(RuntimeError, match="serial private detail"):
         execute_prepared_hardware_identification(
             prepared=result,
-            observer=object(),
             output_dir=output,
             confirmation=_power_confirmation(result.challenge),
         )
@@ -743,14 +958,11 @@ def test_watchdog_failure_revokes_closes_and_publishes(
         raise RuntimeError("watchdog interrupted execution")
 
     monkeypatch.setattr(module, "IndependentHardwareWatchdog", TriggeringWatchdog)
-    monkeypatch.setattr(
-        module, "_run_identification_core", watchdog_interrupted_core
-    )
+    monkeypatch.setattr(module, "_run_identification_core", watchdog_interrupted_core)
     output = tmp_path / "watchdog-failed"
     with pytest.raises(RuntimeError, match="watchdog interrupted"):
         execute_prepared_hardware_identification(
             prepared=result,
-            observer=object(),
             output_dir=output,
             confirmation=_power_confirmation(result.challenge),
         )

@@ -9,6 +9,8 @@ hardware_manifest_canonical_sha256: f1f2b5562112a98fdae473d02bd381be3c793e069f03
 stable_device_path: /dev/serial/by-id/usb-Pololu_Corporation_Pololu_Mini_Maestro_12-Channel_USB_Servo_Controller_00037376-if00
 expected_controller_serial: "00037376"
 expected_usb_interface: "00"
+camera_device: /dev/v4l/by-id/usb-046d_HD_Webcam_C525_79C73260-video-index0
+detector_model_path: REQUIRED_PINNED_MEDIAPIPE_MODEL_PATH
 approval_id: REQUIRED_RUN_SPECIFIC_APPROVAL_ID
 enable_token: REQUIRED_RUN_SPECIFIC_ENABLE_TOKEN
 electrical_evidence_path: REQUIRED_REVIEWED_ELECTRICAL_EVIDENCE_PATH

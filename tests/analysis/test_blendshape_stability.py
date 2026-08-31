@@ -35,9 +35,7 @@ def _observation(
         invalid_reason=(
             None if validity is ObservationValidity.VALID else "no face seen"
         ),
-        scores=tuple(
-            BlendshapeScore(name=name, score=score) for name, score in scores
-        ),
+        scores=tuple(BlendshapeScore(name=name, score=score) for name, score in scores),
     )
 
 
@@ -348,8 +346,9 @@ def test_phase_1_acceptance_is_inconclusive_without_thresholds() -> None:
     assert result.failed_thresholds == ()
 
 
-def test_phase_1_acceptance_is_inconclusive_for_no_face_with_category_thresholds(
-) -> None:
+def test_phase_1_acceptance_is_inconclusive_for_no_face_with_category_thresholds() -> (
+    None
+):
     metrics = analyze_observations(
         [
             _observation(
@@ -460,11 +459,7 @@ def test_acceptance_uses_maximum_absolute_lag1_autocorrelation() -> None:
 
     result = phase_1_acceptance(
         metrics,
-        {
-            "categories": {
-                "jawOpen": {"maximum_absolute_lag1_autocorrelation": 0.5}
-            }
-        },
+        {"categories": {"jawOpen": {"maximum_absolute_lag1_autocorrelation": 0.5}}},
     )
 
     assert result.outcome == "fail"
@@ -479,9 +474,7 @@ def test_effective_dimensionality_is_two_for_independent_equal_variance_axes() -
             validity=ObservationValidity.VALID,
             scores=(("x", x), ("y", y)),
         )
-        for index, (x, y) in enumerate(
-            ((0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0))
-        )
+        for index, (x, y) in enumerate(((0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)))
     ]
 
     metrics = analyze_observations(observations)
@@ -649,18 +642,21 @@ def test_cli_analysis_writes_metrics_and_phase_1_conclusion(
     assert analysis_manifest["analysis_kind"] == "stability"
     assert analysis_manifest["analyzer"]["package_version"]
     assert "git_revision" in analysis_manifest["analyzer"]
-    assert analysis_manifest["inputs"]["capture_manifest"]["sha256"] == sha256(
-        manifest_before
-    ).hexdigest()
-    assert analysis_manifest["inputs"]["observations"]["sha256"] == sha256(
-        observations_path.read_bytes()
-    ).hexdigest()
+    assert (
+        analysis_manifest["inputs"]["capture_manifest"]["sha256"]
+        == sha256(manifest_before).hexdigest()
+    )
+    assert (
+        analysis_manifest["inputs"]["observations"]["sha256"]
+        == sha256(observations_path.read_bytes()).hexdigest()
+    )
     for artifact_name in (
         "stability-metrics.json",
         "acceptance.json",
         "phase-1-conclusion.md",
     ):
         record = analysis_manifest["artifacts"][artifact_name]
-        assert sha256((generation_dir / artifact_name).read_bytes()).hexdigest() == (
-            record["sha256"]
+        assert (
+            sha256((generation_dir / artifact_name).read_bytes()).hexdigest()
+            == (record["sha256"])
         )

@@ -50,9 +50,7 @@ def publish_stability_analysis(run_dir: Path) -> tuple[AnalysisManifest, Path]:
         metrics=metrics,
         acceptance=acceptance,
     )
-    threshold_value = (
-        None if thresholds is None else thresholds.model_dump(mode="json")
-    )
+    threshold_value = None if thresholds is None else thresholds.model_dump(mode="json")
     threshold_bytes = _canonical_json_bytes(threshold_value)
     payloads = {
         "stability-metrics.json": _pretty_json_bytes(metrics.model_dump(mode="json")),
@@ -87,8 +85,7 @@ def publish_stability_analysis(run_dir: Path) -> tuple[AnalysisManifest, Path]:
         thresholds=threshold_value,
         thresholds_sha256=sha256(threshold_bytes).hexdigest(),
         artifacts={
-            name: _artifact_record(name, payload)
-            for name, payload in payloads.items()
+            name: _artifact_record(name, payload) for name, payload in payloads.items()
         },
         outcome=acceptance.outcome.value,
     )
@@ -167,8 +164,7 @@ def publish_repeatability_analysis(
         thresholds=threshold_value,
         thresholds_sha256=sha256(threshold_bytes).hexdigest(),
         artifacts={
-            name: _artifact_record(name, payload)
-            for name, payload in payloads.items()
+            name: _artifact_record(name, payload) for name, payload in payloads.items()
         },
         outcome=acceptance.outcome.value,
     )

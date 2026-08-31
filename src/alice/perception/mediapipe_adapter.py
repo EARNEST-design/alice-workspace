@@ -131,8 +131,7 @@ class MediaPipeTaskDetector(BlendshapeDetector):
         landmarks: tuple[tuple[float, float], ...] = ()
         if face_landmarks:
             landmarks = tuple(
-                (float(landmark.x), float(landmark.y))
-                for landmark in face_landmarks[0]
+                (float(landmark.x), float(landmark.y)) for landmark in face_landmarks[0]
             )
         return PreviewDetection(
             face_confidence=_extract_face_confidence(result),
