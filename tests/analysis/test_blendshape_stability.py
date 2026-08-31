@@ -82,6 +82,7 @@ def _write_manifest(
                 "retention_duration_days": 365,
             },
             "setup": {
+                "camera_id": "alice-face-webcam",
                 "stable_camera_identity": "usb-Alice-video-index0",
                 "alice_full_face_confirmed": True,
                 "participant_exclusion_confirmed": True,
@@ -130,6 +131,53 @@ def _write_manifest(
         json.dumps(payload, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+
+
+def test_analyze_accepts_legacy_v1_manifest_and_observations(
+    tmp_path: Path,
+) -> None:
+    observations = [
+        _observation(
+            frame_index=index,
+            validity=ObservationValidity.VALID,
+            scores=(("jawOpen", 0.2 + index * 0.01),),
+        ).model_copy(update={"observed_at": None})
+        for index in range(2)
+    ]
+    observations_bytes = (
+        "\n".join(
+            json.dumps(
+                {
+                    key: value
+                    for key, value in observation.model_dump(mode="json").items()
+                    if key != "observed_at"
+                },
+                sort_keys=True,
+            )
+            for observation in observations
+        )
+        + "\n"
+    ).encode()
+    (tmp_path / "observations.jsonl").write_bytes(observations_bytes)
+    _write_manifest(
+        tmp_path / "manifest.json",
+        artifacts={
+            "observations.jsonl": _artifact_record_payload(
+                tmp_path / "observations.jsonl"
+            )
+        },
+    )
+    payload = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
+    payload.pop("camera_settings")
+    payload["config"].pop("maximum_observation_age_ms")
+    payload["observation_count"] = 2
+    (tmp_path / "manifest.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    from alice.analysis.blendshape_stability import analyze_stability
+
+    metrics = analyze_stability(tmp_path)
+
+    assert metrics.total_frames == 2
 
 
 @pytest.fixture

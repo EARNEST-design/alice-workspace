@@ -49,11 +49,13 @@ def run_passive_capture(
     *,
     monotonic_ns: Callable[[], int] = time.monotonic_ns,
     sleep: Callable[[float], object] = time.sleep,
+    utc_now: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> ArtifactManifest:
     """Capture observations and publish one immutable capture manifest."""
 
+    started_at = utc_now()
+    _validate_capture_authorization(config, started_at)
     run_dir = _prepare_run_dir(output_dir)
-    started_at = datetime.now(UTC)
     temp_fd, temp_name = tempfile.mkstemp(
         prefix=".observations.", suffix=".jsonl.tmp", dir=run_dir
     )
@@ -187,6 +189,25 @@ def run_passive_capture(
     )
     _write_manifest(run_dir, manifest)
     return manifest
+
+
+def _validate_capture_authorization(
+    config: PassiveCaptureConfig,
+    now: datetime,
+) -> None:
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("capture clock must return a timezone-aware datetime")
+    if config.setup.camera_id != config.camera_id:
+        raise ValueError("setup camera_id does not match configured camera_id")
+    if config.setup.confirmation.confirmed_at > now:
+        raise ValueError("setup confirmation cannot be in the future")
+    approval = config.retention_policy.raw_approval
+    if approval is None:
+        return
+    if approval.approved_at > now:
+        raise ValueError("raw retention approval cannot be in the future")
+    if approval.expires_at <= now:
+        raise ValueError("raw retention approval expired before capture")
 
 
 def _prepare_run_dir(output_dir: Path) -> Path:

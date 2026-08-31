@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from itertools import combinations
+from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, FiniteFloat
 
 from alice.analysis.blendshape_stability import (
     AcceptanceCheck,
@@ -16,13 +17,17 @@ from alice.analysis.blendshape_stability import (
 )
 from alice.contracts.blendshapes import NonEmptyString, Sha256Hex
 
+UnitIntervalFiniteFloat = Annotated[FiniteFloat, Field(ge=0.0, le=1.0)]
+
 
 class RepeatabilityThresholds(BaseModel):
     """Typed cross-run limits, keyed by exact blendshape category."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    maximum_mean_delta: dict[NonEmptyString, float] = Field(default_factory=dict)
+    maximum_mean_delta: dict[NonEmptyString, UnitIntervalFiniteFloat] = Field(
+        default_factory=dict
+    )
 
 
 class RepeatabilityCategoryMetrics(BaseModel):

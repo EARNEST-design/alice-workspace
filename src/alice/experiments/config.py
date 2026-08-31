@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
 from enum import StrEnum
 from typing import Literal
 
@@ -40,6 +41,7 @@ class CaptureSetup(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
+    camera_id: NonEmptyString
     stable_camera_identity: NonEmptyString
     alice_full_face_confirmed: Literal[True]
     participant_exclusion_confirmed: Literal[True]
@@ -49,6 +51,21 @@ class CaptureSetup(BaseModel):
     focus: CameraCondition
     exposure: CameraCondition
 
+    @model_validator(mode="after")
+    def reject_unreviewed_placeholders(self) -> CaptureSetup:
+        values = (
+            self.camera_id,
+            self.stable_camera_identity,
+            self.confirmation.source,
+            self.lighting.detail,
+            self.placement.detail,
+            self.focus.detail,
+            self.exposure.detail,
+        )
+        if any(value.upper().startswith("REQUIRED:") for value in values):
+            raise ValueError("setup contains an unreviewed REQUIRED placeholder")
+        return self
+
 
 class RawRetentionApproval(BaseModel):
     """Structured approval required before raw image retention is enabled."""
@@ -57,8 +74,23 @@ class RawRetentionApproval(BaseModel):
 
     approval_id: NonEmptyString
     scope: NonEmptyString
+    approval_source: NonEmptyString
+    consent_provenance: NonEmptyString
+    approved_at: AwareDatetime
     expires_at: AwareDatetime
     retention_duration_days: int = Field(gt=0)
+
+    @model_validator(mode="after")
+    def validate_approval_window(self) -> RawRetentionApproval:
+        if self.expires_at <= self.approved_at:
+            raise ValueError("raw retention approval must expire after approval time")
+        if self.expires_at - self.approved_at < timedelta(
+            days=self.retention_duration_days
+        ):
+            raise ValueError(
+                "raw retention approval window is shorter than approved duration"
+            )
+        return self
 
 
 class RetentionPolicy(BaseModel):
@@ -77,6 +109,14 @@ class RetentionPolicy(BaseModel):
             raise ValueError("retention_approval is required for raw_frames policy")
         if self.mode == "derived_observations_only" and self.raw_approval is not None:
             raise ValueError("raw_approval is not allowed for derived-only retention")
+        if (
+            self.raw_approval is not None
+            and self.retention_duration_days
+            > self.raw_approval.retention_duration_days
+        ):
+            raise ValueError(
+                "retention duration exceeds approved retention duration"
+            )
         return self
 
 

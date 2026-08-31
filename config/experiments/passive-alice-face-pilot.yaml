@@ -53,6 +53,7 @@ acceptance_thresholds:
       maximum_percentile_range: 0.111
       maximum_warmup_drift: 0.015
 setup:
+  camera_id: "usb-046d_HD_Webcam_C525_79C73260-video-index0"
   stable_camera_identity: "Logitech HD Webcam C525, USB serial 79C73260, video-index0"
   alice_full_face_confirmed: true
   participant_exclusion_confirmed: true

@@ -123,7 +123,11 @@ class ArtifactManifest(BaseModel):
     platform_system: NonEmptyString
     platform_release: NonEmptyString
     platform_machine: NonEmptyString
-    camera_settings: NegotiatedCameraSettings
+    # Added after the first v1 pilot. The default preserves read compatibility
+    # while new writers always provide measured or explicitly unavailable values.
+    camera_settings: NegotiatedCameraSettings = Field(
+        default_factory=NegotiatedCameraSettings.unavailable
+    )
     aborted_reason: NonEmptyString | None = None
     failure: FailureRecord | None = None
     conclusion: NonEmptyString | None = None

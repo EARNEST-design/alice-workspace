@@ -8,6 +8,7 @@ import pytest
 
 from alice.analysis.blendshape_stability import analyze_observations
 from alice.analysis.repeatability import (
+    RepeatabilityThresholds,
     compare_stability_runs,
     repeatability_acceptance,
 )
@@ -80,6 +81,14 @@ def test_repeatability_acceptance_is_typed_and_failure_dominates_undefined() -> 
     assert result.failed_thresholds[0].metric_path == (
         "repeatability.jawOpen.maximum_pairwise_mean_delta"
     )
+
+
+@pytest.mark.parametrize("invalid", [-1.0, 1.000001, float("inf"), float("nan")])
+def test_repeatability_thresholds_reject_values_outside_finite_unit_interval(
+    invalid: float,
+) -> None:
+    with pytest.raises(ValueError):
+        RepeatabilityThresholds(maximum_mean_delta={"jawOpen": invalid})
 
 
 def _write_run(run_dir: Path, run_id: str, scores: tuple[float, ...]) -> None:

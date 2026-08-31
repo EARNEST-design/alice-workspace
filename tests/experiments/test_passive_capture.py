@@ -92,6 +92,7 @@ def capture_config(**overrides: object) -> PassiveCaptureConfig:
             "retention_duration_days": 365,
         },
         "setup": {
+            "camera_id": "alice-face-webcam",
             "stable_camera_identity": "usb-Alice-video-index0",
             "alice_full_face_confirmed": True,
             "participant_exclusion_confirmed": True,
@@ -171,12 +172,15 @@ def test_capture_retains_frames_only_with_approval(
             "policy_id": "raw-policy",
             "mode": "raw_frames",
             "retention_duration_days": 30,
-            "raw_approval": {
-                "approval_id": "privacy-approval-001",
-                "scope": "Alice robot-face calibration frames only",
-                "expires_at": "2026-09-30T00:00:00Z",
-                "retention_duration_days": 30,
-            },
+                "raw_approval": {
+                    "approval_id": "privacy-approval-001",
+                    "scope": "Alice robot-face calibration frames only",
+                    "approval_source": "reviewed test procedure",
+                    "consent_provenance": "robot owner; no participant present",
+                    "approved_at": "2026-08-30T00:00:00Z",
+                    "expires_at": "2026-09-30T00:00:00Z",
+                    "retention_duration_days": 30,
+                },
         },
     )
 
@@ -366,6 +370,141 @@ def test_capture_requires_typed_setup_and_privacy_confirmation() -> None:
                 },
             }
         )
+
+
+def test_capture_rejects_future_setup_confirmation_before_camera_read(
+    tmp_path: Path,
+    frame_source: FakeFrameSource,
+) -> None:
+    config = capture_config(
+        sample_count=1,
+        setup={
+            **capture_config().setup.model_dump(mode="json"),
+            "confirmation": {
+                "confirmed_at": "2026-09-01T00:00:00Z",
+                "source": "operator preview",
+            },
+        },
+    )
+
+    with pytest.raises(ValueError, match="confirmation.*future"):
+        run_passive_capture(
+            config,
+            frame_source,
+            FakeObserver(),
+            tmp_path,
+            utc_now=lambda: datetime(2026, 8, 31, 10, 0, tzinfo=UTC),
+        )
+
+    assert frame_source._index == 0
+
+
+def test_capture_rejects_setup_camera_identity_mismatch_before_camera_read(
+    tmp_path: Path,
+    frame_source: FakeFrameSource,
+) -> None:
+    config = capture_config(
+        sample_count=1,
+        setup={
+            **capture_config().setup.model_dump(mode="json"),
+            "camera_id": "different-camera",
+        },
+    )
+
+    with pytest.raises(ValueError, match="setup camera_id"):
+        run_passive_capture(
+            config,
+            frame_source,
+            FakeObserver(),
+            tmp_path,
+            utc_now=lambda: datetime(2026, 8, 31, 10, 0, tzinfo=UTC),
+        )
+
+    assert frame_source._index == 0
+
+
+def test_config_rejects_overlong_raw_retention_approval() -> None:
+    raw_approval = {
+        "approval_id": "approval-001",
+        "scope": "Alice calibration frames only",
+        "approval_source": "operator-reviewed procedure",
+        "consent_provenance": "robot owner authorization; no participant present",
+        "approved_at": "2026-08-30T00:00:00Z",
+        "expires_at": "2026-09-30T00:00:00Z",
+        "retention_duration_days": 1,
+    }
+
+    with pytest.raises(ValueError, match="retention duration"):
+        capture_config(
+            sample_count=1,
+            retain_frames=True,
+            retention_policy={
+                "policy_id": "raw-approved",
+                "mode": "raw_frames",
+                "retention_duration_days": 2,
+                "raw_approval": raw_approval,
+            },
+        )
+
+
+def test_config_rejects_approval_duration_beyond_expiry_window() -> None:
+    with pytest.raises(ValueError, match="window is shorter"):
+        capture_config(
+            sample_count=1,
+            retain_frames=True,
+            retention_policy={
+                "policy_id": "raw-approved",
+                "mode": "raw_frames",
+                "retention_duration_days": 2,
+                "raw_approval": {
+                    "approval_id": "approval-001",
+                    "scope": "Alice calibration frames only",
+                    "approval_source": "operator-reviewed procedure",
+                    "consent_provenance": (
+                        "robot owner authorization; no participant present"
+                    ),
+                    "approved_at": "2026-08-30T12:00:00Z",
+                    "expires_at": "2026-09-01T00:00:00Z",
+                    "retention_duration_days": 2,
+                },
+            },
+        )
+
+
+def test_capture_rejects_expired_raw_retention_approval(
+    tmp_path: Path,
+    frame_source: FakeFrameSource,
+) -> None:
+    raw_approval = {
+        "approval_id": "approval-001",
+        "scope": "Alice calibration frames only",
+        "approval_source": "operator-reviewed procedure",
+        "consent_provenance": "robot owner authorization; no participant present",
+        "approved_at": "2026-08-30T00:00:00Z",
+        "expires_at": "2026-08-31T00:00:00Z",
+        "retention_duration_days": 1,
+    }
+    config = capture_config(
+        sample_count=1,
+        retain_frames=True,
+        retention_policy={
+            "policy_id": "raw-approved",
+            "mode": "raw_frames",
+            "retention_duration_days": 1,
+            "raw_approval": raw_approval,
+        },
+    )
+
+    with pytest.raises(ValueError, match="approval expired"):
+        run_passive_capture(
+            config,
+            frame_source,
+            FakeObserver(),
+            tmp_path,
+            utc_now=lambda: datetime(2026, 8, 31, 10, 0, tzinfo=UTC),
+        )
+
+    assert frame_source._index == 0
 
     with pytest.raises(ValueError, match="alice_full_face_confirmed"):
         capture_config(

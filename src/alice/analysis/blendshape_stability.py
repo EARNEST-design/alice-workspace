@@ -198,7 +198,9 @@ def analyze_stability(run_dir: Path) -> StabilityMetrics:
     observations_path = _verified_observations_path(manifest, run_path)
     observations = _load_observations(observations_path)
     maximum_age = manifest.config.get("maximum_observation_age_ms")
-    if not isinstance(maximum_age, int) or maximum_age <= 0:
+    if maximum_age is not None and (
+        not isinstance(maximum_age, int) or maximum_age <= 0
+    ):
         raise ValueError("manifest maximum_observation_age_ms must be a positive int")
     metrics = analyze_observations(
         observations,

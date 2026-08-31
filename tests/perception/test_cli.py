@@ -136,6 +136,7 @@ retention_policy:
   mode: derived_observations_only
   retention_duration_days: 365
 setup:
+  camera_id: alice-face-webcam
   stable_camera_identity: usb-Alice-video-index0
   alice_full_face_confirmed: true
   participant_exclusion_confirmed: true
@@ -233,9 +234,10 @@ def test_capture_command_wires_yaml_camera_model_and_run_store(tmp_path: Path) -
                         "policy_id": "derived-only",
                         "mode": "derived_observations_only",
                         "retention_duration_days": 365,
-                    },
-                    "setup": {
-                        "stable_camera_identity": "usb-Alice-video-index0",
+                        },
+                        "setup": {
+                            "camera_id": "alice-face-webcam",
+                            "stable_camera_identity": "usb-Alice-video-index0",
                         "alice_full_face_confirmed": True,
                         "participant_exclusion_confirmed": True,
                         "confirmation": {
@@ -339,6 +341,7 @@ retention_policy:
   mode: derived_observations_only
   retention_duration_days: 365
 setup:
+  camera_id: alice-face-webcam
   stable_camera_identity: usb-Alice-video-index0
   alice_full_face_confirmed: true
   participant_exclusion_confirmed: true
