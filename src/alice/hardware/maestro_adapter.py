@@ -11,9 +11,15 @@ from alice.contracts.actuation import (
     ActuatorStatus,
     ActuatorStatusState,
     ActuatorTarget,
+    ControllerOutputSample,
     PoseRequest,
 )
-from alice.hardware.adapter import ActuatorAuthorization, authorized_request
+from alice.hardware.adapter import (
+    ActuatorAuthorization,
+    AdapterIdentity,
+    AdapterMode,
+    authorized_request,
+)
 from alice.hardware.maestro_protocol import (
     encode_get_errors,
     encode_get_position,
@@ -41,10 +47,17 @@ class MaestroConnectionError(RuntimeError):
 
 
 class _TransportFailure(RuntimeError):
-    def __init__(self, code: str, detail: str) -> None:
+    def __init__(
+        self,
+        code: str,
+        detail: str,
+        *,
+        samples: tuple[ControllerOutputSample, ...] = (),
+    ) -> None:
         super().__init__(detail)
         self.code = code
         self.detail = detail
+        self.samples = samples
 
 
 def _default_transport_factory(path: str, timeout_seconds: float) -> SerialTransport:
@@ -98,6 +111,14 @@ class MaestroAdapter:
         self._poisoned = False
 
     @property
+    def identity(self) -> AdapterIdentity:
+        return AdapterIdentity(
+            backend="maestro",
+            mode=AdapterMode.HARDWARE,
+            hardware_capable=True,
+        )
+
+    @property
     def is_open(self) -> bool:
         return self._transport is not None
 
@@ -146,6 +167,7 @@ class MaestroAdapter:
         if transport is None:
             raise MaestroConnectionError("adapter is not open")
         confirmed: list[ActuatorTarget] = []
+        controller_samples: list[ControllerOutputSample] = []
         current_name = request.targets[0].actuator_name
         try:
             for target in request.targets:
@@ -153,11 +175,11 @@ class MaestroAdapter:
                 definition = self._manifest.actuator(current_name)
                 target_qus = definition.target_qus(target.normalized_position)
                 self._write_all(encode_set_target(definition.channel, target_qus))
-                self._wait_for_target(
+                controller_samples.extend(self._wait_for_target(
                     actuator_name=current_name,
                     channel=definition.channel,
                     target_qus=target_qus,
-                )
+                ))
                 confirmed.append(target)
             self._write_all(encode_get_errors())
             errors = parse_error_register(self._read_exact(2))
@@ -166,6 +188,7 @@ class MaestroAdapter:
                     request,
                     state=ActuatorStatusState.FAULT,
                     confirmed=confirmed,
+                    controller_samples=controller_samples,
                     fault_code=f"maestro-error-register-0x{errors:04x}",
                     detail=(
                         f"Maestro error register reported 0x{errors:04x}; "
@@ -176,10 +199,12 @@ class MaestroAdapter:
                 self._poison_transport()
                 return status
         except _TransportFailure as exc:
+            controller_samples.extend(exc.samples)
             status = self._status(
                 request,
                 state=ActuatorStatusState.FAULT,
                 confirmed=confirmed,
+                controller_samples=controller_samples,
                 fault_code=exc.code,
                 detail=(
                     f"{current_name}: {exc.detail}; controller command state is "
@@ -193,19 +218,29 @@ class MaestroAdapter:
             request,
             state=ActuatorStatusState.APPLIED,
             confirmed=confirmed,
+            controller_samples=controller_samples,
         )
 
     def _wait_for_target(
         self, *, actuator_name: str, channel: int, target_qus: int
-    ) -> None:
+    ) -> tuple[ControllerOutputSample, ...]:
         deadline_ns = self._clock() + self._settle_timeout_ns
         max_polls = self._settle_timeout_ns // self._poll_interval_ns + 2
         last_observed: int | None = None
+        samples: list[ControllerOutputSample] = []
         for _ in range(max_polls):
             self._write_all(encode_get_position(channel))
             last_observed = parse_position(self._read_exact(2))
+            samples.append(
+                ControllerOutputSample(
+                    actuator_name=actuator_name,
+                    observed_qus=last_observed,
+                    target_qus=target_qus,
+                    observed_monotonic_ns=self._clock(),
+                )
+            )
             if last_observed == target_qus:
-                return
+                return tuple(samples)
             if self._clock() >= deadline_ns:
                 break
             try:
@@ -218,6 +253,7 @@ class MaestroAdapter:
             "position-settle-timeout",
             f"{actuator_name} controller output remained at {last_observed}, "
             f"expected {target_qus} before the settling deadline",
+            samples=tuple(samples),
         )
 
     def _write_all(self, payload: bytes) -> None:
@@ -274,6 +310,7 @@ class MaestroAdapter:
         *,
         state: ActuatorStatusState,
         confirmed: list[ActuatorTarget],
+        controller_samples: list[ControllerOutputSample],
         fault_code: str | None = None,
         detail: str | None = None,
     ) -> ActuatorStatus:
@@ -288,6 +325,18 @@ class MaestroAdapter:
             applied_targets=tuple(confirmed),
             fault_code=fault_code,
             detail=detail,
+            controller_output_samples=tuple(controller_samples),
+            targets_reached=(
+                len(confirmed) == len(request.targets)
+                and all(
+                    any(
+                        sample.actuator_name == target.actuator_name
+                        and sample.observed_qus == sample.target_qus
+                        for sample in controller_samples
+                    )
+                    for target in confirmed
+                )
+            ),
         )
 
     def close(self) -> None:

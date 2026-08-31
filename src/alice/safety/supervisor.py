@@ -187,6 +187,22 @@ class SafetySupervisor:
         return self._permit_registry.consumer
 
     @property
+    def manifest(self) -> HardwareManifest:
+        return self._manifest
+
+    @property
+    def limits(self) -> SafetyLimits:
+        return self._limits
+
+    @property
+    def preflight_evidence(self) -> PreflightEvidence | None:
+        return self._preflight
+
+    @property
+    def operator_approval(self) -> OperatorApproval | None:
+        return self._approval
+
+    @property
     def state(self) -> RunState:
         return self._state
 
@@ -386,6 +402,25 @@ class SafetySupervisor:
             f"runtime abort requested: {reason.value}",
             communication_available=communication_available,
         )
+
+    def complete_run(self) -> TransitionResult:
+        """Leave RUNNING only after exact controller-command Home is confirmed."""
+
+        if self._state is not RunState.RUNNING:
+            return self._invalid_transition("complete_run", RunState.RUNNING)
+        if self._pending_request is not None:
+            return self._begin_abort(
+                "complete-request-in-flight",
+                "cannot complete with an unacknowledged actuator request",
+            )
+        if any(abs(value) > 1e-12 for value in self._committed_targets.values()):
+            return self._begin_abort(
+                "complete-not-home",
+                "cannot complete until every controller-command target is Home",
+            )
+        self._permit_registry.revoke_all()
+        self._state = RunState.DISARMED
+        return TransitionResult(accepted=True, state=self._state)
 
     def complete_abort(self) -> TransitionResult:
         if self._state is not RunState.ABORTING:

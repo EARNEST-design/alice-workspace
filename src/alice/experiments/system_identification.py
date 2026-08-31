@@ -14,7 +14,12 @@ from typing import Annotated, Any, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from alice.contracts.actuation import ActuatorTarget, PoseRequest
+from alice.contracts.actuation import (
+    ActuatorStatus,
+    ActuatorTarget,
+    ControllerOutputSample,
+    PoseRequest,
+)
 from alice.contracts.blendshapes import (
     BlendshapeObservation,
     NonEmptyString,
@@ -27,10 +32,16 @@ from alice.experiments.manifest import (
     ArtifactRecord,
     FailureCategory,
     FailureRecord,
-    NegotiatedCameraSettings,
+    IdentificationObserverProvenance,
+    IdentificationRunMetadata,
+    RunKind,
     RunStatus,
 )
-from alice.hardware.adapter import ActuatorAdapter
+from alice.hardware.adapter import (
+    ActuatorAdapter,
+    AdapterIdentity,
+    AdapterMode,
+)
 from alice.safety.supervisor import (
     AbortReason,
     AuthorizationDecision,
@@ -45,6 +56,9 @@ from alice.safety.supervisor import (
 
 class IdentificationObserver(Protocol):
     """Hardware-independent observation source correlated by run and step."""
+
+    @property
+    def provenance(self) -> IdentificationObserverProvenance: ...
 
     def observe(self, *, run_id: str, step_id: str) -> BlendshapeObservation: ...
 
@@ -72,6 +86,43 @@ class IdentificationStep(BaseModel):
         return self
 
 
+class NamedMetric(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    name: NonEmptyString
+    value: Annotated[float, Field(allow_inf_nan=False)]
+
+
+class VisualHomeBaseline(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    means: tuple[NamedMetric, ...]
+
+
+class ControllerSettlingDecision(BaseModel):
+    """Typed controller-output evidence, explicitly not mechanical truth."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    target_reached: bool
+    requested_targets: tuple[ActuatorTarget, ...]
+    samples: tuple[ControllerOutputSample, ...]
+    decided_monotonic_ns: int = Field(ge=0)
+
+
+class VisualSettlingDecision(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    means: tuple[NamedMetric, ...]
+    variances: tuple[NamedMetric, ...]
+    baseline_deltas: tuple[NamedMetric, ...]
+    variance_accepted: bool
+    baseline_accepted: bool | None
+    established_home_baseline: bool
+    home_verified: bool | None
+    decided_monotonic_ns: int = Field(ge=0)
+
+
 class IdentificationConfig(BaseModel):
     """Reviewed mock-run configuration; hardware selection is unrepresentable."""
 
@@ -82,6 +133,8 @@ class IdentificationConfig(BaseModel):
     adapter: Literal["mock"]
     hardware_id: NonEmptyString
     calibration_sha256: Sha256Hex
+    hardware_manifest_path: NonEmptyString
+    hardware_manifest_sha256: Sha256Hex
     actuator_names: tuple[NonEmptyString, ...]
     offsets: tuple[Annotated[float, Field(allow_inf_nan=False)], ...]
     samples_per_step: int = Field(ge=2)
@@ -94,9 +147,15 @@ class IdentificationConfig(BaseModel):
     maximum_visual_variance: Annotated[
         float, Field(ge=0.0, allow_inf_nan=False)
     ]
+    home_delta_tolerances: Mapping[
+        NonEmptyString, Annotated[float, Field(ge=0.0, allow_inf_nan=False)]
+    ]
+    recovery_timeout_ms: int = Field(gt=0)
+    maximum_recovery_attempts: int = Field(gt=0)
     random_seeds: tuple[int, ...]
     provenance: Mapping[NonEmptyString, NonEmptyString]
     retention: Literal["derived_observations_only"]
+    observer: IdentificationObserverProvenance
 
     @model_validator(mode="after")
     def validate_experiment_shape(self) -> IdentificationConfig:
@@ -115,6 +174,8 @@ class IdentificationConfig(BaseModel):
             raise ValueError("initial mock offset magnitude cannot exceed 0.1")
         if not self.provenance:
             raise ValueError("provenance must not be empty")
+        if not self.home_delta_tolerances:
+            raise ValueError("home_delta_tolerances must not be empty")
         return self
 
 
@@ -127,6 +188,8 @@ class _RunLog:
             "observations.jsonl": [],
             "transitions.jsonl": [],
             "faults.jsonl": [],
+            "controller-settling.jsonl": [],
+            "visual-settling.jsonl": [],
         }
 
     def append(self, artifact: str, record: Mapping[str, Any]) -> None:
@@ -175,10 +238,18 @@ class _RunLog:
 
 
 class _ControlledAbort(Exception):
-    def __init__(self, code: str, detail: str, *, camera_loss: bool = False) -> None:
+    def __init__(
+        self,
+        code: str,
+        detail: str,
+        *,
+        category: FailureCategory,
+        camera_loss: bool = False,
+    ) -> None:
         super().__init__(detail)
         self.code = code
         self.detail = detail
+        self.category = category
         self.camera_loss = camera_loss
 
 
@@ -200,57 +271,127 @@ def run_identification(
     failure: FailureRecord | None = None
     aborted_reason: str | None = None
     current_step_id = "run-start"
-
-    start_result = supervisor.start()
-    log.transition(
-        step_id=current_step_id,
-        operation="start",
-        result=start_result,
-        monotonic_ns=clock(),
+    baseline: VisualHomeBaseline | None = None
+    runtime_identity = adapter.identity
+    runtime_observer = observer.provenance
+    composition_problem = _composition_problem(
+        config=config,
+        supervisor=supervisor,
+        identity=runtime_identity,
+        observer=runtime_observer,
     )
-    if not start_result.accepted or start_result.state is not RunState.RUNNING:
+    if composition_problem is not None:
         status = RunStatus.ABORTED
+        code, detail, composition_category = composition_problem
         failure = FailureRecord(
-            category=FailureCategory.CAPTURE_ERROR,
-            error_type="SafetyStartRejected",
+            category=composition_category,
+            error_type=_safe_error_type(code),
         )
-        aborted_reason = "identification aborted: supervisor start rejected"
+        aborted_reason = f"identification aborted: {code}"
+        log.fault(
+            step_id=current_step_id,
+            fault=SafetyFault(
+                code=code,
+                detail=detail,
+                occurred_monotonic_ns=clock(),
+            ),
+        )
     else:
-        try:
-            for step in _steps(config):
-                current_step_id = step.step_id
-                _execute_step(
+        start_result = supervisor.start()
+        log.transition(
+            step_id=current_step_id,
+            operation="start",
+            result=start_result,
+            monotonic_ns=clock(),
+        )
+        if not start_result.accepted or start_result.state is not RunState.RUNNING:
+            status = RunStatus.ABORTED
+            failure = FailureRecord(
+                category=FailureCategory.SAFETY_ERROR,
+                error_type="SafetyStartRejected",
+            )
+            aborted_reason = "identification aborted: supervisor start rejected"
+            if start_result.state is RunState.ABORTING:
+                recovery_exhausted = _abort_and_recover(
+                    error=_ControlledAbort(
+                        "safety-start-rejected",
+                        "supervisor entered aborting during start",
+                        category=FailureCategory.SAFETY_ERROR,
+                    ),
+                    step_id=current_step_id,
                     config=config,
-                    step=step,
                     observer=observer,
+                    baseline=None,
                     supervisor=supervisor,
                     adapter=adapter,
                     clock=clock,
                     sleeper=sleeper,
                     log=log,
                 )
-        except _ControlledAbort as error:
-            status = RunStatus.ABORTED
-            failure = FailureRecord(
-                category=(
-                    FailureCategory.OBSERVER_ERROR
-                    if error.camera_loss
-                    else FailureCategory.CAPTURE_ERROR
-                ),
-                error_type=_safe_error_type(error.code),
-            )
-            aborted_reason = f"identification aborted: {error.code}"
-            _abort_and_recover(
-                error=error,
-                step_id=current_step_id,
-                config=config,
-                observer=observer,
-                supervisor=supervisor,
-                adapter=adapter,
-                clock=clock,
-                sleeper=sleeper,
-                log=log,
-            )
+                if recovery_exhausted:
+                    failure = FailureRecord(
+                        category=FailureCategory.RECOVERY_ERROR,
+                        error_type="RecoveryExhausted",
+                    )
+        else:
+            try:
+                final_home_verified = False
+                for step in _steps(config):
+                    current_step_id = step.step_id
+                    baseline, final_home_verified = _execute_step(
+                        config=config,
+                        step=step,
+                        baseline=baseline,
+                        observer=observer,
+                        supervisor=supervisor,
+                        adapter=adapter,
+                        clock=clock,
+                        sleeper=sleeper,
+                        log=log,
+                    )
+                if not final_home_verified or baseline is None:
+                    raise _ControlledAbort(
+                        "final-home-not-verified",
+                        "final independent visual Home evidence is absent",
+                        category=FailureCategory.VISUAL_ERROR,
+                    )
+                completion = supervisor.complete_run()
+                log.transition(
+                    step_id=current_step_id,
+                    operation="complete-run",
+                    result=completion,
+                    monotonic_ns=clock(),
+                )
+                if not completion.accepted or completion.state is RunState.RUNNING:
+                    raise _ControlledAbort(
+                        "safety-completion-rejected",
+                        "supervisor did not leave RUNNING after final Home",
+                        category=FailureCategory.SAFETY_ERROR,
+                    )
+            except _ControlledAbort as error:
+                status = RunStatus.ABORTED
+                failure = FailureRecord(
+                    category=error.category,
+                    error_type=_safe_error_type(error.code),
+                )
+                aborted_reason = f"identification aborted: {error.code}"
+                recovery_exhausted = _abort_and_recover(
+                    error=error,
+                    step_id=current_step_id,
+                    config=config,
+                    observer=observer,
+                    baseline=baseline,
+                    supervisor=supervisor,
+                    adapter=adapter,
+                    clock=clock,
+                    sleeper=sleeper,
+                    log=log,
+                )
+                if recovery_exhausted:
+                    failure = FailureRecord(
+                        category=FailureCategory.RECOVERY_ERROR,
+                        error_type="RecoveryExhausted",
+                    )
 
     files = _artifact_payloads(config=config, log=log, status=status)
     artifacts = {
@@ -258,6 +399,7 @@ def run_identification(
     }
     manifest = ArtifactManifest(
         schema_version="artifact-manifest/v1",
+        run_kind=RunKind.ACTUATOR_IDENTIFICATION,
         run_id=config.run_id,
         status=status,
         started_at=started_at,
@@ -274,14 +416,80 @@ def run_identification(
         platform_system=platform.system() or "unknown",
         platform_release=platform.release() or "unknown",
         platform_machine=platform.machine() or "unknown",
-        camera_settings=NegotiatedCameraSettings.unavailable(),
+        camera_settings=config.observer.camera_settings,
         aborted_reason=aborted_reason,
         failure=failure,
         conclusion=None,
+        identification_metadata=IdentificationRunMetadata(
+            adapter_identity=runtime_identity,
+            observer=runtime_observer,
+            safety_limits=supervisor.limits,
+            preflight=supervisor.preflight_evidence,
+            approval=supervisor.operator_approval,
+            hardware_manifest_path=config.hardware_manifest_path,
+            hardware_manifest_sha256=config.hardware_manifest_sha256,
+            calibration_sha256=config.calibration_sha256,
+            config_sha256=_config_sha256(config),
+        ),
     )
     files["manifest.json"] = _json_bytes(manifest.model_dump(mode="json"), indent=2)
     publish_generation(output_dir.parent.resolve(), output_dir.name, files)
     return manifest
+
+
+def _composition_problem(
+    *,
+    config: IdentificationConfig,
+    supervisor: SafetySupervisor,
+    identity: AdapterIdentity,
+    observer: IdentificationObserverProvenance,
+) -> tuple[str, str, FailureCategory] | None:
+    if (
+        identity.backend != "mock"
+        or identity.mode is not AdapterMode.SIMULATION
+        or identity.hardware_capable
+    ):
+        return (
+            "adapter-identity-mismatch",
+            "mock configuration requires non-hardware mock runtime identity",
+            FailureCategory.ADAPTER_IDENTITY_MISMATCH,
+        )
+    if observer != config.observer:
+        return (
+            "observer-identity-mismatch",
+            "runtime observer provenance differs from reviewed config",
+            FailureCategory.CAMERA_LOSS,
+        )
+    if (
+        supervisor.manifest.hardware_id != config.hardware_id
+        or supervisor.manifest.calibration_sha256 != config.calibration_sha256
+    ):
+        return (
+            "manifest-identity-mismatch",
+            "supervisor manifest differs from config",
+            FailureCategory.SAFETY_ERROR,
+        )
+    manifest_path = Path(config.hardware_manifest_path)
+    if not manifest_path.is_file():
+        return (
+            "manifest-file-missing",
+            "configured hardware manifest does not exist",
+            FailureCategory.SAFETY_ERROR,
+        )
+    if sha256_path(manifest_path) != config.hardware_manifest_sha256:
+        return (
+            "manifest-file-hash-mismatch",
+            "hardware manifest checksum differs",
+            FailureCategory.SAFETY_ERROR,
+        )
+    return None
+
+
+def _config_sha256(config: IdentificationConfig) -> str:
+    payload = json.dumps(
+        config.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
+    ).encode()
+    return hashlib.sha256(payload).hexdigest()
 
 
 def _steps(config: IdentificationConfig) -> tuple[IdentificationStep, ...]:
@@ -314,15 +522,32 @@ def _execute_step(
     *,
     config: IdentificationConfig,
     step: IdentificationStep,
+    baseline: VisualHomeBaseline | None,
     observer: IdentificationObserver,
     supervisor: SafetySupervisor,
     adapter: ActuatorAdapter,
     clock: Callable[[], int],
     sleeper: Callable[[float], object],
     log: _RunLog,
-) -> None:
+) -> tuple[VisualHomeBaseline | None, bool]:
     step_started_ns = clock()
-    sleeper(config.command_interval_ms / 1_000)
+    _guarded_sleep(
+        config.command_interval_ms / 1_000,
+        step_id=step.step_id,
+        operation="command-interval-watchdog",
+        supervisor=supervisor,
+        clock=clock,
+        sleeper=sleeper,
+        log=log,
+    )
+    _check_timeout(config, step_started_ns, clock())
+    _guard_running(
+        step_id=step.step_id,
+        operation="pre-authorize-watchdog",
+        supervisor=supervisor,
+        clock=clock,
+        log=log,
+    )
     request = PoseRequest(
         schema_version="pose-request/v1",
         request_id=f"{config.run_id}-{step.step_id}",
@@ -346,13 +571,35 @@ def _execute_step(
         monotonic_ns=clock(),
     )
     if not decision.authorized:
-        raise _ControlledAbort("authorization-rejected", "supervisor rejected step")
+        raise _ControlledAbort(
+            "authorization-rejected",
+            "supervisor rejected step",
+            category=FailureCategory.SAFETY_ERROR,
+        )
     _log_command(log, step=step, authorization=decision, kind="normal", clock=clock)
     try:
         actuator_status = adapter.apply(decision)
     except Exception as exc:
-        raise _ControlledAbort("adapter-error", type(exc).__name__) from exc
+        raise _ControlledAbort(
+            "adapter-error",
+            type(exc).__name__,
+            category=FailureCategory.CONTROLLER_ERROR,
+        ) from exc
     _log_status(log, step.step_id, actuator_status, clock())
+    controller_decision = _controller_settling_decision(
+        status=actuator_status,
+        request=request,
+        supervisor=supervisor,
+        now_ns=clock(),
+    )
+    log.append(
+        "controller-settling.jsonl",
+        {
+            "run_id": config.run_id,
+            "step_id": step.step_id,
+            "decision": controller_decision.model_dump(mode="json"),
+        },
+    )
     recorded = supervisor.record_status(actuator_status)
     log.transition(
         step_id=step.step_id,
@@ -361,22 +608,68 @@ def _execute_step(
         monotonic_ns=clock(),
     )
     if not recorded.accepted or recorded.state is not RunState.RUNNING:
-        raise _ControlledAbort("controller-fault", "controller status was not accepted")
+        raise _ControlledAbort(
+            "controller-fault",
+            "controller status was not accepted",
+            category=FailureCategory.CONTROLLER_ERROR,
+        )
+    if not controller_decision.target_reached or not controller_decision.samples:
+        raise _ControlledAbort(
+            "controller-settling-unverified",
+            "controller output lacks terminal target evidence",
+            category=FailureCategory.CONTROLLER_ERROR,
+        )
 
-    sleeper(config.controller_settle_ms / 1_000)
-    sleeper(config.visual_settle_ms / 1_000)
+    _guarded_sleep(
+        config.controller_settle_ms / 1_000,
+        step_id=step.step_id,
+        operation="controller-settle-watchdog",
+        supervisor=supervisor,
+        clock=clock,
+        sleeper=sleeper,
+        log=log,
+    )
+    _check_timeout(config, step_started_ns, clock())
+    _guarded_sleep(
+        config.visual_settle_ms / 1_000,
+        step_id=step.step_id,
+        operation="visual-settle-watchdog",
+        supervisor=supervisor,
+        clock=clock,
+        sleeper=sleeper,
+        log=log,
+    )
     _check_timeout(config, step_started_ns, clock())
     observations: list[BlendshapeObservation] = []
     for sample_index in range(config.samples_per_step):
         if sample_index:
-            sleeper(config.sample_interval_ms / 1_000)
+            _guarded_sleep(
+                config.sample_interval_ms / 1_000,
+                step_id=step.step_id,
+                operation="sample-interval-watchdog",
+                supervisor=supervisor,
+                clock=clock,
+                sleeper=sleeper,
+                log=log,
+            )
         _check_timeout(config, step_started_ns, clock())
         try:
             item = observer.observe(run_id=config.run_id, step_id=step.step_id)
         except Exception as exc:
             raise _ControlledAbort(
-                "observer-error", type(exc).__name__, camera_loss=True
+                "observer-error",
+                type(exc).__name__,
+                category=FailureCategory.CAMERA_LOSS,
+                camera_loss=True,
             ) from exc
+        _guard_running(
+            step_id=step.step_id,
+            operation="post-observer-watchdog",
+            supervisor=supervisor,
+            clock=clock,
+            log=log,
+        )
+        _check_timeout(config, step_started_ns, clock())
         _validate_observation(
             item,
             config=config,
@@ -392,11 +685,40 @@ def _execute_step(
                 "observation": item.model_dump(mode="json"),
             },
         )
-    variance = _maximum_variance(observations)
-    if variance > config.maximum_visual_variance:
+    _guard_running(
+        step_id=step.step_id,
+        operation="post-final-sample-watchdog",
+        supervisor=supervisor,
+        clock=clock,
+        log=log,
+    )
+    _check_timeout(config, step_started_ns, clock())
+    visual_decision, new_baseline = _visual_decision(
+        config=config,
+        step=step,
+        observations=observations,
+        baseline=baseline,
+        now_ns=clock(),
+    )
+    log.append(
+        "visual-settling.jsonl",
+        {
+            "run_id": config.run_id,
+            "step_id": step.step_id,
+            "decision": visual_decision.model_dump(mode="json"),
+        },
+    )
+    if not visual_decision.variance_accepted:
         raise _ControlledAbort(
             "visual-variance-breach",
-            f"maximum variance {variance} exceeds configured threshold",
+            "visual variance exceeds configured threshold",
+            category=FailureCategory.VISUAL_ERROR,
+        )
+    if step.phase == "home" and visual_decision.home_verified is not True:
+        raise _ControlledAbort(
+            "visual-home-baseline-mismatch",
+            "stable Home observation differs from the initial Home baseline",
+            category=FailureCategory.VISUAL_ERROR,
         )
     if step.phase == "home":
         log.append(
@@ -406,10 +728,11 @@ def _execute_step(
                 "step_id": step.step_id,
                 "operation": "home-verified",
                 "monotonic_ns": clock(),
-                "accepted": True,
+                "accepted": visual_decision.home_verified is True,
                 "state": supervisor.state.value,
             },
         )
+    return new_baseline, visual_decision.home_verified is True
 
 
 def _validate_observation(
@@ -419,34 +742,163 @@ def _validate_observation(
     status_ns: int,
 ) -> None:
     if observation.run_id != config.run_id:
-        raise _ControlledAbort("observation-run-mismatch", "wrong observation run")
+        raise _ControlledAbort(
+            "observation-run-mismatch",
+            "wrong observation run",
+            category=FailureCategory.CAMERA_LOSS,
+        )
+    if (
+        observation.camera_id != config.observer.camera_id
+        or observation.detector != config.observer.detector
+        or observation.detector_model_sha256
+        != config.observer.detector_model_sha256
+    ):
+        raise _ControlledAbort(
+            "observer-identity-mismatch",
+            "observation provenance differs from reviewed config",
+            category=FailureCategory.CAMERA_LOSS,
+        )
     if observation.validity is not ObservationValidity.VALID:
         raise _ControlledAbort(
             "camera-loss",
             "observer did not return a face",
+            category=FailureCategory.CAMERA_LOSS,
             camera_loss=True,
         )
     if observation.monotonic_ns < status_ns:
         raise _ControlledAbort(
-            "stale-observation", "observation predates controller status"
+            "stale-observation",
+            "observation predates controller status",
+            category=FailureCategory.CAMERA_LOSS,
         )
 
 
 def _check_timeout(config: IdentificationConfig, start_ns: int, now_ns: int) -> None:
     if now_ns - start_ns >= config.step_timeout_ms * 1_000_000:
-        raise _ControlledAbort("step-timeout", "step exceeded its configured timeout")
+        raise _ControlledAbort(
+            "step-timeout",
+            "step exceeded its configured timeout",
+            category=FailureCategory.TIMEOUT,
+        )
 
 
-def _maximum_variance(observations: list[BlendshapeObservation]) -> float:
+def _guarded_sleep(
+    seconds: float,
+    *,
+    step_id: str,
+    operation: str,
+    supervisor: SafetySupervisor,
+    clock: Callable[[], int],
+    sleeper: Callable[[float], object],
+    log: _RunLog,
+) -> None:
+    sleeper(seconds)
+    _guard_running(
+        step_id=step_id,
+        operation=operation,
+        supervisor=supervisor,
+        clock=clock,
+        log=log,
+    )
+
+
+def _guard_running(
+    *,
+    step_id: str,
+    operation: str,
+    supervisor: SafetySupervisor,
+    clock: Callable[[], int],
+    log: _RunLog,
+) -> None:
+    result = supervisor.watchdog(clock())
+    log.transition(
+        step_id=step_id,
+        operation=operation,
+        result=result,
+        monotonic_ns=clock(),
+    )
+    if not result.accepted:
+        raise _ControlledAbort(
+            result.fault.code if result.fault is not None else "watchdog-rejected",
+            "runtime watchdog rejected progress",
+            category=FailureCategory.TIMEOUT,
+        )
+
+
+def _visual_decision(
+    *,
+    config: IdentificationConfig,
+    step: IdentificationStep,
+    observations: list[BlendshapeObservation],
+    baseline: VisualHomeBaseline | None,
+    now_ns: int,
+) -> tuple[VisualSettlingDecision, VisualHomeBaseline | None]:
     schemas = [tuple(score.name for score in item.scores) for item in observations]
     if len(set(schemas)) != 1:
-        raise _ControlledAbort("blendshape-schema-mismatch", "score schema changed")
-    by_name: dict[str, list[float]] = {name: [] for name in schemas[0]}
+        raise _ControlledAbort(
+            "blendshape-schema-mismatch",
+            "score schema changed",
+            category=FailureCategory.VISUAL_ERROR,
+        )
+    values: dict[str, list[float]] = {name: [] for name in schemas[0]}
     for item in observations:
         for score in item.scores:
-            by_name[score.name].append(score.score)
-    return max(
-        (statistics.pvariance(values) for values in by_name.values()), default=0.0
+            values[score.name].append(score.score)
+    means = tuple(
+        NamedMetric(name=name, value=statistics.fmean(samples))
+        for name, samples in sorted(values.items())
+    )
+    variances = tuple(
+        NamedMetric(name=name, value=statistics.pvariance(samples))
+        for name, samples in sorted(values.items())
+    )
+    variance_accepted = all(
+        item.value <= config.maximum_visual_variance for item in variances
+    )
+    baseline_deltas: tuple[NamedMetric, ...] = ()
+    baseline_accepted: bool | None = None
+    established = False
+    home_verified: bool | None = None
+    next_baseline = baseline
+    if step.phase == "home":
+        if baseline is None:
+            expected_names = set(config.home_delta_tolerances)
+            observed_names = {item.name for item in means}
+            baseline_accepted = expected_names == observed_names
+            established = baseline_accepted and variance_accepted
+            home_verified = established
+            if established:
+                next_baseline = VisualHomeBaseline(means=means)
+        else:
+            reference = {item.name: item.value for item in baseline.means}
+            baseline_deltas = tuple(
+                NamedMetric(
+                    name=item.name,
+                    value=abs(item.value - reference[item.name]),
+                )
+                for item in means
+                if item.name in reference
+            )
+            exact_schema = {item.name for item in means} == set(reference) == set(
+                config.home_delta_tolerances
+            )
+            baseline_accepted = exact_schema and all(
+                item.value <= config.home_delta_tolerances[item.name]
+                for item in baseline_deltas
+            )
+            home_verified = variance_accepted and baseline_accepted
+    return (
+        VisualSettlingDecision(
+            means=means,
+            variances=variances,
+            baseline_deltas=baseline_deltas,
+            variance_accepted=variance_accepted,
+            baseline_accepted=baseline_accepted,
+            established_home_baseline=established,
+            home_verified=home_verified,
+            decided_monotonic_ns=now_ns,
+        ),
+        next_baseline,
     )
 
 
@@ -456,12 +908,13 @@ def _abort_and_recover(
     step_id: str,
     config: IdentificationConfig,
     observer: IdentificationObserver,
+    baseline: VisualHomeBaseline | None,
     supervisor: SafetySupervisor,
     adapter: ActuatorAdapter,
     clock: Callable[[], int],
     sleeper: Callable[[float], object],
     log: _RunLog,
-) -> None:
+) -> bool:
     if supervisor.state is RunState.RUNNING:
         result = supervisor.abort(
             (
@@ -487,13 +940,27 @@ def _abort_and_recover(
             recovery_wait=supervisor.recovery_wait,
         )
     else:
-        return
+        return False
 
     recovery_index = 0
+    recovery_operations = 0
+    recovery_deadline_ns = clock() + config.recovery_timeout_ms * 1_000_000
     while supervisor.state is RunState.ABORTING:
+        if (
+            clock() >= recovery_deadline_ns
+            or recovery_operations >= config.maximum_recovery_attempts
+        ):
+            _exhaust_recovery(
+                step_id=step_id,
+                supervisor=supervisor,
+                clock=clock,
+                log=log,
+            )
+            return True
         authorization = result.recovery_authorization
         wait = result.recovery_wait
         if authorization is not None:
+            recovery_operations += 1
             recovery_index += 1
             recovery_step_id = f"{step_id}-recovery-{recovery_index:03d}"
             _log_recovery_command(log, recovery_step_id, authorization, clock())
@@ -509,6 +976,20 @@ def _abort_and_recover(
                 )
                 break
             _log_status(log, recovery_step_id, status, clock())
+            controller_decision = _controller_settling_decision(
+                status=status,
+                request=authorization.request,
+                supervisor=supervisor,
+                now_ns=clock(),
+            )
+            log.append(
+                "controller-settling.jsonl",
+                {
+                    "run_id": config.run_id,
+                    "step_id": recovery_step_id,
+                    "decision": controller_decision.model_dump(mode="json"),
+                },
+            )
             result = supervisor.record_status(status)
             log.transition(
                 step_id=recovery_step_id,
@@ -516,22 +997,41 @@ def _abort_and_recover(
                 result=result,
                 monotonic_ns=clock(),
             )
+            if clock() >= recovery_deadline_ns:
+                _exhaust_recovery(
+                    step_id=step_id,
+                    supervisor=supervisor,
+                    clock=clock,
+                    log=log,
+                )
+                return True
             if result.state is RunState.FAULTED and supervisor.safe_state_verified:
                 _verify_recovery_home(
                     config=config,
                     observer=observer,
+                    baseline=baseline,
                     step_id=recovery_step_id,
                     status_ns=status.reported_monotonic_ns,
                     supervisor=supervisor,
                     clock=clock,
                     sleeper=sleeper,
                     log=log,
+                    deadline_ns=recovery_deadline_ns,
                 )
             continue
         if wait is not None and wait.reason is RecoveryWaitReason.MOTION_LIMITS:
             remaining_ns = wait.retry_not_before_monotonic_ns - clock()
+            if wait.retry_not_before_monotonic_ns >= recovery_deadline_ns:
+                _exhaust_recovery(
+                    step_id=step_id,
+                    supervisor=supervisor,
+                    clock=clock,
+                    log=log,
+                )
+                return True
             if remaining_ns > 0:
                 sleeper(remaining_ns / 1_000_000_000)
+            recovery_operations += 1
             result = supervisor.retry_recovery(clock())
             log.transition(
                 step_id=f"{step_id}-recovery-wait",
@@ -552,34 +1052,85 @@ def _abort_and_recover(
             monotonic_ns=clock(),
         )
         break
+    return False
+
+
+def _exhaust_recovery(
+    *,
+    step_id: str,
+    supervisor: SafetySupervisor,
+    clock: Callable[[], int],
+    log: _RunLog,
+) -> None:
+    log.fault(
+        step_id=f"{step_id}-recovery-exhausted",
+        fault=SafetyFault(
+            code="recovery-exhausted",
+            detail="configured recovery deadline or attempt count was exhausted",
+            occurred_monotonic_ns=clock(),
+        ),
+    )
+    if supervisor.state is RunState.ABORTING:
+        unavailable = supervisor.recovery_unavailable(
+            "configured recovery deadline or attempt count exhausted"
+        )
+        log.transition(
+            step_id=f"{step_id}-recovery-exhausted",
+            operation="recovery-unavailable",
+            result=unavailable,
+            monotonic_ns=clock(),
+        )
 
 
 def _verify_recovery_home(
     *,
     config: IdentificationConfig,
     observer: IdentificationObserver,
+    baseline: VisualHomeBaseline | None,
     step_id: str,
     status_ns: int,
     supervisor: SafetySupervisor,
     clock: Callable[[], int],
     sleeper: Callable[[float], object],
     log: _RunLog,
+    deadline_ns: int,
 ) -> None:
     """Record independent visual Home evidence after controller-confirmed recovery."""
 
     sleeper(config.controller_settle_ms / 1_000)
+    if clock() >= deadline_ns:
+        _log_recovery_visual_deadline(step_id=step_id, clock=clock, log=log)
+        return
     sleeper(config.visual_settle_ms / 1_000)
+    if clock() >= deadline_ns:
+        _log_recovery_visual_deadline(step_id=step_id, clock=clock, log=log)
+        return
     observations: list[BlendshapeObservation] = []
     try:
         for sample_index in range(config.samples_per_step):
             if sample_index:
                 sleeper(config.sample_interval_ms / 1_000)
+                if clock() >= deadline_ns:
+                    raise _ControlledAbort(
+                        "recovery-home-deadline-exceeded",
+                        "recovery visual verification exceeded its deadline",
+                        category=FailureCategory.RECOVERY_ERROR,
+                    )
             try:
                 item = observer.observe(run_id=config.run_id, step_id=step_id)
             except Exception as exc:
                 raise _ControlledAbort(
-                    "observer-error", type(exc).__name__, camera_loss=True
+                    "observer-error",
+                    type(exc).__name__,
+                    category=FailureCategory.CAMERA_LOSS,
+                    camera_loss=True,
                 ) from exc
+            if clock() >= deadline_ns:
+                raise _ControlledAbort(
+                    "recovery-home-deadline-exceeded",
+                    "recovery observer exceeded its deadline",
+                    category=FailureCategory.RECOVERY_ERROR,
+                )
             _validate_observation(item, config=config, status_ns=status_ns)
             observations.append(item)
             log.append(
@@ -591,8 +1142,38 @@ def _verify_recovery_home(
                     "observation": item.model_dump(mode="json"),
                 },
             )
-        variance = _maximum_variance(observations)
-        verified = variance <= config.maximum_visual_variance
+        if baseline is None:
+            raise _ControlledAbort(
+                "recovery-home-baseline-missing",
+                "no initial visual Home baseline exists",
+                category=FailureCategory.VISUAL_ERROR,
+            )
+        recovery_step = IdentificationStep(
+            step_id=step_id,
+            actuator_name=(
+                supervisor.manifest.actuators[0].name
+                if not supervisor.committed_targets
+                else next(iter(supervisor.committed_targets))
+            ),
+            normalized_position=0.0,
+            phase="home",
+        )
+        visual_decision, _ = _visual_decision(
+            config=config,
+            step=recovery_step,
+            observations=observations,
+            baseline=baseline,
+            now_ns=clock(),
+        )
+        verified = visual_decision.home_verified is True
+        log.append(
+            "visual-settling.jsonl",
+            {
+                "run_id": config.run_id,
+                "step_id": step_id,
+                "decision": visual_decision.model_dump(mode="json"),
+            },
+        )
     except _ControlledAbort as error:
         verified = False
         log.fault(
@@ -613,6 +1194,65 @@ def _verify_recovery_home(
             "accepted": verified,
             "state": supervisor.state.value,
         },
+    )
+
+
+def _log_recovery_visual_deadline(
+    *, step_id: str, clock: Callable[[], int], log: _RunLog
+) -> None:
+    log.fault(
+        step_id=step_id,
+        fault=SafetyFault(
+            code="recovery-home-deadline-exceeded",
+            detail="recovery visual verification exceeded its deadline",
+            occurred_monotonic_ns=clock(),
+        ),
+    )
+    log.append(
+        "transitions.jsonl",
+        {
+            "run_id": log.run_id,
+            "step_id": step_id,
+            "operation": "home-verified",
+            "monotonic_ns": clock(),
+            "accepted": False,
+            "state": RunState.FAULTED.value,
+        },
+    )
+
+
+def _controller_settling_decision(
+    *,
+    status: ActuatorStatus,
+    request: PoseRequest,
+    supervisor: SafetySupervisor,
+    now_ns: int,
+) -> ControllerSettlingDecision:
+    last_by_actuator: dict[str, ControllerOutputSample] = {}
+    for sample in status.controller_output_samples:
+        previous = last_by_actuator.get(sample.actuator_name)
+        if (
+            previous is None
+            or sample.observed_monotonic_ns >= previous.observed_monotonic_ns
+        ):
+            last_by_actuator[sample.actuator_name] = sample
+    reached = status.targets_reached is True
+    for target in request.targets:
+        expected_qus = supervisor.manifest.actuator(target.actuator_name).target_qus(
+            target.normalized_position
+        )
+        terminal_sample = last_by_actuator.get(target.actuator_name)
+        if (
+            terminal_sample is None
+            or terminal_sample.target_qus != expected_qus
+            or terminal_sample.observed_qus != expected_qus
+        ):
+            reached = False
+    return ControllerSettlingDecision(
+        target_reached=reached,
+        requested_targets=request.targets,
+        samples=status.controller_output_samples,
+        decided_monotonic_ns=now_ns,
     )
 
 

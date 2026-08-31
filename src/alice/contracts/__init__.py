@@ -4,6 +4,7 @@ from alice.contracts.actuation import (
     ActuatorStatus,
     ActuatorStatusState,
     ActuatorTarget,
+    ControllerOutputSample,
     PoseRequest,
 )
 from alice.contracts.blendshapes import (
@@ -20,6 +21,7 @@ __all__ = [
     "BlendshapeObservation",
     "BlendshapeScore",
     "ObservationValidity",
+    "ControllerOutputSample",
     "PoseRequest",
     "validate_category_schema",
 ]

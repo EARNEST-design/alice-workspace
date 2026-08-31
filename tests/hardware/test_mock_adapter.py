@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from alice.contracts.actuation import PoseRequest
-from alice.hardware.adapter import ActuatorAuthorizationError
+from alice.hardware.adapter import ActuatorAuthorizationError, AdapterMode
 from alice.hardware.manifest import HardwareManifest, load_manifest
 from alice.hardware.mock_adapter import MockActuatorAdapter
 from alice.safety.permits import ActuationPermit, PermitKind
@@ -79,6 +79,14 @@ def test_mock_applies_authorized_requests_deterministically(
     assert first.state.value == "applied"
     assert first.applied_targets == accepted.targets
     assert adapter.positions == {"mouth_open": 0.1}
+    assert adapter.identity.backend == "mock"
+    assert adapter.identity.mode is AdapterMode.SIMULATION
+    assert adapter.identity.hardware_capable is False
+    assert first.targets_reached is True
+    assert len(first.controller_output_samples) == 1
+    sample = first.controller_output_samples[0]
+    assert sample.target_qus == manifest.actuator("mouth_open").target_qus(0.1)
+    assert sample.observed_qus == sample.target_qus
 
 
 def test_mock_accepts_recovery_authorization(manifest: HardwareManifest) -> None:

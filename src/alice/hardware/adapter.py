@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Protocol, TypeAlias
+from enum import StrEnum
+from typing import Literal, Protocol, TypeAlias
+
+from pydantic import BaseModel, ConfigDict
 
 from alice.contracts.actuation import ActuatorStatus, PoseRequest
 from alice.hardware.manifest import HardwareManifest
@@ -24,8 +27,27 @@ class ActuatorAuthorizationError(ValueError):
     """Raised before forwarding when supervisor authority is absent or invalid."""
 
 
+class AdapterMode(StrEnum):
+    SIMULATION = "simulation"
+    HARDWARE = "hardware"
+
+
+class AdapterIdentity(BaseModel):
+    """Immutable runtime backend attestation recorded before a run starts."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    backend: Literal["mock", "maestro"]
+    mode: AdapterMode
+    hardware_capable: bool
+
+
 class ActuatorAdapter(Protocol):
     """An actuator sink that accepts supervisor authority, never raw proposals."""
+
+    @property
+    def identity(self) -> AdapterIdentity:
+        """Return immutable runtime backend and capability identity."""
 
     def apply(self, authorization: ActuatorAuthorization) -> ActuatorStatus:
         """Apply one supervisor-authorized request and report confirmed state."""

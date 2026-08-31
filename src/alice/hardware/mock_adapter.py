@@ -5,8 +5,17 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from types import MappingProxyType
 
-from alice.contracts.actuation import ActuatorStatus, ActuatorStatusState
-from alice.hardware.adapter import ActuatorAuthorization, authorized_request
+from alice.contracts.actuation import (
+    ActuatorStatus,
+    ActuatorStatusState,
+    ControllerOutputSample,
+)
+from alice.hardware.adapter import (
+    ActuatorAuthorization,
+    AdapterIdentity,
+    AdapterMode,
+    authorized_request,
+)
 from alice.hardware.manifest import HardwareManifest
 from alice.safety.permits import ActuationPermitVerifier
 
@@ -25,6 +34,14 @@ class MockActuatorAdapter:
         self._clock = clock
         self._permit_verifier = permit_verifier
         self._positions: dict[str, float] = {}
+
+    @property
+    def identity(self) -> AdapterIdentity:
+        return AdapterIdentity(
+            backend="mock",
+            mode=AdapterMode.SIMULATION,
+            hardware_capable=False,
+        )
 
     @property
     def positions(self) -> Mapping[str, float]:
@@ -53,6 +70,20 @@ class MockActuatorAdapter:
             reported_monotonic_ns=now_ns,
             state=ActuatorStatusState.APPLIED,
             applied_targets=request.targets,
+            controller_output_samples=tuple(
+                ControllerOutputSample(
+                    actuator_name=target.actuator_name,
+                    target_qus=self._manifest.actuator(
+                        target.actuator_name
+                    ).target_qus(target.normalized_position),
+                    observed_qus=self._manifest.actuator(
+                        target.actuator_name
+                    ).target_qus(target.normalized_position),
+                    observed_monotonic_ns=now_ns,
+                )
+                for target in request.targets
+            ),
+            targets_reached=True,
         )
 
     def close(self) -> None:

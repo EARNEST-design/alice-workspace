@@ -14,12 +14,13 @@ from alice.contracts.blendshapes import (
     BlendshapeScore,
     ObservationValidity,
 )
-from alice.experiments.manifest import RunStatus
+from alice.experiments.manifest import IdentificationObserverProvenance, RunStatus
 from alice.experiments.system_identification import (
     IdentificationConfig,
     IdentificationStep,
     run_identification,
 )
+from alice.hardware.adapter import AdapterIdentity, AdapterMode
 from alice.hardware.manifest import HardwareManifest, load_manifest
 from alice.hardware.mock_adapter import MockActuatorAdapter
 from alice.safety.supervisor import (
@@ -68,6 +69,30 @@ class RecordingObserver:
         value = self.values[(call_number - 1) % len(self.values)]
         return observation(run_id=run_id, monotonic_ns=self.clock(), value=value)
 
+    @property
+    def provenance(self) -> IdentificationObserverProvenance:
+        return IdentificationObserverProvenance.model_validate(
+            {
+                "camera_id": "mock-camera",
+                "detector": "mock-detector",
+                "detector_model_sha256": "a" * 64,
+                "camera_settings": {
+                    name: {
+                        "availability": "available",
+                        "value": value,
+                        "set_succeeded": True,
+                    }
+                    for name, value in {
+                        "width": 640,
+                        "height": 480,
+                        "fps": 30,
+                        "focus": 0,
+                        "exposure": -5,
+                    }.items()
+                },
+            }
+        )
+
 
 class RaisingObserver(RecordingObserver):
     def observe(self, *, run_id: str, step_id: str) -> BlendshapeObservation:
@@ -112,6 +137,56 @@ class UnknownApplicationAdapter(RecordingAdapter):
         return super().apply(authorization)
 
 
+class LyingSettlingAdapter(RecordingAdapter):
+    def apply(self, authorization: Any) -> ActuatorStatus:
+        status = super().apply(authorization)
+        sample = status.controller_output_samples[0]
+        return status.model_copy(
+            update={
+                "controller_output_samples": (
+                    sample.model_copy(update={"observed_qus": sample.target_qus + 1}),
+                ),
+                "targets_reached": True,
+            }
+        )
+
+
+class HardwareCapableFake(RecordingAdapter):
+    @property
+    def identity(self) -> AdapterIdentity:
+        return AdapterIdentity(
+            backend="maestro",
+            mode=AdapterMode.HARDWARE,
+            hardware_capable=True,
+        )
+
+
+class StepObserver(RecordingObserver):
+    def __init__(self, clock: FakeClock, by_step: dict[str, float]) -> None:
+        super().__init__(clock)
+        self.by_step = by_step
+
+    def observe(self, *, run_id: str, step_id: str) -> BlendshapeObservation:
+        self.calls.append((run_id, step_id, self.clock()))
+        return observation(
+            run_id=run_id,
+            monotonic_ns=self.clock(),
+            value=self.by_step[step_id],
+        )
+
+
+class SlowObserver(RecordingObserver):
+    def observe(self, *, run_id: str, step_id: str) -> BlendshapeObservation:
+        self.clock.sleep(6.0)
+        return super().observe(run_id=run_id, step_id=step_id)
+
+
+class WrongIdentityObserver(RecordingObserver):
+    @property
+    def provenance(self) -> IdentificationObserverProvenance:
+        return super().provenance.model_copy(update={"camera_id": "other-camera"})
+
+
 @pytest.fixture
 def manifest() -> HardwareManifest:
     return load_manifest(Path("hardware/alice-face-v1.yaml"))
@@ -147,12 +222,17 @@ def observation(
 
 
 def config(manifest: HardwareManifest, **updates: Any) -> IdentificationConfig:
+    manifest_path = Path("hardware/alice-face-v1.yaml")
     values: dict[str, Any] = {
         "schema_version": "identification-config/v1",
         "run_id": "mock-identification-001",
         "adapter": "mock",
         "hardware_id": manifest.hardware_id,
         "calibration_sha256": manifest.calibration_sha256,
+        "hardware_manifest_path": str(manifest_path),
+        "hardware_manifest_sha256": __import__("hashlib").sha256(
+            manifest_path.read_bytes()
+        ).hexdigest(),
         "actuator_names": ("mouth_open",),
         "offsets": (0.1, -0.1),
         "samples_per_step": 3,
@@ -163,12 +243,34 @@ def config(manifest: HardwareManifest, **updates: Any) -> IdentificationConfig:
         "step_timeout_ms": 2_000,
         "command_ttl_ms": 100,
         "maximum_visual_variance": 0.01,
+        "home_delta_tolerances": {"jawOpen": 0.01},
+        "recovery_timeout_ms": 2_000,
+        "maximum_recovery_attempts": 20,
         "random_seeds": (),
         "provenance": {
             "kind": "deterministic-mock",
             "source": "tests/experiments/test_system_identification.py",
         },
         "retention": "derived_observations_only",
+        "observer": {
+            "camera_id": "mock-camera",
+            "detector": "mock-detector",
+            "detector_model_sha256": "a" * 64,
+            "camera_settings": {
+                name: {
+                    "availability": "available",
+                    "value": value,
+                    "set_succeeded": True,
+                }
+                for name, value in {
+                    "width": 640,
+                    "height": 480,
+                    "fps": 30,
+                    "focus": 0,
+                    "exposure": -5,
+                }.items()
+            },
+        },
     }
     values.update(updates)
     return IdentificationConfig.model_validate(values)
@@ -303,7 +405,7 @@ def test_exact_sequence_waits_for_status_and_settling_and_correlates_artifacts(
         type(wrapper).__name__.endswith("Decision")
         for wrapper in actuator.applied_wrappers
     )
-    assert supervisor.state is RunState.RUNNING
+    assert supervisor.state is RunState.DISARMED
     assert supervisor.committed_targets["mouth_open"] == 0.0
     assert result.artifacts["commands.jsonl"].sha256
     assert result.artifacts["statuses.jsonl"].sha256
@@ -314,6 +416,26 @@ def test_exact_sequence_waits_for_status_and_settling_and_correlates_artifacts(
         == "pending_analysis"
     )
     assert "pending" in (run_dir / "conclusion.md").read_text().lower()
+    controller = jsonl(run_dir, "controller-settling.jsonl")
+    assert controller
+    assert all(item["decision"]["target_reached"] for item in controller)
+    assert all(item["decision"]["samples"] for item in controller)
+    visual = jsonl(run_dir, "visual-settling.jsonl")
+    assert len(visual) == 5
+    assert visual[0]["decision"]["established_home_baseline"] is True
+    assert visual[-1]["decision"]["home_verified"] is True
+    stored_manifest = json.loads((run_dir / "manifest.json").read_text())
+    assert stored_manifest["run_kind"] == "actuator_identification"
+    metadata = stored_manifest["identification_metadata"]
+    assert metadata["adapter_identity"]["backend"] == "mock"
+    assert metadata["observer"]["camera_id"] == "mock-camera"
+    assert metadata["safety_limits"]["watchdog_timeout_ns"] == 5_000_000_000
+    assert metadata["preflight"]["run_id"] == config(manifest).run_id
+    assert metadata["approval"]["approval_id"] == "mock-approval"
+    assert metadata["hardware_manifest_sha256"] == config(
+        manifest
+    ).hardware_manifest_sha256
+    assert stored_manifest["camera_settings"]["width"]["value"] == 640
 
 
 @pytest.mark.parametrize("failure", ["camera", "variance", "timeout"])
@@ -342,7 +464,9 @@ def test_observation_failures_abort_before_next_normal_movement_and_recover_home
     commands = jsonl(run_dir, "commands.jsonl")
     normal = [item for item in commands if item["authorization_kind"] == "normal"]
     recovery = [item for item in commands if item["authorization_kind"] == "recovery"]
-    expected_normal_count = 1 if failure in {"variance", "timeout"} else 2
+    expected_normal_count = (
+        0 if failure == "timeout" else (1 if failure == "variance" else 2)
+    )
     assert len(normal) == expected_normal_count
     assert recovery[-1]["normalized_position"] == 0.0
     assert supervisor.state is RunState.FAULTED
@@ -468,6 +592,209 @@ def test_unknown_adapter_application_is_not_inferred_as_home(
     assert not any(
         item["operation"] == "home-verified" and "recovery" in item["step_id"]
         for item in transitions
+    )
+
+
+def test_runner_derives_controller_settling_instead_of_trusting_adapter_flag(
+    tmp_path: Path, manifest: HardwareManifest
+) -> None:
+    clock = FakeClock()
+    supervisor = armed_supervisor(manifest, clock)
+    actuator = LyingSettlingAdapter(
+        manifest=manifest,
+        clock=clock,
+        permit_verifier=supervisor.actuation_permit_verifier,
+    )
+    run_dir = tmp_path / "lying-settling"
+
+    result = run_identification(
+        config(manifest),
+        RecordingObserver(clock),
+        supervisor,
+        actuator,
+        run_dir,
+        clock,
+        clock.sleep,
+    )
+
+    assert result.status is RunStatus.ABORTED
+    assert result.failure is not None
+    assert result.failure.category == "controller_error"
+    decision = jsonl(run_dir, "controller-settling.jsonl")[0]["decision"]
+    assert decision["target_reached"] is False
+
+
+def test_hardware_capable_runtime_adapter_is_rejected_before_start_or_apply(
+    tmp_path: Path, manifest: HardwareManifest
+) -> None:
+    clock = FakeClock()
+    supervisor = armed_supervisor(manifest, clock)
+    actuator = HardwareCapableFake(
+        manifest=manifest,
+        clock=clock,
+        permit_verifier=supervisor.actuation_permit_verifier,
+    )
+
+    result = run_identification(
+        config(manifest),
+        RecordingObserver(clock),
+        supervisor,
+        actuator,
+        tmp_path / "identity-rejected",
+        clock,
+        clock.sleep,
+    )
+
+    assert result.status is RunStatus.ABORTED
+    assert result.failure is not None
+    assert result.failure.category == "adapter_identity_mismatch"
+    assert supervisor.state is RunState.ARMED
+    assert actuator.applied_wrappers == []
+
+
+def test_runtime_observer_identity_is_rejected_before_start_or_apply(
+    tmp_path: Path, manifest: HardwareManifest
+) -> None:
+    clock = FakeClock()
+    supervisor = armed_supervisor(manifest, clock)
+    actuator = adapter(manifest, supervisor, clock)
+
+    result = run_identification(
+        config(manifest),
+        WrongIdentityObserver(clock),
+        supervisor,
+        actuator,
+        tmp_path / "observer-identity-rejected",
+        clock,
+        clock.sleep,
+    )
+
+    assert result.status is RunStatus.ABORTED
+    assert result.failure is not None
+    assert result.failure.category == "camera_loss"
+    assert supervisor.state is RunState.ARMED
+    assert actuator.applied_wrappers == []
+
+
+def test_watchdog_runs_after_observer_and_prevents_next_movement(
+    tmp_path: Path, manifest: HardwareManifest
+) -> None:
+    clock = FakeClock()
+    supervisor = armed_supervisor(manifest, clock)
+    run_dir = tmp_path / "watchdog-observer"
+
+    result = run_identification(
+        config(manifest, step_timeout_ms=20_000),
+        SlowObserver(clock),
+        supervisor,
+        adapter(manifest, supervisor, clock),
+        run_dir,
+        clock,
+        clock.sleep,
+    )
+
+    assert result.status is RunStatus.ABORTED
+    normal = [
+        item
+        for item in jsonl(run_dir, "commands.jsonl")
+        if item["authorization_kind"] == "normal"
+    ]
+    assert len(normal) == 1
+    assert any(
+        item["fault"]["code"] == "watchdog-expired"
+        for item in jsonl(run_dir, "faults.jsonl")
+    )
+
+
+def test_stable_nonbaseline_home_aborts_before_next_movement(
+    tmp_path: Path, manifest: HardwareManifest
+) -> None:
+    clock = FakeClock()
+    supervisor = armed_supervisor(manifest, clock)
+    run_dir = tmp_path / "false-home"
+    observer = StepObserver(
+        clock,
+        {"step-0001": 0.20, "step-0002": 0.50, "step-0003": 0.25},
+    )
+
+    result = run_identification(
+        config(manifest),
+        observer,
+        supervisor,
+        adapter(manifest, supervisor, clock),
+        run_dir,
+        clock,
+        clock.sleep,
+    )
+
+    assert result.status is RunStatus.ABORTED
+    normal = [
+        item["normalized_position"]
+        for item in jsonl(run_dir, "commands.jsonl")
+        if item["authorization_kind"] == "normal"
+    ]
+    assert normal == [0.0, 0.1, 0.0]
+    assert result.failure is not None
+    assert result.failure.category == "visual_error"
+
+
+def test_start_abort_uses_recovery_driver_and_exits_terminal(
+    tmp_path: Path, manifest: HardwareManifest
+) -> None:
+    clock = FakeClock()
+    supervisor = armed_supervisor(manifest, clock)
+    actuator = adapter(manifest, supervisor, clock)
+    clock.sleep(60.0)
+
+    result = run_identification(
+        config(manifest),
+        RecordingObserver(clock),
+        supervisor,
+        actuator,
+        tmp_path / "start-abort",
+        clock,
+        clock.sleep,
+    )
+
+    assert result.status is RunStatus.ABORTED
+    assert supervisor.state is RunState.FAULTED
+    assert any(
+        type(item).__name__ == "RecoveryAuthorization"
+        for item in actuator.applied_wrappers
+    )
+
+
+def test_recovery_deadline_exhaustion_fails_closed(
+    tmp_path: Path, manifest: HardwareManifest
+) -> None:
+    clock = FakeClock()
+    supervisor = armed_supervisor(manifest, clock)
+    actuator = FaultingAdapter(
+        fault_on_call=2,
+        manifest=manifest,
+        clock=clock,
+        permit_verifier=supervisor.actuation_permit_verifier,
+    )
+    run_dir = tmp_path / "recovery-exhausted"
+
+    result = run_identification(
+        config(manifest, recovery_timeout_ms=1, maximum_recovery_attempts=1),
+        RecordingObserver(clock),
+        supervisor,
+        actuator,
+        run_dir,
+        clock,
+        clock.sleep,
+    )
+
+    assert result.status is RunStatus.ABORTED
+    assert result.failure is not None
+    assert result.failure.category == "recovery_error"
+    assert supervisor.state is RunState.FAULTED
+    assert supervisor.safe_state_verified is False
+    assert any(
+        item["fault"]["code"] == "recovery-exhausted"
+        for item in jsonl(run_dir, "faults.jsonl")
     )
 
 

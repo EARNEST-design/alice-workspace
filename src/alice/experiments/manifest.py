@@ -15,11 +15,22 @@ from pydantic import (
 )
 
 from alice.contracts.blendshapes import NonEmptyString, Sha256Hex
+from alice.hardware.adapter import AdapterIdentity
+from alice.safety.supervisor import (
+    OperatorApproval,
+    PreflightEvidence,
+    SafetyLimits,
+)
 
 
 class RunStatus(StrEnum):
     COMPLETED = "completed"
     ABORTED = "aborted"
+
+
+class RunKind(StrEnum):
+    PASSIVE_CAPTURE = "passive_capture"
+    ACTUATOR_IDENTIFICATION = "actuator_identification"
 
 
 class FailureCategory(StrEnum):
@@ -29,6 +40,13 @@ class FailureCategory(StrEnum):
     OBSERVATION_IDENTITY_MISMATCH = "observation_identity_mismatch"
     OBSERVATION_SEQUENCE_INVALID = "observation_sequence_invalid"
     FRAME_ENCODING_ERROR = "frame_encoding_error"
+    ADAPTER_IDENTITY_MISMATCH = "adapter_identity_mismatch"
+    SAFETY_ERROR = "safety_error"
+    CONTROLLER_ERROR = "controller_error"
+    CAMERA_LOSS = "camera_loss"
+    TIMEOUT = "timeout"
+    VISUAL_ERROR = "visual_error"
+    RECOVERY_ERROR = "recovery_error"
 
 
 class ArtifactRecord(BaseModel):
@@ -94,6 +112,33 @@ class NegotiatedCameraSettings(BaseModel):
         )
 
 
+class IdentificationObserverProvenance(BaseModel):
+    """Actual perception identity and camera state declared for Phase 2."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    camera_id: NonEmptyString
+    detector: NonEmptyString
+    detector_model_sha256: Sha256Hex
+    camera_settings: NegotiatedCameraSettings
+
+
+class IdentificationRunMetadata(BaseModel):
+    """Typed safety and provenance snapshot for an actuator-identification run."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    adapter_identity: AdapterIdentity
+    observer: IdentificationObserverProvenance
+    safety_limits: SafetyLimits
+    preflight: PreflightEvidence | None
+    approval: OperatorApproval | None
+    hardware_manifest_path: NonEmptyString
+    hardware_manifest_sha256: Sha256Hex
+    calibration_sha256: Sha256Hex
+    config_sha256: Sha256Hex
+
+
 class FailureRecord(BaseModel):
     """Sanitized structured failure details for aborted runs."""
 
@@ -109,6 +154,7 @@ class ArtifactManifest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     schema_version: Literal["artifact-manifest/v1"]
+    run_kind: RunKind = RunKind.PASSIVE_CAPTURE
     run_id: NonEmptyString
     status: RunStatus
     started_at: AwareDatetime
@@ -131,6 +177,7 @@ class ArtifactManifest(BaseModel):
     aborted_reason: NonEmptyString | None = None
     failure: FailureRecord | None = None
     conclusion: NonEmptyString | None = None
+    identification_metadata: IdentificationRunMetadata | None = None
 
     @model_validator(mode="after")
     def validate_manifest_state(self) -> ArtifactManifest:
@@ -141,6 +188,15 @@ class ArtifactManifest(BaseModel):
                 raise ValueError("artifact key must equal artifact path")
         if self.conclusion is not None:
             raise ValueError("capture manifest conclusion must remain unset")
+        if self.run_kind is RunKind.ACTUATOR_IDENTIFICATION:
+            if self.identification_metadata is None:
+                raise ValueError(
+                    "actuator identification manifest requires typed metadata"
+                )
+        elif self.identification_metadata is not None:
+            raise ValueError(
+                "passive capture manifest cannot contain identification metadata"
+            )
 
         if self.status is RunStatus.COMPLETED:
             if self.failure is not None or self.aborted_reason is not None:

@@ -62,6 +62,17 @@ class ActuatorStatusState(StrEnum):
     FAULT = "fault"
 
 
+class ControllerOutputSample(BaseModel):
+    """One controller-reported output sample; never mechanical-position proof."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    actuator_name: NonEmptyString
+    observed_qus: Annotated[int, Field(gt=0)]
+    target_qus: Annotated[int, Field(gt=0)]
+    observed_monotonic_ns: MonotonicNanoseconds
+
+
 class ActuatorStatus(BaseModel):
     """Status returned by an actuator adapter for one pose request.
 
@@ -90,17 +101,28 @@ class ActuatorStatus(BaseModel):
     )
     fault_code: NonEmptyString | None = None
     detail: NonEmptyString | None = None
+    controller_output_samples: tuple[ControllerOutputSample, ...] = ()
+    targets_reached: bool | None = None
 
     @model_validator(mode="after")
     def validate_status(self) -> ActuatorStatus:
         names = [target.actuator_name for target in self.applied_targets]
         if len(names) != len(set(names)):
             raise ValueError("applied targets must have a unique actuator_name")
+        if self.targets_reached is True and not self.controller_output_samples:
+            raise ValueError("targets_reached requires controller output samples")
+        if any(
+            sample.observed_monotonic_ns > self.reported_monotonic_ns
+            for sample in self.controller_output_samples
+        ):
+            raise ValueError("controller output sample cannot postdate status")
         if self.state is ActuatorStatusState.APPLIED:
             if not self.applied_targets:
                 raise ValueError("an applied status requires applied_targets")
             if self.fault_code is not None:
                 raise ValueError("an applied status cannot carry a fault_code")
+            if self.targets_reached is False:
+                raise ValueError("applied status cannot report targets_reached false")
         elif self.state is ActuatorStatusState.REJECTED:
             if self.applied_targets:
                 raise ValueError("a rejected status cannot carry applied_targets")

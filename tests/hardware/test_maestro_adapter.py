@@ -9,7 +9,7 @@ import pytest
 import serial
 
 from alice.contracts.actuation import ActuatorStatusState, PoseRequest
-from alice.hardware.adapter import ActuatorAuthorizationError
+from alice.hardware.adapter import ActuatorAuthorizationError, AdapterMode
 from alice.hardware.maestro_adapter import (
     MaestroAdapter,
     MaestroConnectionError,
@@ -384,6 +384,21 @@ def test_error_register_returns_fault_with_confirmed_application(
     assert status.state is ActuatorStatusState.FAULT
     assert status.fault_code == "maestro-error-register-0x0004"
     assert status.applied_targets == request(manifest).targets
+    assert status.controller_output_samples
+    assert status.targets_reached is True
+
+
+def test_maestro_identity_is_immutable_hardware_attestation(
+    manifest: HardwareManifest,
+) -> None:
+    fake = FakeSerial()
+    instance = adapter(manifest, fake)
+
+    assert instance.identity.backend == "maestro"
+    assert instance.identity.mode is AdapterMode.HARDWARE
+    assert instance.identity.hardware_capable is True
+    with pytest.raises(Exception):
+        instance.identity.backend = "mock"  # type: ignore[misc]
 
 
 def test_second_target_failure_preserves_only_first_confirmed_target(

@@ -221,6 +221,36 @@ def test_authorize_requires_explicit_start(
     assert supervisor.pending_request is None
 
 
+def test_complete_run_requires_confirmed_controller_home_and_leaves_running(
+    manifest: HardwareManifest, clock: FakeClock
+) -> None:
+    supervisor = make_supervisor(manifest, clock)
+    start(supervisor, manifest, clock)
+    clock.advance(500_000_000)
+    apply_request(supervisor, manifest, clock, position=0.10)
+
+    rejected = supervisor.complete_run()
+
+    assert rejected.accepted is False
+    assert rejected.state is RunState.ABORTING
+    assert rejected.fault is not None
+    assert rejected.fault.code == "complete-not-home"
+
+
+def test_complete_run_at_controller_home_is_terminal_without_clearing_history(
+    manifest: HardwareManifest, clock: FakeClock
+) -> None:
+    supervisor = make_supervisor(manifest, clock)
+    start(supervisor, manifest, clock)
+
+    completed = supervisor.complete_run()
+
+    assert completed.accepted is True
+    assert completed.state is RunState.DISARMED
+    assert supervisor.state is RunState.DISARMED
+    assert supervisor.pending_request is None
+
+
 def test_only_one_request_can_be_in_flight_and_unapplied_target_is_not_committed(
     manifest: HardwareManifest, clock: FakeClock
 ) -> None:

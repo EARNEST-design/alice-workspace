@@ -10,6 +10,9 @@ if TYPE_CHECKING:
         ArtifactRecord,
         FailureCategory,
         FailureRecord,
+        IdentificationObserverProvenance,
+        IdentificationRunMetadata,
+        RunKind,
         RunStatus,
     )
     from alice.experiments.passive_capture import (
@@ -22,8 +25,11 @@ __all__ = [
     "ArtifactRecord",
     "FailureCategory",
     "FailureRecord",
+    "IdentificationObserverProvenance",
+    "IdentificationRunMetadata",
     "PassiveCaptureConfig",
     "RunStatus",
+    "RunKind",
     "run_passive_capture",
 ]
 
@@ -34,6 +40,9 @@ def __getattr__(name: str) -> Any:
         "ArtifactRecord",
         "FailureCategory",
         "FailureRecord",
+        "IdentificationObserverProvenance",
+        "IdentificationRunMetadata",
+        "RunKind",
         "RunStatus",
     }:
         from alice.experiments import manifest as manifest_module
