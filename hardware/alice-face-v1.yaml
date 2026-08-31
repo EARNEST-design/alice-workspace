@@ -3,6 +3,7 @@ hardware_id: alice-face-v1
 controller:
   kind: pololu-maestro
   serial_number: "00037376"
+  command_device_path: /dev/serial/by-id/usb-Pololu_Corporation_Pololu_Mini_Maestro_12-Channel_USB_Servo_Controller_00037376-if00
 
 evidence:
   - source: hardware/motor-map.md
@@ -37,6 +38,12 @@ preflight_requirements:
     evidence:
       - source: hardware/motor-map.md
         detail: Channel 10 linkage was manually freed from a jam during mapping.
+  - requirement_id: maestro-command-interface-role-verified
+    description: Operator must independently verify that the recorded interface-00 path is the Maestro command port before arming.
+    satisfied: false
+    evidence:
+      - source: docs/discovery/hardware-inventory.md
+        detail: Read-only udev inventory identified exact interface-00 and interface-02 by-id paths for serial 00037376 but did not functionally verify their roles.
 
 actuators:
   - name: neck_rotation

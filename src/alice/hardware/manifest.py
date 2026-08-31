@@ -29,6 +29,7 @@ class ControllerIdentity(BaseModel):
 
     kind: Literal["pololu-maestro"]
     serial_number: NonEmptyString
+    command_device_path: NonEmptyString
 
 
 class PreflightRequirement(BaseModel):
@@ -140,6 +141,7 @@ class HardwareManifest(BaseModel):
             "controller": {
                 "kind": self.controller.kind,
                 "serial_number": self.controller.serial_number,
+                "command_device_path": self.controller.command_device_path,
             },
             "actuators": [
                 {

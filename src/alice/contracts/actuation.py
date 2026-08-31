@@ -67,8 +67,9 @@ class ActuatorStatus(BaseModel):
 
     ``APPLIED`` reports a completed application, ``REJECTED`` means nothing was
     forwarded, and ``FAULT`` may preserve the subset known to have been applied
-    before an error.  ``applied_targets`` describes known physical state, never
-    merely attempted writes.
+    before an error. ``applied_targets`` means the controller reported the
+    commanded pulse/output target. It does not establish mechanical linkage,
+    face, or visually settled position; those require independent verification.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -82,7 +83,10 @@ class ActuatorStatus(BaseModel):
     state: ActuatorStatusState
     applied_targets: tuple[ActuatorTarget, ...] = Field(
         default=(),
-        description="Targets known to have been physically applied.",
+        description=(
+            "Targets whose commanded pulse/output was confirmed by the controller; "
+            "not proof of mechanical or visual position."
+        ),
     )
     fault_code: NonEmptyString | None = None
     detail: NonEmptyString | None = None

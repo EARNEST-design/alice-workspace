@@ -1,6 +1,7 @@
 """Disconnected tests for the guarded Maestro serial adapter."""
 
 from collections import deque
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import cast
 
@@ -20,10 +21,18 @@ from alice.hardware.maestro_protocol import (
     encode_set_target,
 )
 from alice.hardware.manifest import HardwareManifest, load_manifest
+from alice.safety.permits import ActuationPermit, PermitKind
 from alice.safety.supervisor import AuthorizationDecision, RunState
 
 MANIFEST_PATH = Path(__file__).parents[2] / "hardware" / "alice-face-v1.yaml"
-DEVICE = "/dev/serial/by-id/usb-Pololu_Corporation_Maestro_00037376-if00"
+DEVICE = (
+    "/dev/serial/by-id/usb-Pololu_Corporation_"
+    "Pololu_Mini_Maestro_12-Channel_USB_Servo_Controller_00037376-if00"
+)
+OTHER_INTERFACE = (
+    "/dev/serial/by-id/usb-Pololu_Corporation_"
+    "Pololu_Mini_Maestro_12-Channel_USB_Servo_Controller_00037376-if02"
+)
 ENABLE = "enable-run-001"
 
 
@@ -55,6 +64,35 @@ class FakeSerial:
         self.closed = True
 
 
+class ReadErrorSerial(FakeSerial):
+    def read(self, size: int) -> bytes:
+        raise OSError("synthetic read failure")
+
+
+class OverflowSerial(FakeSerial):
+    def read(self, size: int) -> bytes:
+        return b"\x00" * (size + 1)
+
+
+class CloseErrorSerial(FakeSerial):
+    def close(self) -> None:
+        self.closed = True
+        raise OSError("synthetic close failure")
+
+
+@dataclass
+class PollClock:
+    now_ns: int = 1_500
+    sleeps: list[float] = field(default_factory=list)
+
+    def __call__(self) -> int:
+        return self.now_ns
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now_ns += round(seconds * 1_000_000_000)
+
+
 @pytest.fixture
 def manifest() -> HardwareManifest:
     return load_manifest(MANIFEST_PATH)
@@ -83,7 +121,21 @@ def authorized(request: PoseRequest) -> AuthorizationDecision:
         authorized=True,
         state=RunState.RUNNING,
         request=request,
+        permit=ActuationPermit(issuer_id="test", capability="test-capability"),
     )
+
+
+class PermissiveVerifier:
+    def consume(
+        self,
+        permit: ActuationPermit,
+        *,
+        request: PoseRequest,
+        kind: PermitKind,
+        recovery_sequence_index: int | None = None,
+        originating_fault_code: str | None = None,
+    ) -> None:
+        pass
 
 
 def adapter(
@@ -99,6 +151,7 @@ def adapter(
         expected_controller_serial=expected_serial,
         required_enable_token=ENABLE,
         clock=lambda: 1_500,
+        permit_verifier=PermissiveVerifier(),
         transport_factory=lambda _path, _timeout: cast(SerialTransport, fake),
         timeout_seconds=0.1,
     )
@@ -121,6 +174,7 @@ def test_import_and_construction_never_open_serial(
         expected_controller_serial="00037376",
         required_enable_token=ENABLE,
         clock=lambda: 1_500,
+        permit_verifier=PermissiveVerifier(),
     )
 
     assert calls == 0
@@ -131,6 +185,7 @@ def test_import_and_construction_never_open_serial(
     ("path", "serial", "token", "message"),
     [
         ("/dev/ttyACM0", "00037376", ENABLE, "stable /dev/serial/by-id"),
+        (OTHER_INTERFACE, "00037376", ENABLE, "exactly match"),
         (DEVICE, "wrong", ENABLE, "controller serial"),
         (DEVICE, "00037376", "wrong-token", "enable token"),
     ],
@@ -155,6 +210,7 @@ def test_open_fails_closed_before_transport_creation(
         expected_controller_serial=serial,
         required_enable_token=ENABLE,
         clock=lambda: 1_500,
+        permit_verifier=PermissiveVerifier(),
         transport_factory=factory,
     )
 
@@ -180,7 +236,9 @@ def test_apply_writes_exact_command_confirms_position_and_checks_errors(
     )
 
 
-def test_write_all_handles_partial_writes(manifest: HardwareManifest) -> None:
+def test_partial_write_poisons_transport_and_prevents_reuse(
+    manifest: HardwareManifest,
+) -> None:
     target = manifest.actuator("mouth_open").home_qus
     fake = FakeSerial(
         reads=(target.to_bytes(2, "little"), b"\x00\x00"),
@@ -190,7 +248,14 @@ def test_write_all_handles_partial_writes(manifest: HardwareManifest) -> None:
     instance.open(ENABLE)
 
     status = instance.apply(authorized(request(manifest)))
-    assert status.state is ActuatorStatusState.APPLIED
+    assert status.state is ActuatorStatusState.FAULT
+    assert status.fault_code == "serial-partial-write"
+    assert status.applied_targets == ()
+    assert fake.closed is True
+    assert instance.is_open is False
+    assert instance.is_poisoned is True
+    with pytest.raises(MaestroConnectionError, match="poisoned"):
+        instance.open(ENABLE)
 
 
 def test_timeout_returns_fault_without_claiming_current_target_applied(
@@ -205,7 +270,9 @@ def test_timeout_returns_fault_without_claiming_current_target_applied(
     assert status.state is ActuatorStatusState.FAULT
     assert status.fault_code == "serial-read-timeout"
     assert status.applied_targets == ()
-    assert "physical state unknown" in (status.detail or "")
+    assert "controller command state is unknown" in (status.detail or "")
+    assert fake.closed is True
+    assert instance.is_poisoned is True
 
 
 def test_short_reads_are_reassembled(manifest: HardwareManifest) -> None:
@@ -217,6 +284,91 @@ def test_short_reads_are_reassembled(manifest: HardwareManifest) -> None:
 
     status = instance.apply(authorized(request(manifest)))
     assert status.state is ActuatorStatusState.APPLIED
+
+
+def test_intermediate_controller_positions_are_polled_until_target(
+    manifest: HardwareManifest,
+) -> None:
+    target = manifest.actuator("mouth_open").home_qus
+    fake = FakeSerial(
+        reads=(
+            (target - 100).to_bytes(2, "little"),
+            (target - 10).to_bytes(2, "little"),
+            target.to_bytes(2, "little"),
+            b"\x00\x00",
+        )
+    )
+    clock = PollClock()
+    instance = MaestroAdapter(
+        manifest=manifest,
+        stable_device_path=DEVICE,
+        expected_controller_serial="00037376",
+        required_enable_token=ENABLE,
+        clock=clock,
+        permit_verifier=PermissiveVerifier(),
+        transport_factory=lambda _path, _timeout: cast(SerialTransport, fake),
+        settle_timeout_ns=10_000_000,
+        poll_interval_ns=1_000_000,
+        sleeper=clock.sleep,
+    )
+    instance.open(ENABLE)
+
+    status = instance.apply(authorized(request(manifest)))
+
+    assert status.state is ActuatorStatusState.APPLIED
+    assert bytes(fake.written).count(encode_get_position(6)) == 3
+    assert clock.sleeps == [0.001, 0.001]
+
+
+def test_position_settle_timeout_poisons_transport(manifest: HardwareManifest) -> None:
+    target = manifest.actuator("mouth_open").home_qus
+    fake = FakeSerial(reads=((target - 1).to_bytes(2, "little"),) * 3)
+    clock = PollClock()
+    instance = MaestroAdapter(
+        manifest=manifest,
+        stable_device_path=DEVICE,
+        expected_controller_serial="00037376",
+        required_enable_token=ENABLE,
+        clock=clock,
+        permit_verifier=PermissiveVerifier(),
+        transport_factory=lambda _path, _timeout: cast(SerialTransport, fake),
+        settle_timeout_ns=2_000_000,
+        poll_interval_ns=1_000_000,
+        sleeper=clock.sleep,
+    )
+    instance.open(ENABLE)
+
+    status = instance.apply(authorized(request(manifest)))
+
+    assert status.fault_code == "position-settle-timeout"
+    assert status.applied_targets == ()
+    assert fake.closed is True
+    assert instance.is_poisoned is True
+    assert clock.sleeps == [0.001, 0.001]
+
+
+@pytest.mark.parametrize(
+    ("fake", "fault_code"),
+    [
+        (ReadErrorSerial(), "serial-read-error"),
+        (OverflowSerial(), "serial-read-overflow"),
+        (CloseErrorSerial(), "serial-read-timeout"),
+    ],
+)
+def test_read_transaction_faults_poison_even_if_cleanup_fails(
+    manifest: HardwareManifest,
+    fake: FakeSerial,
+    fault_code: str,
+) -> None:
+    instance = adapter(manifest, fake)
+    instance.open(ENABLE)
+
+    status = instance.apply(authorized(request(manifest)))
+
+    assert status.fault_code == fault_code
+    assert fake.closed is True
+    assert instance.is_poisoned is True
+    assert instance.is_open is False
 
 
 def test_error_register_returns_fault_with_confirmed_application(
@@ -255,7 +407,7 @@ def test_second_target_failure_preserves_only_first_confirmed_target(
     assert status.state is ActuatorStatusState.FAULT
     assert status.applied_targets == proposed.targets[:1]
     assert second.name in (status.detail or "")
-    assert "physical state unknown" in (status.detail or "")
+    assert "controller command state is unknown" in (status.detail or "")
 
 
 def test_apply_rejects_raw_and_mismatched_authority_before_writes(

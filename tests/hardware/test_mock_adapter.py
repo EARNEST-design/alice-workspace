@@ -8,6 +8,7 @@ from alice.contracts.actuation import PoseRequest
 from alice.hardware.adapter import ActuatorAuthorizationError
 from alice.hardware.manifest import HardwareManifest, load_manifest
 from alice.hardware.mock_adapter import MockActuatorAdapter
+from alice.safety.permits import ActuationPermit, PermitKind
 from alice.safety.supervisor import (
     AuthorizationDecision,
     RecoveryAuthorization,
@@ -40,13 +41,35 @@ def authorized(request: PoseRequest) -> AuthorizationDecision:
         authorized=True,
         state=RunState.RUNNING,
         request=request,
+        permit=ActuationPermit(issuer_id="test", capability="test-capability"),
+    )
+
+
+class PermissiveVerifier:
+    def consume(
+        self,
+        permit: ActuationPermit,
+        *,
+        request: PoseRequest,
+        kind: PermitKind,
+        recovery_sequence_index: int | None = None,
+        originating_fault_code: str | None = None,
+    ) -> None:
+        pass
+
+
+def mock_adapter(manifest: HardwareManifest) -> MockActuatorAdapter:
+    return MockActuatorAdapter(
+        manifest=manifest,
+        clock=lambda: 1_500,
+        permit_verifier=PermissiveVerifier(),
     )
 
 
 def test_mock_applies_authorized_requests_deterministically(
     manifest: HardwareManifest,
 ) -> None:
-    adapter = MockActuatorAdapter(manifest=manifest, clock=lambda: 1_500)
+    adapter = mock_adapter(manifest)
     accepted = request(manifest)
 
     first = adapter.apply(authorized(accepted))
@@ -59,12 +82,13 @@ def test_mock_applies_authorized_requests_deterministically(
 
 
 def test_mock_accepts_recovery_authorization(manifest: HardwareManifest) -> None:
-    adapter = MockActuatorAdapter(manifest=manifest, clock=lambda: 1_500)
+    adapter = mock_adapter(manifest)
     recovery_request = request(manifest, position=0.0)
     authority = RecoveryAuthorization(
         sequence_index=1,
         originating_fault_code="watchdog-expired",
         request=recovery_request,
+        permit=ActuationPermit(issuer_id="test", capability="test-recovery"),
     )
 
     result = adapter.apply(authority)
@@ -75,7 +99,7 @@ def test_mock_accepts_recovery_authorization(manifest: HardwareManifest) -> None
 def test_mock_rejects_raw_or_unauthorized_requests(
     manifest: HardwareManifest,
 ) -> None:
-    adapter = MockActuatorAdapter(manifest=manifest, clock=lambda: 1_500)
+    adapter = mock_adapter(manifest)
     proposed = request(manifest)
     denied = AuthorizationDecision(
         authorized=False,
@@ -90,7 +114,7 @@ def test_mock_rejects_raw_or_unauthorized_requests(
 
 
 def test_mock_rejects_identity_mismatch(manifest: HardwareManifest) -> None:
-    adapter = MockActuatorAdapter(manifest=manifest, clock=lambda: 1_500)
+    adapter = mock_adapter(manifest)
     mismatched = request(manifest).model_copy(update={"hardware_id": "other-face"})
 
     with pytest.raises(ActuatorAuthorizationError, match="hardware_id mismatch"):
@@ -106,7 +130,7 @@ def test_mock_never_opens_a_transport(manifest: HardwareManifest) -> None:
         opened = True
         raise AssertionError("mock attempted hardware access")
 
-    adapter = MockActuatorAdapter(manifest=manifest, clock=lambda: 1_500)
+    adapter = mock_adapter(manifest)
     adapter.apply(authorized(request(manifest)))
 
     assert opened is False

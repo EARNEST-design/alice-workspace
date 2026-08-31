@@ -17,6 +17,12 @@ from alice.contracts.actuation import (
 )
 from alice.contracts.blendshapes import NonEmptyString, Sha256Hex
 from alice.hardware.manifest import HardwareManifest
+from alice.safety.permits import (
+    ActuationPermit,
+    ActuationPermitVerifier,
+    PermitKind,
+    _PermitRegistry,
+)
 
 
 class RunState(StrEnum):
@@ -103,6 +109,7 @@ class RecoveryAuthorization(BaseModel):
     sequence_index: Annotated[int, Field(gt=0)]
     originating_fault_code: NonEmptyString
     request: PoseRequest
+    permit: ActuationPermit
 
 
 class TransitionResult(BaseModel):
@@ -122,6 +129,7 @@ class AuthorizationDecision(BaseModel):
     authorized: bool
     state: RunState
     request: PoseRequest | None = None
+    permit: ActuationPermit | None = None
     fault: SafetyFault | None = None
     recovery_request: PoseRequest | None = None
     recovery_authorization: RecoveryAuthorization | None = None
@@ -131,8 +139,10 @@ class AuthorizationDecision(BaseModel):
 class SafetySupervisor:
     """Final policy authority before an injected actuator adapter.
 
-    Authorization is not application. Position, velocity, and watchdog history
-    advance only after a matching ``APPLIED`` status is recorded.
+    Authorization is not application. Controller command-state, velocity, and
+    watchdog history advance only after a matching ``APPLIED`` status is
+    recorded. Mechanical Home and visual settling remain independent preflight
+    and experiment-runner responsibilities.
     """
 
     def __init__(
@@ -145,6 +155,7 @@ class SafetySupervisor:
         self._manifest = manifest
         self._limits = limits
         self._clock = clock
+        self._permit_registry = _PermitRegistry()
         self._state = RunState.DISARMED
         self._fault: SafetyFault | None = None
         self._fault_history: list[SafetyFault] = []
@@ -168,6 +179,12 @@ class SafetySupervisor:
         }
         self._last_applied_by_actuator: dict[str, int] = {}
         self._last_acknowledged_ns: int | None = None
+
+    @property
+    def actuation_permit_verifier(self) -> ActuationPermitVerifier:
+        """Return consume-only authority for dependency-injected adapters."""
+
+        return self._permit_registry.consumer
 
     @property
     def state(self) -> RunState:
@@ -296,11 +313,18 @@ class SafetySupervisor:
         if motion_problem is not None:
             return self._abort_authorization(*motion_problem)
         self._pending_request = request
+        permit = self._permit_registry.issue(request=request, kind=PermitKind.NORMAL)
         return AuthorizationDecision(
-            authorized=True, state=self._state, request=request
+            authorized=True,
+            state=self._state,
+            request=request,
+            permit=permit,
         )
 
     def record_status(self, status: ActuatorStatus) -> TransitionResult:
+        # End outstanding authority even if a caller submits status without
+        # first passing through the adapter's consume-only permit verifier.
+        self._permit_registry.revoke_all()
         if self._state is RunState.ABORTING:
             return self._record_recovery_status(status)
         if self._state is not RunState.RUNNING:
@@ -385,6 +409,7 @@ class SafetySupervisor:
         if self._recovery_authorization is not None:
             assert self._recovery_request is not None
             if self._recovery_request.is_expired(now_monotonic_ns=now_ns):
+                self._permit_registry.revoke_all()
                 fault = self._record_fault(
                     "recovery-expired-unacknowledged",
                     "expired recovery application is unknown; status is required",
@@ -404,6 +429,7 @@ class SafetySupervisor:
     def recovery_unavailable(self, detail: str) -> TransitionResult:
         if self._state is not RunState.ABORTING:
             return self._invalid_transition("recovery_unavailable", RunState.ABORTING)
+        self._permit_registry.revoke_all()
         fault = self._record_fault("recovery-unavailable", detail)
         self._state = RunState.FAULTED
         self._safe_state_verified = False
@@ -672,6 +698,7 @@ class SafetySupervisor:
         *,
         communication_available: bool = True,
     ) -> TransitionResult:
+        self._permit_registry.revoke_all()
         fault = self._record_fault(code, detail)
         self._state = RunState.ABORTING
         self._safe_state_verified = False
@@ -779,6 +806,12 @@ class SafetySupervisor:
             sequence_index=self._recovery_counter,
             originating_fault_code=self._originating_fault_code,
             request=candidate,
+            permit=self._permit_registry.issue(
+                request=candidate,
+                kind=PermitKind.RECOVERY,
+                recovery_sequence_index=self._recovery_counter,
+                originating_fault_code=self._originating_fault_code,
+            ),
         )
         self._recovery_wait = None
         return self._recovery_result(accepted=accepted, fault=fault)
@@ -828,6 +861,8 @@ class SafetySupervisor:
         )
 
     def _commit_applied(self, request: PoseRequest, reported_ns: int) -> None:
+        """Commit controller-confirmed command state, never inferred mechanics."""
+
         for target in request.targets:
             name = target.actuator_name
             elapsed_ns = reported_ns - self._last_applied_by_actuator[name]
@@ -912,6 +947,7 @@ class SafetySupervisor:
         )
 
     def _reset_disarmed(self) -> None:
+        self._permit_registry.revoke_all()
         self._state = RunState.DISARMED
         self._fault = None
         self._preflight = None

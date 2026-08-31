@@ -45,8 +45,20 @@ def test_manifest_preserves_reviewed_controller_and_channel_identities() -> None
     channels = [actuator.channel for actuator in manifest.actuators]
 
     assert manifest.controller.serial_number == "00037376"
+    assert manifest.controller.command_device_path == (
+        "/dev/serial/by-id/usb-Pololu_Corporation_"
+        "Pololu_Mini_Maestro_12-Channel_USB_Servo_Controller_00037376-if00"
+    )
     assert len(channels) == len(set(channels))
     assert 7 not in channels
+
+
+def test_command_interface_role_remains_an_unmet_preflight_fact() -> None:
+    manifest = load_manifest(MANIFEST_PATH)
+
+    assert "maestro-command-interface-role-verified" in {
+        item.requirement_id for item in manifest.unmet_preflight_requirements
+    }
 
 
 def test_manifest_rejects_duplicate_semantic_names() -> None:
@@ -162,7 +174,9 @@ def test_calibration_hash_binds_controller_serial_identity() -> None:
     changed = manifest.model_copy(
         update={
             "controller": ControllerIdentity(
-                kind="pololu-maestro", serial_number="different-controller"
+                kind="pololu-maestro",
+                serial_number="different-controller",
+                command_device_path=manifest.controller.command_device_path,
             )
         }
     )
@@ -176,9 +190,7 @@ def test_calibration_hash_binds_firmware_motion_limit(field: str) -> None:
 
     manifest = load_manifest(MANIFEST_PATH)
     actuator = manifest.actuators[0]
-    changed_actuator = actuator.model_copy(
-        update={field: getattr(actuator, field) + 1}
-    )
+    changed_actuator = actuator.model_copy(update={field: getattr(actuator, field) + 1})
     changed = manifest.model_copy(
         update={"actuators": (changed_actuator, *manifest.actuators[1:])}
     )

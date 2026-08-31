@@ -6,6 +6,11 @@ from typing import Protocol, TypeAlias
 
 from alice.contracts.actuation import ActuatorStatus, PoseRequest
 from alice.hardware.manifest import HardwareManifest
+from alice.safety.permits import (
+    ActuationPermitError,
+    ActuationPermitVerifier,
+    PermitKind,
+)
 from alice.safety.supervisor import (
     AuthorizationDecision,
     RecoveryAuthorization,
@@ -34,6 +39,7 @@ def authorized_request(
     *,
     manifest: HardwareManifest,
     now_monotonic_ns: int,
+    permit_verifier: ActuationPermitVerifier,
 ) -> PoseRequest:
     """Extract and validate a request while retaining the authorization boundary."""
 
@@ -44,16 +50,33 @@ def authorized_request(
             or authorization.request is None
         ):
             raise ActuatorAuthorizationError("request is not authorized for RUNNING")
+        if authorization.permit is None:
+            raise ActuatorAuthorizationError("supervisor actuation permit is missing")
         request = authorization.request
+        permit = authorization.permit
+        kind = PermitKind.NORMAL
+        recovery_sequence_index = None
+        originating_fault_code = None
     elif isinstance(authorization, RecoveryAuthorization):
         request = authorization.request
+        permit = authorization.permit
+        kind = PermitKind.RECOVERY
+        recovery_sequence_index = authorization.sequence_index
+        originating_fault_code = authorization.originating_fault_code
     else:
         raise ActuatorAuthorizationError(
             "an authorization wrapper (AuthorizationDecision or "
             "RecoveryAuthorization) is required"
         )
     try:
+        permit_verifier.consume(
+            permit,
+            request=request,
+            kind=kind,
+            recovery_sequence_index=recovery_sequence_index,
+            originating_fault_code=originating_fault_code,
+        )
         manifest.validate_request(request, now_monotonic_ns=now_monotonic_ns)
-    except ValueError as exc:
+    except (ActuationPermitError, ValueError) as exc:
         raise ActuatorAuthorizationError(str(exc)) from exc
     return request

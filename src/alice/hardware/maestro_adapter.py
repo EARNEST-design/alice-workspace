@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Protocol
@@ -21,6 +22,7 @@ from alice.hardware.maestro_protocol import (
     parse_position,
 )
 from alice.hardware.manifest import HardwareManifest
+from alice.safety.permits import ActuationPermitVerifier
 
 
 class SerialTransport(Protocol):
@@ -68,27 +70,46 @@ class MaestroAdapter:
         expected_controller_serial: str,
         required_enable_token: str,
         clock: Callable[[], int],
+        permit_verifier: ActuationPermitVerifier,
         transport_factory: TransportFactory = _default_transport_factory,
         timeout_seconds: float = 0.25,
+        settle_timeout_ns: int = 500_000_000,
+        poll_interval_ns: int = 20_000_000,
+        sleeper: Callable[[float], None] = time.sleep,
     ) -> None:
         if not required_enable_token:
             raise ValueError("required enable token cannot be empty")
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
+        if settle_timeout_ns <= 0 or poll_interval_ns <= 0:
+            raise ValueError("settling timeout and poll interval must be positive")
         self._manifest = manifest
         self._path = stable_device_path
         self._expected_serial = expected_controller_serial
         self._enable_token = required_enable_token
         self._clock = clock
+        self._permit_verifier = permit_verifier
         self._transport_factory = transport_factory
         self._timeout_seconds = timeout_seconds
+        self._settle_timeout_ns = settle_timeout_ns
+        self._poll_interval_ns = poll_interval_ns
+        self._sleeper = sleeper
         self._transport: SerialTransport | None = None
+        self._poisoned = False
 
     @property
     def is_open(self) -> bool:
         return self._transport is not None
 
+    @property
+    def is_poisoned(self) -> bool:
+        return self._poisoned
+
     def open(self, explicit_enable_token: str) -> None:
+        if self._poisoned:
+            raise MaestroConnectionError(
+                "adapter is poisoned; construct a fresh adapter after new preflight"
+            )
         if self._transport is not None:
             raise MaestroConnectionError("adapter is already open")
         device = Path(self._path)
@@ -101,9 +122,9 @@ class MaestroAdapter:
             raise MaestroConnectionError(
                 "expected controller serial does not match the hardware manifest"
             )
-        if self._expected_serial not in device.name:
+        if self._path != self._manifest.controller.command_device_path:
             raise MaestroConnectionError(
-                "stable device path does not contain the expected controller serial"
+                "device path does not exactly match the reviewed command path"
             )
         if explicit_enable_token != self._enable_token:
             raise MaestroConnectionError("explicit enable token does not match")
@@ -114,15 +135,16 @@ class MaestroAdapter:
         self._transport = transport
 
     def apply(self, authorization: ActuatorAuthorization) -> ActuatorStatus:
-        transport = self._transport
-        if transport is None:
-            raise MaestroConnectionError("adapter is not open")
         now_ns = self._clock()
         request = authorized_request(
             authorization,
             manifest=self._manifest,
             now_monotonic_ns=now_ns,
+            permit_verifier=self._permit_verifier,
         )
+        transport = self._transport
+        if transport is None:
+            raise MaestroConnectionError("adapter is not open")
         confirmed: list[ActuatorTarget] = []
         current_name = request.targets[0].actuator_name
         try:
@@ -131,41 +153,71 @@ class MaestroAdapter:
                 definition = self._manifest.actuator(current_name)
                 target_qus = definition.target_qus(target.normalized_position)
                 self._write_all(encode_set_target(definition.channel, target_qus))
-                self._write_all(encode_get_position(definition.channel))
-                observed_qus = parse_position(self._read_exact(2))
-                if observed_qus != target_qus:
-                    raise _TransportFailure(
-                        "position-mismatch",
-                        f"{current_name} reported {observed_qus}, "
-                        f"expected {target_qus}; "
-                        "physical state unknown",
-                    )
+                self._wait_for_target(
+                    actuator_name=current_name,
+                    channel=definition.channel,
+                    target_qus=target_qus,
+                )
                 confirmed.append(target)
             self._write_all(encode_get_errors())
             errors = parse_error_register(self._read_exact(2))
             if errors:
-                return self._status(
+                status = self._status(
                     request,
                     state=ActuatorStatusState.FAULT,
                     confirmed=confirmed,
                     fault_code=f"maestro-error-register-0x{errors:04x}",
-                    detail=f"Maestro error register reported 0x{errors:04x}",
+                    detail=(
+                        f"Maestro error register reported 0x{errors:04x}; "
+                        "confirmed targets describe controller command output, "
+                        "not mechanical position"
+                    ),
                 )
+                self._poison_transport()
+                return status
         except _TransportFailure as exc:
-            return self._status(
+            status = self._status(
                 request,
                 state=ActuatorStatusState.FAULT,
                 confirmed=confirmed,
                 fault_code=exc.code,
                 detail=(
-                    f"{current_name}: {exc.detail}; physical state unknown for "
-                    "the unconfirmed target"
+                    f"{current_name}: {exc.detail}; controller command state is "
+                    "unknown for the unconfirmed target and mechanical position "
+                    "requires independent verification"
                 ),
             )
+            self._poison_transport()
+            return status
         return self._status(
             request,
             state=ActuatorStatusState.APPLIED,
             confirmed=confirmed,
+        )
+
+    def _wait_for_target(
+        self, *, actuator_name: str, channel: int, target_qus: int
+    ) -> None:
+        deadline_ns = self._clock() + self._settle_timeout_ns
+        max_polls = self._settle_timeout_ns // self._poll_interval_ns + 2
+        last_observed: int | None = None
+        for _ in range(max_polls):
+            self._write_all(encode_get_position(channel))
+            last_observed = parse_position(self._read_exact(2))
+            if last_observed == target_qus:
+                return
+            if self._clock() >= deadline_ns:
+                break
+            try:
+                self._sleeper(self._poll_interval_ns / 1_000_000_000)
+            except Exception as exc:
+                raise _TransportFailure(
+                    "settle-wait-error", f"settling wait failed: {exc}"
+                ) from exc
+        raise _TransportFailure(
+            "position-settle-timeout",
+            f"{actuator_name} controller output remained at {last_observed}, "
+            f"expected {target_qus} before the settling deadline",
         )
 
     def _write_all(self, payload: bytes) -> None:
@@ -183,6 +235,12 @@ class MaestroAdapter:
                 raise _TransportFailure(
                     "serial-write-timeout",
                     f"write stopped after {sent}/{len(payload)} bytes",
+                )
+            if count < len(payload) - sent:
+                raise _TransportFailure(
+                    "serial-partial-write",
+                    f"partial write sent {count}/{len(payload) - sent} bytes; "
+                    "protocol framing is ambiguous",
                 )
             sent += count
 
@@ -235,7 +293,22 @@ class MaestroAdapter:
     def close(self) -> None:
         transport, self._transport = self._transport, None
         if transport is not None:
-            transport.close()
+            try:
+                transport.close()
+            except Exception as exc:
+                raise MaestroConnectionError(f"serial close failed: {exc}") from exc
+
+    def _poison_transport(self) -> None:
+        """Make an ambiguous serial session permanently unusable."""
+
+        self._poisoned = True
+        transport, self._transport = self._transport, None
+        if transport is not None:
+            try:
+                transport.close()
+            except Exception:
+                # Cleanup must not replace the primary protocol/controller fault.
+                pass
 
     def __enter__(self) -> MaestroAdapter:
         if not self.is_open:

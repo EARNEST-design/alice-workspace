@@ -8,14 +8,22 @@ from types import MappingProxyType
 from alice.contracts.actuation import ActuatorStatus, ActuatorStatusState
 from alice.hardware.adapter import ActuatorAuthorization, authorized_request
 from alice.hardware.manifest import HardwareManifest
+from alice.safety.permits import ActuationPermitVerifier
 
 
 class MockActuatorAdapter:
     """Record authorized semantic targets without opening or emulating a device."""
 
-    def __init__(self, *, manifest: HardwareManifest, clock: Callable[[], int]) -> None:
+    def __init__(
+        self,
+        *,
+        manifest: HardwareManifest,
+        clock: Callable[[], int],
+        permit_verifier: ActuationPermitVerifier,
+    ) -> None:
         self._manifest = manifest
         self._clock = clock
+        self._permit_verifier = permit_verifier
         self._positions: dict[str, float] = {}
 
     @property
@@ -28,6 +36,7 @@ class MockActuatorAdapter:
             authorization,
             manifest=self._manifest,
             now_monotonic_ns=now_ns,
+            permit_verifier=self._permit_verifier,
         )
         self._positions.update(
             {
