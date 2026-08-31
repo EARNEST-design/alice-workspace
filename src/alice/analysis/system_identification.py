@@ -4,18 +4,25 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import subprocess
 from collections import defaultdict
 from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError, version
 from importlib.resources import files
 from pathlib import Path
-from typing import Annotated, Any, Final, Literal, Mapping, Sequence
+from typing import Annotated, Any, Callable, Final, Literal, Mapping, Sequence
 
 import numpy as np
 from numpy.typing import NDArray
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 
+from alice.contracts.actuation import (
+    ActuatorStatus,
+    ActuatorStatusState,
+    ActuatorTarget,
+    PoseRequest,
+)
 from alice.contracts.blendshapes import BlendshapeObservation, NonEmptyString, Sha256Hex
 from alice.experiments.artifact_store import publish_generation
 from alice.experiments.manifest import (
@@ -65,6 +72,19 @@ class IdentificationSample(BaseModel):
         if self.phase == "negative" and self.normalized_position >= 0:
             raise ValueError("negative sample must use negative position")
         return self
+
+
+class _CommandEvidence(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    step: IdentificationStep
+    monotonic_ns: int = Field(ge=0)
+    request: PoseRequest
+
+
+class _StatusEvidence(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    monotonic_ns: int = Field(ge=0)
+    status: ActuatorStatus
 
 
 class ConfidenceInterval(BaseModel):
@@ -126,13 +146,18 @@ class IdentificationMetrics(BaseModel):
     session_ids: tuple[NonEmptyString, ...]
     jacobian: NamedMatrix
     baseline_variance: NamedMatrix
+    between_session_baseline_variance: NamedMatrix
     position_variance: NamedMatrix
+    between_session_position_variance: NamedMatrix
     signal_to_noise: NamedMatrix
     hysteresis: NamedMatrix
+    return_to_home_drift: NamedMatrix
     cross_effects: NamedMatrix
     actuator_coupling: NamedMatrix
     controller_settling_ms: MetricValue
-    visual_settling_ms: MetricValue
+    command_to_first_visual_ms: MetricValue
+    visual_window_settling_ms: MetricValue
+    total_command_to_visual_settled_ms: MetricValue
     rank: int | None = Field(default=None, ge=0)
     singular_values: tuple[Annotated[float, Field(ge=0, allow_inf_nan=False)], ...]
     condition_number: MetricValue
@@ -145,8 +170,68 @@ class RepeatabilityResult(BaseModel):
     reference_seed: int
     repeat_seed: int
     absolute_delta: NamedMatrix
+    checks: tuple[RepeatabilityCheck, ...] = ()
     outcome: Literal["pass", "fail", "inconclusive"]
     warnings: tuple[str, ...]
+
+    @model_validator(mode="after")
+    def validate_outcome(self) -> RepeatabilityResult:
+        if not self.checks or any(check.passed is None for check in self.checks):
+            expected = "inconclusive"
+        elif any(check.passed is False for check in self.checks):
+            expected = "fail"
+        else:
+            expected = "pass"
+        if self.outcome != expected:
+            raise ValueError("repeatability outcome contradicts typed checks")
+        return self
+
+
+class JacobianRepeatabilityThreshold(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    blendshape_name: NonEmptyString
+    actuator_name: NonEmptyString
+    maximum_absolute_delta: Annotated[float, Field(ge=0, allow_inf_nan=False)]
+
+
+class RepeatabilityThresholds(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    schema_version: Literal["identification-repeatability-thresholds/v1"]
+    cells: tuple[JacobianRepeatabilityThreshold, ...] = ()
+    maximum_mean_absolute_delta: (
+        Annotated[float, Field(ge=0, allow_inf_nan=False)] | None
+    ) = None
+
+    @model_validator(mode="after")
+    def validate_thresholds(self) -> RepeatabilityThresholds:
+        identities = [(item.blendshape_name, item.actuator_name) for item in self.cells]
+        if len(identities) != len(set(identities)):
+            raise ValueError("repeatability threshold cells must be unique")
+        if not self.cells and self.maximum_mean_absolute_delta is None:
+            raise ValueError("at least one repeatability threshold is required")
+        return self
+
+
+class RepeatabilityCheck(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    check_id: NonEmptyString
+    observed: Annotated[float, Field(ge=0, allow_inf_nan=False)] | None
+    maximum: Annotated[float, Field(ge=0, allow_inf_nan=False)]
+    passed: bool | None
+    reason: NonEmptyString | None = None
+
+    @model_validator(mode="after")
+    def validate_check(self) -> RepeatabilityCheck:
+        if (self.observed is None) != (self.passed is None):
+            raise ValueError("observed and passed availability must agree")
+        if self.observed is None and self.reason is None:
+            raise ValueError("unevaluable repeatability check requires a reason")
+        if self.observed is not None and self.passed != (self.observed <= self.maximum):
+            raise ValueError("repeatability check result contradicts its threshold")
+        return self
+
+
+RepeatabilityResult.model_rebuild()
 
 
 class AnalysisInput(BaseModel):
@@ -176,6 +261,36 @@ class IdentificationAnalysisConfig(BaseModel):
     bootstrap_seed: Literal[20260831]
     bootstrap_replicates: int = Field(gt=0)
     input_config_sha256: tuple[Sha256Hex, ...]
+    repeatability_thresholds_sha256: Sha256Hex
+
+
+class IdentificationCompatibilitySignature(BaseModel):
+    """Fields that must be identical before sessions may be pooled."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    hardware_id: NonEmptyString
+    hardware_manifest_sha256: Sha256Hex
+    hardware_manifest_canonical_sha256: Sha256Hex
+    calibration_sha256: Sha256Hex
+    camera_id: NonEmptyString
+    detector: NonEmptyString
+    detector_model_sha256: Sha256Hex
+    observation_schema_version: Literal["blendshape-observation/v1"]
+    actuator_names: tuple[NonEmptyString, ...]
+    offsets: tuple[Annotated[float, Field(allow_inf_nan=False)], ...]
+    samples_per_step: int = Field(gt=0)
+    command_interval_ms: int = Field(ge=0)
+    controller_settle_ms: int = Field(ge=0)
+    visual_settle_ms: int = Field(ge=0)
+    sample_interval_ms: int = Field(ge=0)
+    step_timeout_ms: int = Field(gt=0)
+    command_ttl_ms: int = Field(gt=0)
+    maximum_visual_variance: Annotated[float, Field(ge=0, allow_inf_nan=False)]
+    home_delta_tolerances: tuple[
+        tuple[NonEmptyString, Annotated[float, Field(ge=0, allow_inf_nan=False)]], ...
+    ]
+    recovery_timeout_ms: int = Field(gt=0)
+    maximum_recovery_attempts: int = Field(gt=0)
 
 
 class IdentificationAnalysisManifest(BaseModel):
@@ -188,6 +303,8 @@ class IdentificationAnalysisManifest(BaseModel):
     config: IdentificationAnalysisConfig
     config_sha256: Sha256Hex
     bootstrap_seed: Literal[20260831]
+    repeatability_thresholds: RepeatabilityThresholds | None
+    repeatability_thresholds_sha256: Sha256Hex
     inputs: dict[NonEmptyString, AnalysisInput]
     artifacts: dict[NonEmptyString, ArtifactRecord]
     conclusion: IdentificationConclusion
@@ -312,40 +429,57 @@ def estimate_local_jacobian(
         )
     )
     position_cells: list[MatrixCell] = []
+    between_position_cells: list[MatrixCell] = []
     for blendshape in blendshapes:
         for column in position_columns:
             actuator, encoded = column.split(":", 1)
-            values = [
-                s.blendshapes[blendshape]
-                for s in samples
-                if s.actuator_name == actuator
-                and s.normalized_position == float(encoded)
-                and blendshape in s.blendshapes
-            ]
-            position_cells.append(_variance_cell(blendshape, column, values))
+            within, between = _variance_components(
+                samples,
+                blendshape,
+                lambda sample: (
+                    sample.actuator_name == actuator
+                    and sample.normalized_position == float(encoded)
+                    and sample.phase != "home"
+                ),
+            )
+            position_cells.append(_metric_cell(blendshape, column, within))
+            between_position_cells.append(_metric_cell(blendshape, column, between))
     position_variance = NamedMatrix(
         row_labels=blendshapes,
         column_labels=position_columns,
         cells=tuple(position_cells),
     )
+    between_position_variance = NamedMatrix(
+        row_labels=blendshapes,
+        column_labels=position_columns,
+        cells=tuple(between_position_cells),
+    )
 
-    baseline_cells = []
+    baseline_cells: list[MatrixCell] = []
+    between_baseline_cells: list[MatrixCell] = []
     for blendshape in blendshapes:
         for actuator in actuators:
-            values = [
-                s.blendshapes[blendshape]
-                for s in samples
-                if s.actuator_name == actuator
-                and s.phase == "home"
-                and blendshape in s.blendshapes
-            ]
-            baseline_cells.append(_variance_cell(blendshape, actuator, values))
+            within, between = _variance_components(
+                samples,
+                blendshape,
+                lambda sample: (
+                    sample.actuator_name == actuator and sample.phase == "home"
+                ),
+            )
+            baseline_cells.append(_metric_cell(blendshape, actuator, within))
+            between_baseline_cells.append(_metric_cell(blendshape, actuator, between))
     baseline_variance = NamedMatrix(
         row_labels=blendshapes, column_labels=actuators, cells=tuple(baseline_cells)
+    )
+    between_baseline_variance = NamedMatrix(
+        row_labels=blendshapes,
+        column_labels=actuators,
+        cells=tuple(between_baseline_cells),
     )
 
     snr_cells: list[MatrixCell] = []
     hysteresis_cells: list[MatrixCell] = []
+    home_drift_cells: list[MatrixCell] = []
     for blendshape in blendshapes:
         for actuator in actuators:
             signal, noise = _effect_and_noise(samples, actuator, blendshape)
@@ -386,11 +520,22 @@ def estimate_local_jacobian(
                     ),
                 )
             )
+            home_drift_cells.append(
+                _mean_cell(
+                    blendshape,
+                    actuator,
+                    _return_home_deltas(samples, actuator, blendshape),
+                    "initial and final Home observations are required",
+                )
+            )
     snr = NamedMatrix(
         row_labels=blendshapes, column_labels=actuators, cells=tuple(snr_cells)
     )
     hysteresis = NamedMatrix(
         row_labels=blendshapes, column_labels=actuators, cells=tuple(hysteresis_cells)
+    )
+    home_drift = NamedMatrix(
+        row_labels=blendshapes, column_labels=actuators, cells=tuple(home_drift_cells)
     )
 
     warnings: list[str] = []
@@ -482,13 +627,18 @@ def estimate_local_jacobian(
         session_ids=sessions,
         jacobian=jacobian,
         baseline_variance=baseline_variance,
+        between_session_baseline_variance=between_baseline_variance,
         position_variance=position_variance,
+        between_session_position_variance=between_position_variance,
         signal_to_noise=snr,
         hysteresis=hysteresis,
+        return_to_home_drift=home_drift,
         cross_effects=jacobian,
         actuator_coupling=coupling,
         controller_settling_ms=_duration_metric(samples, "controller"),
-        visual_settling_ms=_duration_metric(samples, "visual"),
+        command_to_first_visual_ms=_duration_metric(samples, "first_visual"),
+        visual_window_settling_ms=_duration_metric(samples, "visual_window"),
+        total_command_to_visual_settled_ms=_duration_metric(samples, "total_visual"),
         rank=rank,
         singular_values=tuple(float(value) for value in singular),
         condition_number=condition,
@@ -497,7 +647,9 @@ def estimate_local_jacobian(
 
 
 def compare_repeat_run(
-    reference: IdentificationMetrics, repeat: IdentificationMetrics
+    reference: IdentificationMetrics,
+    repeat: IdentificationMetrics,
+    thresholds: RepeatabilityThresholds | None = None,
 ) -> RepeatabilityResult:
     rows = tuple(
         dict.fromkeys((*reference.jacobian.row_labels, *repeat.jacobian.row_labels))
@@ -539,6 +691,69 @@ def compare_repeat_run(
                 )
     if incomplete:
         warnings.append("repeat comparison has missing actuator/blendshape effects")
+    checks: list[RepeatabilityCheck] = []
+    if thresholds is not None:
+        for threshold in thresholds.cells:
+            cell = _find_cell_optional(
+                NamedMatrix(row_labels=rows, column_labels=columns, cells=tuple(cells)),
+                threshold.blendshape_name,
+                threshold.actuator_name,
+            )
+            observed = None if cell is None else cell.value
+            checks.append(
+                RepeatabilityCheck(
+                    check_id=(
+                        f"jacobian:{threshold.blendshape_name}:"
+                        f"{threshold.actuator_name}"
+                    ),
+                    observed=observed,
+                    maximum=threshold.maximum_absolute_delta,
+                    passed=(
+                        None
+                        if observed is None
+                        else observed <= threshold.maximum_absolute_delta
+                    ),
+                    reason=(
+                        "named Jacobian effect is unavailable"
+                        if observed is None
+                        else None
+                    ),
+                )
+            )
+        if thresholds.maximum_mean_absolute_delta is not None:
+            available = [cell.value for cell in cells if cell.value is not None]
+            observed_mean = (
+                float(np.mean(available))
+                if len(available) == len(cells) and available
+                else None
+            )
+            checks.append(
+                RepeatabilityCheck(
+                    check_id="jacobian:mean_absolute_delta",
+                    observed=observed_mean,
+                    maximum=thresholds.maximum_mean_absolute_delta,
+                    passed=(
+                        None
+                        if observed_mean is None
+                        else observed_mean <= thresholds.maximum_mean_absolute_delta
+                    ),
+                    reason=(
+                        "aggregate requires every named Jacobian effect"
+                        if observed_mean is None
+                        else None
+                    ),
+                )
+            )
+    if (
+        thresholds is None
+        or not checks
+        or any(check.passed is None for check in checks)
+    ):
+        outcome: Literal["pass", "fail", "inconclusive"] = "inconclusive"
+    elif any(check.passed is False for check in checks):
+        outcome = "fail"
+    else:
+        outcome = "pass"
     return RepeatabilityResult(
         schema_version="identification-repeatability/v1",
         reference_seed=reference.bootstrap_seed,
@@ -546,7 +761,8 @@ def compare_repeat_run(
         absolute_delta=NamedMatrix(
             row_labels=rows, column_labels=columns, cells=tuple(cells)
         ),
-        outcome="inconclusive" if incomplete else "pass",
+        checks=tuple(checks),
+        outcome=outcome,
         warnings=tuple(warnings),
     )
 
@@ -554,36 +770,71 @@ def compare_repeat_run(
 def analyze_identification_artifacts(run_dirs: Sequence[Path]) -> IdentificationMetrics:
     samples: list[IdentificationSample] = []
     seen: set[str] = set()
+    signature: IdentificationCompatibilitySignature | None = None
     for run_dir in run_dirs:
-        manifest, artifacts = _verified_run(run_dir)
+        _, manifest, artifacts = _verified_run(run_dir)
         if manifest.run_id in seen:
             raise ValueError(f"duplicate run_id: {manifest.run_id}")
         seen.add(manifest.run_id)
+        current_signature = _compatibility_signature(manifest)
+        if signature is None:
+            signature = current_signature
+        elif current_signature != signature:
+            raise ValueError("identification compatibility signature mismatch")
         samples.extend(_samples_from_artifacts(manifest, artifacts))
     return estimate_local_jacobian(samples)
 
 
 def publish_identification_analysis(
-    run_dirs: Sequence[Path], output_dir: Path, *, generation_id: str | None = None
+    run_dirs: Sequence[Path],
+    output_dir: Path,
+    *,
+    generation_id: str | None = None,
+    repeatability_thresholds: RepeatabilityThresholds | None = None,
 ) -> tuple[IdentificationAnalysisManifest, Path]:
     verified = [(Path(path).resolve(), *_verified_run(path)) for path in run_dirs]
-    run_ids = [manifest.run_id for _, manifest, _ in verified]
+    run_ids = [manifest.run_id for _, _, manifest, _ in verified]
     if len(run_ids) != len(set(run_ids)):
         raise ValueError("duplicate run_id in analysis inputs")
+    signatures = {
+        _canonical_model(_compatibility_signature(manifest))
+        for _, _, manifest, _ in verified
+    }
+    if len(signatures) != 1:
+        raise ValueError("identification compatibility signature mismatch")
+    samples_by_run = [
+        _samples_from_artifacts(manifest, artifacts)
+        for _, _, manifest, artifacts in verified
+    ]
     metrics = estimate_local_jacobian(
-        [
-            sample
-            for _, manifest, artifacts in verified
-            for sample in _samples_from_artifacts(manifest, artifacts)
-        ]
+        [sample for samples in samples_by_run for sample in samples]
+    )
+    repeatability = (
+        compare_repeat_run(
+            estimate_local_jacobian(samples_by_run[0]),
+            estimate_local_jacobian(
+                [sample for samples in samples_by_run[1:] for sample in samples]
+            ),
+            repeatability_thresholds,
+        )
+        if len(samples_by_run) >= 2
+        else None
+    )
+    outcome: Literal["pass", "fail", "inconclusive"] = (
+        repeatability.outcome if repeatability is not None else "inconclusive"
+    )
+    conclusion_warnings = tuple(
+        dict.fromkeys(
+            (*metrics.warnings, *((repeatability.warnings) if repeatability else ()))
+        )
     )
     conclusion = IdentificationConclusion(
-        outcome="inconclusive",
+        outcome=outcome,
         summary=(
-            "System-identification metrics were computed; acceptance thresholds "
-            "and a held-out repeat gate remain required."
+            "System-identification metrics and the configured repeatability gate "
+            f"produced outcome {outcome}."
         ),
-        warnings=metrics.warnings,
+        warnings=conclusion_warnings,
     )
     template = (
         files("alice.resources")
@@ -600,22 +851,30 @@ def publish_identification_analysis(
         "conclusion.json": _pretty(conclusion.model_dump(mode="json")),
         "actuator-identification-conclusion.md": report.encode(),
     }
+    if repeatability is not None:
+        payloads["repeatability.json"] = _pretty(repeatability.model_dump(mode="json"))
     inputs: dict[str, AnalysisInput] = {}
     config_hashes: list[str] = []
-    for run_path, manifest, artifacts in verified:
+    for _, raw_manifest, manifest, artifacts in verified:
         metadata = manifest.identification_metadata
         if metadata is None:  # enforced by ArtifactManifest, retained for typing
             raise ValueError("identification metadata is required")
         config_hashes.append(metadata.config_sha256)
-        raw_manifest = (run_path / "manifest.json").read_bytes()
         inputs[f"{manifest.run_id}.manifest"] = _input("manifest.json", raw_manifest)
         for name, payload in artifacts.items():
             inputs[f"{manifest.run_id}.{name}"] = _input(name, payload)
+    threshold_payload = _canonical_json(
+        None
+        if repeatability_thresholds is None
+        else repeatability_thresholds.model_dump(mode="json")
+    )
+    threshold_sha256 = hashlib.sha256(threshold_payload).hexdigest()
     analysis_config = IdentificationAnalysisConfig(
         analyzer_revision=ANALYZER_REVISION,
         bootstrap_seed=BOOTSTRAP_SEED,
         bootstrap_replicates=BOOTSTRAP_REPLICATES,
         input_config_sha256=tuple(sorted(config_hashes)),
+        repeatability_thresholds_sha256=threshold_sha256,
     )
     config_payload = json.dumps(
         analysis_config.model_dump(mode="json"),
@@ -638,6 +897,8 @@ def publish_identification_analysis(
         config=analysis_config,
         config_sha256=config_sha,
         bootstrap_seed=BOOTSTRAP_SEED,
+        repeatability_thresholds=repeatability_thresholds,
+        repeatability_thresholds_sha256=threshold_sha256,
         inputs=inputs,
         artifacts={name: _record(name, payload) for name, payload in payloads.items()},
         conclusion=conclusion,
@@ -651,7 +912,9 @@ def publish_identification_analysis(
     return analysis_manifest, generation
 
 
-def _verified_run(run_dir: Path) -> tuple[ArtifactManifest, dict[str, bytes]]:
+def _verified_run(
+    run_dir: Path,
+) -> tuple[bytes, ArtifactManifest, dict[str, bytes]]:
     root = run_dir.resolve()
     raw = (root / "manifest.json").read_bytes()
     manifest = ArtifactManifest.model_validate_json(raw)
@@ -664,6 +927,18 @@ def _verified_run(run_dir: Path) -> tuple[ArtifactManifest, dict[str, bytes]]:
         raise ValueError("identification provenance is missing")
     if metadata.observer is None or metadata.observer != metadata.expected_observer:
         raise ValueError("runtime observer provenance is missing or mismatched")
+    try:
+        config_identity_matches = (
+            manifest.config["hardware_manifest_sha256"]
+            == metadata.hardware_manifest_sha256
+            and manifest.config["hardware_manifest_canonical_sha256"]
+            == metadata.hardware_manifest_canonical_sha256
+            and manifest.config["calibration_sha256"] == metadata.calibration_sha256
+        )
+    except KeyError as exc:
+        raise ValueError("hardware/config provenance is incomplete") from exc
+    if not config_identity_matches:
+        raise ValueError("hardware/config provenance identity mismatch")
     config_payload = json.dumps(
         manifest.config, sort_keys=True, separators=(",", ":")
     ).encode()
@@ -671,6 +946,7 @@ def _verified_run(run_dir: Path) -> tuple[ArtifactManifest, dict[str, bytes]]:
         raise ValueError("config checksum does not match identification provenance")
     required = (
         "commands.jsonl",
+        "statuses.jsonl",
         "observations.jsonl",
         "controller-settling.jsonl",
         "visual-settling.jsonl",
@@ -691,13 +967,70 @@ def _verified_run(run_dir: Path) -> tuple[ArtifactManifest, dict[str, bytes]]:
         if hashlib.sha256(payload).hexdigest() != record.sha256:
             raise ValueError(f"artifact checksum mismatch: {name}")
         artifacts[name] = payload
-    return manifest, artifacts
+    return raw, manifest, artifacts
+
+
+def _compatibility_signature(
+    manifest: ArtifactManifest,
+) -> IdentificationCompatibilitySignature:
+    metadata = manifest.identification_metadata
+    if metadata is None or metadata.observer is None:
+        raise ValueError("identification provenance is missing")
+    config = manifest.config
+    try:
+        tolerances = tuple(
+            sorted(
+                (str(name), float(value))
+                for name, value in config["home_delta_tolerances"].items()
+            )
+        )
+        return IdentificationCompatibilitySignature(
+            hardware_id=config["hardware_id"],
+            hardware_manifest_sha256=metadata.hardware_manifest_sha256,
+            hardware_manifest_canonical_sha256=(
+                metadata.hardware_manifest_canonical_sha256
+            ),
+            calibration_sha256=metadata.calibration_sha256,
+            camera_id=metadata.observer.camera_id,
+            detector=metadata.observer.detector,
+            detector_model_sha256=metadata.observer.detector_model_sha256,
+            observation_schema_version="blendshape-observation/v1",
+            actuator_names=tuple(config["actuator_names"]),
+            offsets=tuple(config["offsets"]),
+            samples_per_step=config["samples_per_step"],
+            command_interval_ms=config["command_interval_ms"],
+            controller_settle_ms=config["controller_settle_ms"],
+            visual_settle_ms=config["visual_settle_ms"],
+            sample_interval_ms=config["sample_interval_ms"],
+            step_timeout_ms=config["step_timeout_ms"],
+            command_ttl_ms=config["command_ttl_ms"],
+            maximum_visual_variance=config["maximum_visual_variance"],
+            home_delta_tolerances=tolerances,
+            recovery_timeout_ms=config["recovery_timeout_ms"],
+            maximum_recovery_attempts=config["maximum_recovery_attempts"],
+        )
+    except (AttributeError, KeyError, TypeError, ValueError) as exc:
+        raise ValueError(
+            "identification compatibility signature fields are missing or invalid"
+        ) from exc
+
+
+def _canonical_model(model: BaseModel) -> bytes:
+    return _canonical_json(model.model_dump(mode="json"))
+
+
+def _canonical_json(value: object) -> bytes:
+    return json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
 
 
 def _samples_from_artifacts(
     manifest: ArtifactManifest, artifacts: Mapping[str, bytes]
 ) -> list[IdentificationSample]:
+    metadata = manifest.identification_metadata
+    if metadata is None or metadata.observer is None:
+        raise ValueError("identification observer provenance is missing")
     commands = _normal_commands(manifest, artifacts["commands.jsonl"])
+    statuses = _status_evidence(manifest, artifacts["statuses.jsonl"])
     controller = _settling_decisions(
         manifest,
         artifacts["controller-settling.jsonl"],
@@ -712,6 +1045,17 @@ def _samples_from_artifacts(
     if len(observations) != manifest.observation_count:
         raise ValueError("observation_count does not match observations artifact")
     order = {step: index for index, step in enumerate(commands, 1)}
+    expected_steps = set(commands)
+    if (
+        set(statuses) != expected_steps
+        or set(controller) != expected_steps
+        or set(visual) != expected_steps
+    ):
+        raise ValueError("command/status/settling step coverage is not one-to-one")
+    by_step: dict[str, list[tuple[int, BlendshapeObservation]]] = defaultdict(list)
+    observer = metadata.observer
+    category_names: tuple[str, ...] | None = None
+    last_visual_decided = -1
     result: list[IdentificationSample] = []
     for item in observations:
         if item.get("run_id") != manifest.run_id:
@@ -730,27 +1074,79 @@ def _samples_from_artifacts(
             raise ValueError(
                 "observation artifact contains invalid typed data"
             ) from exc
-        if observation.run_id != manifest.run_id or observation.validity != "valid":
+        if (
+            observation.run_id != manifest.run_id
+            or observation.validity != "valid"
+            or observation.camera_id != observer.camera_id
+            or observation.detector != observer.detector
+            or observation.detector_model_sha256 != observer.detector_model_sha256
+        ):
             raise ValueError(
-                "identification observation is invalid or has wrong run identity"
+                "identification observation identity is invalid or mismatched"
             )
+        names = tuple(score.name for score in observation.scores)
+        if category_names is None:
+            category_names = names
+        elif names != category_names:
+            raise ValueError("observation category identity/order mismatch")
+        sample_index = item.get("sample_index")
+        if not isinstance(sample_index, int) or sample_index < 0:
+            raise ValueError("observation sample order is invalid")
+        by_step[step_id].append((sample_index, observation))
         scores = {score.name: score.score for score in observation.scores}
         controller_decision = controller[step_id]
         visual_decision = visual[step_id]
+        status_evidence = statuses[step_id]
         if not isinstance(
             controller_decision, ControllerSettlingDecision
         ) or not isinstance(visual_decision, VisualSettlingDecision):
             raise ValueError("settling artifact decision types are inconsistent")
+        if (
+            status_evidence.status.request_id != command.request.request_id
+            or status_evidence.status.applied_targets != command.request.targets
+            or status_evidence.status.state is not ActuatorStatusState.APPLIED
+            or status_evidence.status.targets_reached is not True
+        ):
+            raise ValueError("status does not correlate with authorized command target")
+        if (
+            controller_decision.requested_targets != command.request.targets
+            or controller_decision.target_reached is not True
+            or not controller_decision.samples
+            or controller_decision.samples
+            != status_evidence.status.controller_output_samples
+        ):
+            raise ValueError(
+                "controller settling does not correlate with status/target"
+            )
+        if visual_decision.variance_accepted is not True or (
+            command.step.phase == "home"
+            and (
+                visual_decision.home_verified is not True
+                or visual_decision.baseline_accepted is not True
+            )
+        ):
+            raise ValueError("visual settling evidence was not accepted")
+        if sample_index == 0:
+            if command.monotonic_ns <= last_visual_decided:
+                raise ValueError("command/visual step order is invalid")
+            last_visual_decided = visual_decision.decided_monotonic_ns
+        if (
+            status_evidence.monotonic_ns < command.monotonic_ns
+            or controller_decision.decided_monotonic_ns < status_evidence.monotonic_ns
+            or observation.monotonic_ns < controller_decision.decided_monotonic_ns
+            or visual_decision.decided_monotonic_ns < observation.monotonic_ns
+        ):
+            raise ValueError("cross-artifact monotonic order is invalid")
         result.append(
             IdentificationSample(
                 session_id=manifest.run_id,
                 step_id=step_id,
                 sequence_index=order[step_id],
-                actuator_name=command["actuator_name"],
-                normalized_position=command["normalized_position"],
-                phase=command["phase"],
+                actuator_name=command.step.actuator_name,
+                normalized_position=command.step.normalized_position,
+                phase=command.step.phase,
                 blendshapes=scores,
-                controller_command_ns=int(command["monotonic_ns"]),
+                controller_command_ns=command.monotonic_ns,
                 controller_settled_ns=max(
                     sample.observed_monotonic_ns
                     for sample in controller_decision.samples
@@ -759,13 +1155,50 @@ def _samples_from_artifacts(
                 visual_settled_ns=visual_decision.decided_monotonic_ns,
             )
         )
+    if set(by_step) != expected_steps:
+        raise ValueError("observation step coverage is not one-to-one")
+    expected_count = int(manifest.config["samples_per_step"])
+    for step_id, step_observations in by_step.items():
+        indices = [index for index, _ in step_observations]
+        times = [observation.monotonic_ns for _, observation in step_observations]
+        if indices != list(range(expected_count)) or any(
+            right <= left for left, right in zip(times, times[1:], strict=False)
+        ):
+            raise ValueError(f"observation sample order is invalid for {step_id}")
+        decision = visual[step_id]
+        if not isinstance(decision, VisualSettlingDecision):
+            raise ValueError("visual settling decision type is inconsistent")
+        observed_by_name: dict[str, list[float]] = defaultdict(list)
+        for _, observation in step_observations:
+            for score in observation.scores:
+                observed_by_name[score.name].append(score.score)
+        recorded_means = {item.name: item.value for item in decision.means}
+        recorded_variances = {item.name: item.value for item in decision.variances}
+        if set(recorded_means) != set(observed_by_name) or set(
+            recorded_variances
+        ) != set(observed_by_name):
+            raise ValueError(
+                "visual settling labels do not correlate with observations"
+            )
+        for name, values in observed_by_name.items():
+            expected_mean = float(np.mean(values))
+            expected_variance = float(np.var(values, ddof=1))
+            if not math.isclose(
+                recorded_means[name], expected_mean, abs_tol=1e-12
+            ) or not math.isclose(
+                recorded_variances[name], expected_variance, abs_tol=1e-12
+            ):
+                raise ValueError(
+                    "visual settling metrics do not correlate with observations"
+                )
     return result
 
 
 def _normal_commands(
     manifest: ArtifactManifest, payload: bytes
-) -> dict[str, dict[str, Any]]:
-    result: dict[str, dict[str, Any]] = {}
+) -> dict[str, _CommandEvidence]:
+    result: dict[str, _CommandEvidence] = {}
+    previous_monotonic_ns = -1
     for item in _jsonl(payload):
         if item.get("authorization_kind") != "normal":
             continue
@@ -780,11 +1213,85 @@ def _normal_commands(
                     "phase": item["phase"],
                 }
             )
+            request = PoseRequest.model_validate(item["request"])
+            monotonic_ns = int(item["monotonic_ns"])
         except (KeyError, ValueError) as exc:
             raise ValueError("command artifact contains invalid typed data") from exc
         if step.step_id in result:
             raise ValueError("command artifact contains duplicate normal step_id")
-        result[step.step_id] = item
+        expected_target = (
+            ActuatorTarget(
+                actuator_name=step.actuator_name,
+                normalized_position=step.normalized_position,
+            ),
+        )
+        metadata = manifest.identification_metadata
+        assert metadata is not None
+        if (
+            request.run_id != manifest.run_id
+            or request.hardware_id != manifest.config["hardware_id"]
+            or request.calibration_sha256 != metadata.calibration_sha256
+            or request.targets != expected_target
+            or not (
+                request.issued_monotonic_ns
+                <= monotonic_ns
+                < request.expires_monotonic_ns
+            )
+        ):
+            raise ValueError("command/request identity or target correlation mismatch")
+        if monotonic_ns <= previous_monotonic_ns:
+            raise ValueError("command monotonic order is invalid")
+        previous_monotonic_ns = monotonic_ns
+        result[step.step_id] = _CommandEvidence(
+            step=step, monotonic_ns=monotonic_ns, request=request
+        )
+    expected: list[tuple[str, float, str]] = []
+    positive, negative = manifest.config["offsets"]
+    for actuator in manifest.config["actuator_names"]:
+        expected.extend(
+            (
+                (actuator, 0.0, "home"),
+                (actuator, positive, "positive"),
+                (actuator, 0.0, "home"),
+                (actuator, negative, "negative"),
+                (actuator, 0.0, "home"),
+            )
+        )
+    actual = [
+        (item.step.actuator_name, item.step.normalized_position, item.step.phase)
+        for item in result.values()
+    ]
+    if actual != expected:
+        raise ValueError("command target sequence does not match reviewed config")
+    return result
+
+
+def _status_evidence(
+    manifest: ArtifactManifest, payload: bytes
+) -> dict[str, _StatusEvidence]:
+    metadata = manifest.identification_metadata
+    if metadata is None:
+        raise ValueError("identification provenance is missing")
+    result: dict[str, _StatusEvidence] = {}
+    for item in _jsonl(payload):
+        if item.get("run_id") != manifest.run_id:
+            raise ValueError("status record run identity mismatch")
+        step_id = str(item.get("step_id", ""))
+        if not step_id or step_id in result:
+            raise ValueError("status artifact has missing or duplicate step identity")
+        try:
+            status = ActuatorStatus.model_validate(item["status"])
+            monotonic_ns = int(item["monotonic_ns"])
+        except (KeyError, ValueError) as exc:
+            raise ValueError("status artifact contains invalid typed data") from exc
+        if (
+            status.run_id != manifest.run_id
+            or status.hardware_id != manifest.config["hardware_id"]
+            or status.calibration_sha256 != metadata.calibration_sha256
+            or status.reported_monotonic_ns > monotonic_ns
+        ):
+            raise ValueError("status identity or monotonic correlation mismatch")
+        result[step_id] = _StatusEvidence(monotonic_ns=monotonic_ns, status=status)
     return result
 
 
@@ -839,8 +1346,35 @@ def _hysteresis_deltas(
                     float(sample.blendshapes[blendshape])
                 )
         ordered = [float(np.mean(home_steps[index])) for index in sorted(home_steps)]
+        if len(ordered) >= 3:
+            pairs = [
+                abs(ordered[index + 1] - ordered[index])
+                for index in range(1, len(ordered) - 1, 3)
+            ]
+            if pairs:
+                values.append(float(np.mean(pairs)))
+    return values
+
+
+def _return_home_deltas(
+    samples: Sequence[IdentificationSample], actuator: str, blendshape: str
+) -> list[float]:
+    values: list[float] = []
+    for session in sorted({sample.session_id for sample in samples}):
+        home_steps: dict[int, list[float]] = defaultdict(list)
+        for sample in samples:
+            if (
+                sample.session_id == session
+                and sample.actuator_name == actuator
+                and sample.phase == "home"
+                and blendshape in sample.blendshapes
+            ):
+                home_steps[sample.sequence_index].append(
+                    float(sample.blendshapes[blendshape])
+                )
+        ordered = [float(np.mean(home_steps[index])) for index in sorted(home_steps)]
         if len(ordered) >= 2:
-            values.append(ordered[-1] - ordered[0])
+            values.append(abs(ordered[-1] - ordered[0]))
     return values
 
 
@@ -875,21 +1409,33 @@ def _effect_and_noise(
     residuals = [
         value - float(np.mean(values)) for values in groups.values() for value in values
     ]
-    noise = float(np.std(residuals, ddof=1)) if len(residuals) > 1 else None
+    if len(residuals) <= 1:
+        noise = None
+    elif max(abs(value) for value in residuals) <= 1e-12:
+        noise = 0.0
+    else:
+        noise = float(np.std(residuals, ddof=1))
     return signal, noise
 
 
 def _duration_metric(
-    samples: Sequence[IdentificationSample], kind: Literal["controller", "visual"]
+    samples: Sequence[IdentificationSample],
+    kind: Literal["controller", "first_visual", "visual_window", "total_visual"],
 ) -> MetricValue:
     durations: list[float] = []
     for sample in samples:
-        start = sample.controller_command_ns
-        end = (
-            sample.controller_settled_ns
-            if kind == "controller"
-            else sample.visual_settled_ns
-        )
+        if kind == "controller":
+            start = sample.controller_command_ns
+            end = sample.controller_settled_ns
+        elif kind == "first_visual":
+            start = sample.controller_command_ns
+            end = sample.first_visual_sample_ns
+        elif kind == "visual_window":
+            start = sample.first_visual_sample_ns
+            end = sample.visual_settled_ns
+        else:
+            start = sample.controller_command_ns
+            end = sample.visual_settled_ns
         if start is not None and end is not None and end >= start:
             durations.append((end - start) / 1_000_000)
     return (
@@ -913,6 +1459,49 @@ def _variance_cell(row: str, column: str, values: Sequence[float]) -> MatrixCell
         float(np.var(values, ddof=1)),
         uncertainty_reason="variance confidence interval is not estimated",
     )
+
+
+def _variance_components(
+    samples: Sequence[IdentificationSample],
+    blendshape: str,
+    selected: Callable[[IdentificationSample], bool],
+) -> tuple[MetricValue, MetricValue]:
+    step_groups: dict[tuple[str, str], list[float]] = defaultdict(list)
+    session_groups: dict[str, list[float]] = defaultdict(list)
+    for sample in samples:
+        if selected(sample) and blendshape in sample.blendshapes:
+            value = float(sample.blendshapes[blendshape])
+            step_groups[(sample.session_id, sample.step_id)].append(value)
+            session_groups[sample.session_id].append(value)
+    within = [
+        float(np.var(values, ddof=1))
+        for values in step_groups.values()
+        if len(values) >= 2
+    ]
+    if within:
+        within_metric = _estimated_metric(
+            float(np.mean(within)),
+            "within-session variance confidence interval is not estimated",
+        )
+    else:
+        within_metric = _missing_metric(
+            "within-session variance requires repeated samples per step"
+        )
+    session_means = [float(np.mean(values)) for values in session_groups.values()]
+    if len(session_means) >= 2:
+        between_metric = _estimated_metric(
+            float(np.var(session_means, ddof=1)),
+            "between-session variance confidence interval is not estimated",
+        )
+    else:
+        between_metric = _missing_metric(
+            "between-session variance requires at least two sessions"
+        )
+    return within_metric, between_metric
+
+
+def _metric_cell(row: str, column: str, metric: MetricValue) -> MatrixCell:
+    return MatrixCell(row=row, column=column, **metric.model_dump())
 
 
 def _mean_cell(

@@ -11,6 +11,7 @@ from alice.analysis.system_identification import (
     IdentificationSample,
     MatrixCell,
     NamedMatrix,
+    RepeatabilityThresholds,
     analyze_identification_artifacts,
     compare_repeat_run,
     estimate_local_jacobian,
@@ -93,12 +94,79 @@ def test_reports_variance_snr_hysteresis_cross_effects_and_settling() -> None:
 
     assert _cell(metrics.position_variance, "jawOpen", "mouth_open:+0.1").value > 0
     assert _cell(metrics.signal_to_noise, "jawOpen", "mouth_open").value > 1
-    assert _cell(metrics.hysteresis, "jawOpen", "mouth_open").value > 0
+    assert _cell(metrics.hysteresis, "jawOpen", "mouth_open").value == pytest.approx(0)
     assert _cell(
         metrics.cross_effects, "mouthSmile", "mouth_open"
     ).value == pytest.approx(0.5)
     assert metrics.controller_settling_ms.value == pytest.approx(2.0)
-    assert metrics.visual_settling_ms.value == pytest.approx(8.0)
+    assert metrics.command_to_first_visual_ms.value == pytest.approx(5.0)
+    assert metrics.visual_window_settling_ms.value == pytest.approx(3.0)
+    assert metrics.total_command_to_visual_settled_ms.value == pytest.approx(8.0)
+
+
+def test_within_session_variance_excludes_between_session_offsets() -> None:
+    first = _samples("session-a")
+    second = [
+        sample.model_copy(
+            update={
+                "blendshapes": {
+                    name: value + 0.1 for name, value in sample.blendshapes.items()
+                }
+            }
+        )
+        for sample in _samples("session-b")
+    ]
+
+    metrics = estimate_local_jacobian(first + second)
+
+    assert _cell(
+        metrics.position_variance, "jawOpen", "mouth_open:+0.1"
+    ).value == pytest.approx(0.0)
+    assert (
+        _cell(
+            metrics.between_session_position_variance,
+            "jawOpen",
+            "mouth_open:+0.1",
+        ).value
+        > 0
+    )
+    assert _cell(metrics.signal_to_noise, "jawOpen", "mouth_open").status == "undefined"
+
+
+def test_hysteresis_uses_absolute_direction_pairs_and_is_separate_from_home_drift() -> (
+    None
+):
+    samples: list[IdentificationSample] = []
+    for session, homes in (("a", (0.4, 0.5, 0.3)), ("b", (0.4, 0.3, 0.5))):
+        sequence = (
+            (0.0, "home", homes[0]),
+            (0.1, "positive", 0.6),
+            (0.0, "home", homes[1]),
+            (-0.1, "negative", 0.2),
+            (0.0, "home", homes[2]),
+        )
+        for index, (position, phase, value) in enumerate(sequence, 1):
+            for replicate in range(2):
+                samples.append(
+                    IdentificationSample(
+                        session_id=session,
+                        step_id=f"{session}-{index}",
+                        sequence_index=index,
+                        actuator_name="mouth_open",
+                        normalized_position=position,
+                        phase=phase,
+                        blendshapes={"jawOpen": value},
+                    )
+                )
+
+    metrics = estimate_local_jacobian(samples)
+
+    assert _cell(metrics.hysteresis, "jawOpen", "mouth_open").value == pytest.approx(
+        0.2
+    )
+    assert _cell(
+        metrics.return_to_home_drift, "jawOpen", "mouth_open"
+    ).value == pytest.approx(0.1)
 
 
 def test_single_session_bootstrap_is_typed_unavailable_not_zero() -> None:
@@ -135,6 +203,54 @@ def test_repeat_comparison_preserves_labels_and_missing_values() -> None:
     assert comparison.outcome == "inconclusive"
 
 
+def test_repeatability_thresholds_fail_pass_and_require_reviewed_configuration() -> (
+    None
+):
+    reference = estimate_local_jacobian(_samples("a") + _samples("b"))
+    shifted = [
+        sample.model_copy(
+            update={
+                "blendshapes": {
+                    **sample.blendshapes,
+                    "jawOpen": sample.blendshapes["jawOpen"]
+                    + 0.4 * sample.normalized_position,
+                }
+            }
+        )
+        for sample in (_samples("c") + _samples("d"))
+    ]
+    repeat = estimate_local_jacobian(shifted)
+    strict = RepeatabilityThresholds.model_validate(
+        {
+            "schema_version": "identification-repeatability-thresholds/v1",
+            "cells": [
+                {
+                    "blendshape_name": "jawOpen",
+                    "actuator_name": "mouth_open",
+                    "maximum_absolute_delta": 0.1,
+                }
+            ],
+            "maximum_mean_absolute_delta": 0.25,
+        }
+    )
+    loose = strict.model_copy(
+        update={
+            "cells": tuple(
+                item.model_copy(update={"maximum_absolute_delta": 0.5})
+                for item in strict.cells
+            )
+        }
+    )
+
+    assert compare_repeat_run(reference, repeat).outcome == "inconclusive"
+    failed = compare_repeat_run(reference, repeat, strict)
+    passed = compare_repeat_run(reference, repeat, loose)
+    assert failed.outcome == "fail"
+    assert any(check.passed is False for check in failed.checks)
+    assert passed.outcome == "pass"
+    assert all(check.passed is True for check in passed.checks)
+
+
 def _write_jsonl(path: Path, records: list[dict[str, object]]) -> None:
     payload = b"".join(
         json.dumps(record, sort_keys=True, separators=(",", ":")).encode() + b"\n"
@@ -143,11 +259,26 @@ def _write_jsonl(path: Path, records: list[dict[str, object]]) -> None:
     path.write_bytes(payload)
 
 
-def _artifact_run(tmp_path: Path, *, status: str = "completed") -> Path:
-    run = tmp_path / "run-a"
+def _rewrite_artifact(run: Path, name: str, records: list[dict[str, object]]) -> None:
+    _write_jsonl(run / name, records)
+    payload = (run / name).read_bytes()
+    manifest = json.loads((run / "manifest.json").read_text())
+    manifest["artifacts"][name] = {
+        "path": name,
+        "sha256": hashlib.sha256(payload).hexdigest(),
+        "size_bytes": len(payload),
+    }
+    (run / "manifest.json").write_text(json.dumps(manifest))
+
+
+def _artifact_run(
+    tmp_path: Path, *, status: str = "completed", run_id: str = "run-a"
+) -> Path:
+    run = tmp_path / run_id
     run.mkdir()
     commands: list[dict[str, object]] = []
     observations: list[dict[str, object]] = []
+    statuses: list[dict[str, object]] = []
     controller: list[dict[str, object]] = []
     visual: list[dict[str, object]] = []
     sequence = (
@@ -159,23 +290,24 @@ def _artifact_run(tmp_path: Path, *, status: str = "completed") -> Path:
     )
     for index, (position, phase) in enumerate(sequence, 1):
         step = f"step-{index:04d}"
+        base_ns = index * 20_000_000
         commands.append(
             {
-                "run_id": "run-a",
+                "run_id": run_id,
                 "step_id": step,
                 "phase": phase,
                 "actuator_name": "mouth_open",
                 "normalized_position": position,
                 "authorization_kind": "normal",
-                "monotonic_ns": index * 1_000_000,
+                "monotonic_ns": base_ns,
                 "request": {
                     "schema_version": "pose-request/v1",
-                    "request_id": f"run-a-{step}",
-                    "run_id": "run-a",
+                    "request_id": f"{run_id}-{step}",
+                    "run_id": run_id,
                     "hardware_id": "alice-face-v1",
                     "calibration_sha256": "e" * 64,
-                    "issued_monotonic_ns": index * 1_000_000,
-                    "expires_monotonic_ns": index * 1_000_000 + 100_000,
+                    "issued_monotonic_ns": base_ns,
+                    "expires_monotonic_ns": base_ns + 100_000,
                     "targets": [
                         {
                             "actuator_name": "mouth_open",
@@ -188,16 +320,16 @@ def _artifact_run(tmp_path: Path, *, status: str = "completed") -> Path:
         for sample_index in range(3):
             observations.append(
                 {
-                    "run_id": "run-a",
+                    "run_id": run_id,
                     "step_id": step,
                     "sample_index": sample_index,
                     "observation": {
                         "schema_version": "blendshape-observation/v1",
                         "captured_at": "2026-08-31T00:00:00Z",
                         "observed_at": "2026-08-31T00:00:00Z",
-                        "monotonic_ns": index * 1_000_000 + 5_000_000 + sample_index,
+                        "monotonic_ns": base_ns + 5_000_000 + sample_index,
                         "camera_id": "camera",
-                        "run_id": "run-a",
+                        "run_id": run_id,
                         "detector": "detector",
                         "detector_model_sha256": "a" * 64,
                         "image_width": 640,
@@ -211,7 +343,7 @@ def _artifact_run(tmp_path: Path, *, status: str = "completed") -> Path:
             )
         controller.append(
             {
-                "run_id": "run-a",
+                "run_id": run_id,
                 "step_id": step,
                 "decision": {
                     "target_reached": True,
@@ -223,16 +355,49 @@ def _artifact_run(tmp_path: Path, *, status: str = "completed") -> Path:
                             "actuator_name": "mouth_open",
                             "observed_qus": 6000,
                             "target_qus": 6000,
-                            "observed_monotonic_ns": index * 1_000_000 + 2_000_000,
+                            "observed_monotonic_ns": base_ns + 2_000_000,
                         }
                     ],
-                    "decided_monotonic_ns": index * 1_000_000 + 2_000_000,
+                    "decided_monotonic_ns": base_ns + 2_000_000,
+                },
+            }
+        )
+        statuses.append(
+            {
+                "run_id": run_id,
+                "step_id": step,
+                "monotonic_ns": base_ns + 2_000_000,
+                "status": {
+                    "schema_version": "actuator-status/v1",
+                    "request_id": f"{run_id}-{step}",
+                    "run_id": run_id,
+                    "hardware_id": "alice-face-v1",
+                    "calibration_sha256": "e" * 64,
+                    "reported_monotonic_ns": base_ns + 2_000_000,
+                    "state": "applied",
+                    "applied_targets": [
+                        {
+                            "actuator_name": "mouth_open",
+                            "normalized_position": position,
+                        }
+                    ],
+                    "fault_code": None,
+                    "detail": None,
+                    "controller_output_samples": [
+                        {
+                            "actuator_name": "mouth_open",
+                            "observed_qus": 6000,
+                            "target_qus": 6000,
+                            "observed_monotonic_ns": base_ns + 2_000_000,
+                        }
+                    ],
+                    "targets_reached": True,
                 },
             }
         )
         visual.append(
             {
-                "run_id": "run-a",
+                "run_id": run_id,
                 "step_id": step,
                 "decision": {
                     "means": [{"name": "jawOpen", "value": 0.4 + 2 * position}],
@@ -242,13 +407,14 @@ def _artifact_run(tmp_path: Path, *, status: str = "completed") -> Path:
                     "baseline_accepted": True,
                     "established_home_baseline": phase == "home",
                     "home_verified": True if phase == "home" else None,
-                    "decided_monotonic_ns": index * 1_000_000 + 8_000_000,
+                    "decided_monotonic_ns": base_ns + 8_000_000,
                 },
             }
         )
     names = {
         "commands.jsonl": commands,
         "observations.jsonl": observations,
+        "statuses.jsonl": statuses,
         "controller-settling.jsonl": controller,
         "visual-settling.jsonl": visual,
     }
@@ -263,6 +429,22 @@ def _artifact_run(tmp_path: Path, *, status: str = "completed") -> Path:
         }
     config = {
         "schema_version": "identification-config/v1",
+        "hardware_id": "alice-face-v1",
+        "calibration_sha256": "e" * 64,
+        "hardware_manifest_sha256": "c" * 64,
+        "hardware_manifest_canonical_sha256": "d" * 64,
+        "offsets": [0.1, -0.1],
+        "samples_per_step": 3,
+        "command_interval_ms": 250,
+        "controller_settle_ms": 20,
+        "visual_settle_ms": 30,
+        "sample_interval_ms": 10,
+        "step_timeout_ms": 2000,
+        "command_ttl_ms": 100,
+        "maximum_visual_variance": 0.01,
+        "home_delta_tolerances": {"jawOpen": 0.01},
+        "recovery_timeout_ms": 2000,
+        "maximum_recovery_attempts": 20,
         "random_seeds": [],
         "actuator_names": ["mouth_open"],
     }
@@ -272,7 +454,7 @@ def _artifact_run(tmp_path: Path, *, status: str = "completed") -> Path:
     manifest = {
         "schema_version": "artifact-manifest/v1",
         "run_kind": "actuator_identification",
-        "run_id": "run-a",
+        "run_id": run_id,
         "status": status,
         "started_at": "2026-08-31T00:00:00Z",
         "ended_at": "2026-08-31T00:01:00Z",
@@ -442,3 +624,118 @@ def test_artifact_analysis_rejects_semantically_invalid_observations(
 
     with pytest.raises(ValueError, match="observation"):
         analyze_identification_artifacts([run])
+
+
+def test_artifact_analysis_rejects_incompatible_sessions(tmp_path: Path) -> None:
+    first = _artifact_run(tmp_path, run_id="run-a")
+    second = _artifact_run(tmp_path, run_id="run-b")
+    manifest = json.loads((second / "manifest.json").read_text())
+    manifest["config"]["visual_settle_ms"] = 99
+    manifest["identification_metadata"]["config_sha256"] = hashlib.sha256(
+        json.dumps(manifest["config"], sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    (second / "manifest.json").write_text(json.dumps(manifest))
+
+    with pytest.raises(ValueError, match="compatibility signature"):
+        analyze_identification_artifacts([first, second])
+
+
+@pytest.mark.parametrize(
+    "artifact,mutation",
+    (
+        ("observations.jsonl", "camera"),
+        ("observations.jsonl", "order"),
+        ("commands.jsonl", "request-target"),
+        ("statuses.jsonl", "request-id"),
+        ("visual-settling.jsonl", "not-accepted"),
+        ("visual-settling.jsonl", "mean"),
+    ),
+)
+def test_artifact_analysis_rejects_cross_artifact_contradictions(
+    tmp_path: Path, artifact: str, mutation: str
+) -> None:
+    run = _artifact_run(tmp_path)
+    records = [json.loads(line) for line in (run / artifact).read_text().splitlines()]
+    if mutation == "camera":
+        records[0]["observation"]["camera_id"] = "other-camera"
+    elif mutation == "order":
+        records[1]["observation"]["monotonic_ns"] = 1
+    elif mutation == "request-target":
+        records[0]["request"]["targets"][0]["normalized_position"] = 0.1
+    elif mutation == "request-id":
+        records[0]["status"]["request_id"] = "wrong-request"
+    elif mutation == "not-accepted":
+        records[0]["decision"]["variance_accepted"] = False
+    else:
+        records[0]["decision"]["means"][0]["value"] = 0.9
+    _rewrite_artifact(run, artifact, records)
+
+    with pytest.raises(ValueError, match="identity|order|correl|accepted|target"):
+        analyze_identification_artifacts([run])
+
+
+def test_publication_reads_each_input_manifest_once_and_hashes_exact_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = _artifact_run(tmp_path)
+    manifest_path = run / "manifest.json"
+    original = manifest_path.read_bytes()
+    real_read_bytes = Path.read_bytes
+    reads = 0
+
+    def counted_read(path: Path) -> bytes:
+        nonlocal reads
+        if path.resolve() == manifest_path.resolve():
+            reads += 1
+            if reads > 1:
+                return b'{"mutated":"between reads"}'
+        return real_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", counted_read)
+
+    manifest, _ = publish_identification_analysis([run], tmp_path / "report")
+
+    assert reads == 1
+    assert (
+        manifest.inputs["run-a.manifest"].sha256 == hashlib.sha256(original).hexdigest()
+    )
+
+
+def test_publication_records_repeatability_thresholds_hash_and_outcome(
+    tmp_path: Path,
+) -> None:
+    first = _artifact_run(tmp_path, run_id="run-a")
+    second = _artifact_run(tmp_path, run_id="run-b")
+    thresholds = RepeatabilityThresholds.model_validate(
+        {
+            "schema_version": "identification-repeatability-thresholds/v1",
+            "cells": [
+                {
+                    "blendshape_name": "jawOpen",
+                    "actuator_name": "mouth_open",
+                    "maximum_absolute_delta": 0.01,
+                }
+            ],
+        }
+    )
+
+    manifest, generation = publish_identification_analysis(
+        [first, second],
+        tmp_path / "report",
+        repeatability_thresholds=thresholds,
+    )
+
+    assert manifest.repeatability_thresholds == thresholds
+    assert (
+        manifest.repeatability_thresholds_sha256
+        == hashlib.sha256(
+            json.dumps(
+                thresholds.model_dump(mode="json"),
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+    )
+    assert manifest.conclusion.outcome == "pass"
+    repeatability = json.loads((generation / "repeatability.json").read_text())
+    assert repeatability["outcome"] == "pass"

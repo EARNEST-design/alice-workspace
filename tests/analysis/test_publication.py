@@ -47,3 +47,17 @@ def test_generation_publication_rejects_existing_generation_without_mutation(
         )
 
     assert evidence.read_bytes() == b"old\n"
+
+
+@pytest.mark.parametrize(
+    "generation_id",
+    ("", ".", "..", "../escape", "nested/name", "/absolute", "bad\x00name"),
+)
+def test_generation_publication_rejects_unsafe_generation_ids(
+    tmp_path: Path, generation_id: str
+) -> None:
+    with pytest.raises(ValueError, match="generation_id"):
+        publish_generation(tmp_path, generation_id, {"metrics.json": b"{}\n"})
+
+    assert list(tmp_path.glob(".stage-*")) == []
+    assert not (tmp_path.parent / "escape").exists()

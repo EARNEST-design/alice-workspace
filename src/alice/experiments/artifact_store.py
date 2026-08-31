@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import tempfile
 from collections.abc import Mapping
@@ -10,6 +11,8 @@ from hashlib import sha256
 from pathlib import Path
 
 from alice.experiments.manifest import ArtifactRecord
+
+_SAFE_GENERATION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 
 
 def sha256_path(path: Path) -> str:
@@ -69,14 +72,14 @@ def publish_generation(
 ) -> Path:
     """Publish a complete immutable directory with one atomic rename."""
 
+    if _SAFE_GENERATION_ID.fullmatch(generation_id) is None:
+        raise ValueError("generation_id must be one safe filename component")
     generations_dir.mkdir(parents=True, exist_ok=True)
     fsync_directory(generations_dir.parent)
     final_dir = generations_dir / generation_id
     if final_dir.exists():
         raise FileExistsError(f"analysis generation already exists: {generation_id}")
-    stage_dir = Path(
-        tempfile.mkdtemp(prefix=".stage-", dir=generations_dir)
-    )
+    stage_dir = Path(tempfile.mkdtemp(prefix=".stage-", dir=generations_dir))
     try:
         for name, payload in sorted(files.items()):
             if Path(name).name != name:
