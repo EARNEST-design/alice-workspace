@@ -1,6 +1,7 @@
 """Hardware-independent actuator safety policy."""
 
 from alice.safety.supervisor import (
+    AbortReason,
     AuthorizationDecision,
     OperatorApproval,
     PreflightEvidence,
@@ -12,6 +13,7 @@ from alice.safety.supervisor import (
 )
 
 __all__ = [
+    "AbortReason",
     "AuthorizationDecision",
     "OperatorApproval",
     "PreflightEvidence",
