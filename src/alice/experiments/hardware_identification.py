@@ -273,47 +273,157 @@ class FailedRunPowerRemovalConfirmation(BaseModel):
     operator_acknowledgment: Literal["I CONFIRM MASTER SERVO POWER IS OFF"]
 
 
+class ShutdownFinalizationManifest(BaseModel):
+    """Immutable linkage from a shutdown fact to an aborted run generation."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["shutdown-finalization-manifest/v1"]
+    generation_id: NonEmptyString
+    run_id: NonEmptyString
+    outcome: Literal["power_removed_confirmed", "power_removal_unconfirmed"]
+    generated_at: AwareDatetime
+    generated_monotonic_ns: Annotated[int, Field(ge=0)]
+    challenge_id: NonEmptyString
+    config_sha256: Sha256Hex
+    manifest_sha256: Sha256Hex
+    output_identity_sha256: Sha256Hex
+    aborted_run_manifest: ArtifactRecord
+    shutdown_evidence: ArtifactRecord
+
+    @model_validator(mode="after")
+    def validate_logical_paths(self) -> ShutdownFinalizationManifest:
+        if self.aborted_run_manifest.path != "manifest.json":
+            raise ValueError("aborted run manifest path must be manifest.json")
+        if self.shutdown_evidence.path != "shutdown-evidence.json":
+            raise ValueError("shutdown evidence path must be shutdown-evidence.json")
+        return self
+
+
+def _shutdown_finalization(
+    *,
+    output_dir: Path,
+    outcome: Literal["power_removed_confirmed", "power_removal_unconfirmed"],
+    evidence: Mapping[str, object],
+) -> Path:
+    original_manifest = output_dir / "manifest.json"
+    if not original_manifest.is_file():
+        raise FileNotFoundError("aborted run manifest is unavailable")
+    evidence_payload = json.dumps(evidence, sort_keys=True, indent=2).encode()
+    generation_id = f"shutdown-{secrets.token_hex(16)}"
+    manifest = ShutdownFinalizationManifest(
+        schema_version="shutdown-finalization-manifest/v1",
+        generation_id=generation_id,
+        run_id=str(evidence["run_id"]),
+        outcome=outcome,
+        generated_at=datetime.now(UTC),
+        generated_monotonic_ns=time.monotonic_ns(),
+        challenge_id=str(evidence["challenge_id"]),
+        config_sha256=str(evidence["config_sha256"]),
+        manifest_sha256=str(evidence["manifest_sha256"]),
+        output_identity_sha256=str(evidence["output_identity_sha256"]),
+        aborted_run_manifest=ArtifactRecord(
+            path="manifest.json",
+            sha256=sha256_path(original_manifest),
+            size_bytes=original_manifest.stat().st_size,
+        ),
+        shutdown_evidence=_artifact_record("shutdown-evidence.json", evidence_payload),
+    )
+    finalization_payload = json.dumps(
+        manifest.model_dump(mode="json"), sort_keys=True, indent=2
+    ).encode()
+    return publish_generation(
+        output_dir.parent / f"{output_dir.name}.shutdown" / "generations",
+        generation_id,
+        {
+            "shutdown-evidence.json": evidence_payload,
+            "shutdown-finalization.json": finalization_payload,
+        },
+    )
+
+
 def record_failed_hardware_power_removal(
     *, output_dir: Path, confirmation: FailedRunPowerRemovalConfirmation
-) -> None:
+) -> Path:
     """Durably record shutdown after a failed/aborted hardware execution."""
 
-    payload = {
+    evidence = {
         "schema_version": "aborted-hardware-shutdown/v1",
-        "status": "aborted",
         "power_removal_unconfirmed": False,
         **confirmation.model_dump(mode="json"),
     }
-    atomic_write_bytes(
-        output_dir / "aborted-shutdown.json",
-        json.dumps(payload, sort_keys=True, indent=2).encode(),
+    return _shutdown_finalization(
+        output_dir=output_dir,
+        outcome="power_removed_confirmed",
+        evidence=evidence,
     )
 
 
 def record_failed_hardware_power_removal_unconfirmed(
     *, output_dir: Path, challenge: PowerEnableChallenge
-) -> None:
+) -> Path:
     """Durably mark a failed run when the operator did not acknowledge power OFF."""
 
-    if not output_dir.is_dir():
-        return
-    atomic_write_bytes(
-        output_dir / "aborted-shutdown.json",
-        json.dumps(
-            {
-                "schema_version": "aborted-hardware-shutdown/v1",
-                "status": "aborted",
-                "run_id": challenge.run_id,
-                "challenge_id": challenge.challenge_id,
-                "config_sha256": challenge.config_sha256,
-                "manifest_sha256": challenge.manifest_sha256,
-                "output_identity_sha256": challenge.output_identity_sha256,
-                "power_removal_unconfirmed": True,
-            },
-            sort_keys=True,
-            indent=2,
-        ).encode(),
+    if challenge.output_identity_sha256 is None:
+        raise ValueError("prepared output identity was not bound")
+    return _shutdown_finalization(
+        output_dir=output_dir,
+        outcome="power_removal_unconfirmed",
+        evidence={
+            "schema_version": "aborted-hardware-shutdown/v1",
+            "run_id": challenge.run_id,
+            "challenge_id": challenge.challenge_id,
+            "config_sha256": challenge.config_sha256,
+            "manifest_sha256": challenge.manifest_sha256,
+            "output_identity_sha256": challenge.output_identity_sha256,
+            "recorded_at": datetime.now(UTC).isoformat(),
+            "recorded_monotonic_ns": time.monotonic_ns(),
+            "power_removal_unconfirmed": True,
+        },
     )
+
+
+def verify_shutdown_finalization(
+    generation_dir: Path, *, aborted_output_dir: Path
+) -> ShutdownFinalizationManifest:
+    """Verify both immutable shutdown evidence and its exact aborted-run linkage."""
+
+    manifest_path = generation_dir / "shutdown-finalization.json"
+    evidence_path = generation_dir / "shutdown-evidence.json"
+    manifest = ShutdownFinalizationManifest.model_validate_json(
+        manifest_path.read_bytes()
+    )
+    if generation_dir.name != manifest.generation_id:
+        raise ValueError("shutdown generation identity mismatch")
+    if (
+        sha256_path(evidence_path) != manifest.shutdown_evidence.sha256
+        or evidence_path.stat().st_size != manifest.shutdown_evidence.size_bytes
+    ):
+        raise ValueError("shutdown evidence checksum or size mismatch")
+    aborted_manifest = aborted_output_dir / manifest.aborted_run_manifest.path
+    if (
+        sha256_path(aborted_manifest) != manifest.aborted_run_manifest.sha256
+        or aborted_manifest.stat().st_size
+        != manifest.aborted_run_manifest.size_bytes
+    ):
+        raise ValueError("aborted run manifest checksum or size mismatch")
+    aborted_document = json.loads(aborted_manifest.read_bytes())
+    if (
+        aborted_document.get("status") != RunStatus.ABORTED.value
+        or aborted_document.get("run_id") != manifest.run_id
+    ):
+        raise ValueError("linked run manifest is not the exact aborted run identity")
+    evidence = json.loads(evidence_path.read_bytes())
+    for field in (
+        "run_id",
+        "challenge_id",
+        "config_sha256",
+        "manifest_sha256",
+        "output_identity_sha256",
+    ):
+        if evidence.get(field) != getattr(manifest, field):
+            raise ValueError(f"shutdown evidence linkage mismatch: {field}")
+    return manifest
 
 
 class HardwareRunDraft(BaseModel):
