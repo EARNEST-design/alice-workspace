@@ -58,20 +58,20 @@ setup:
   alice_full_face_confirmed: true
   participant_exclusion_confirmed: true
   confirmation:
-    confirmed_at: "2026-08-31T10:42:22Z"
-    source: "Operator confirmation using alice-camera preview on the exact C525 selector"
+    confirmed_at: "2026-08-31T19:35:16Z"
+    source: "Operator replied 'yes perfect' after reviewing the live alice-camera overlay on the exact C525 selector"
   lighting:
-    state: "unknown"
-    detail: "Pilot did not instrument room illuminance"
+    state: "confirmed"
+    detail: "Current ambient lighting was visually accepted in preview; room illuminance was not instrumented and must not change between runs"
   placement:
     state: "confirmed"
-    detail: "C525 pointed at Alice's full face; distance and angle were not measured"
+    detail: "C525 pointed at Alice's full face with overlay tracking and no participant visible; distance and angle were not instrumented and the camera must not move between runs"
   focus:
-    state: "unknown"
-    detail: "Pilot could not read a reliable focus value"
+    state: "confirmed"
+    detail: "V4L2 readback: focus_automatic_continuous=0 and focus_absolute=60; operator visually accepted sharpness"
   exposure:
-    state: "unknown"
-    detail: "Pilot could not read a reliable exposure value"
+    state: "confirmed"
+    detail: "V4L2 readback: auto_exposure=1 (manual), exposure_time_absolute=249, exposure_dynamic_framerate=0, white_balance_automatic=0, white_balance_temperature=3420, gain=25, power_line_frequency=1 (50 Hz); operator visually accepted exposure"
 repeatability_thresholds:
   maximum_mean_delta:
     browOuterUpLeft: 0.017
