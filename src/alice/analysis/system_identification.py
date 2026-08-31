@@ -176,10 +176,10 @@ class RepeatabilityResult(BaseModel):
 
     @model_validator(mode="after")
     def validate_outcome(self) -> RepeatabilityResult:
-        if not self.checks or any(check.passed is None for check in self.checks):
-            expected = "inconclusive"
-        elif any(check.passed is False for check in self.checks):
+        if any(check.passed is False for check in self.checks):
             expected = "fail"
+        elif not self.checks or any(check.passed is None for check in self.checks):
+            expected = "inconclusive"
         else:
             expected = "pass"
         if self.outcome != expected:
@@ -744,14 +744,14 @@ def compare_repeat_run(
                     ),
                 )
             )
-    if (
+    if any(check.passed is False for check in checks):
+        outcome: Literal["pass", "fail", "inconclusive"] = "fail"
+    elif (
         thresholds is None
         or not checks
         or any(check.passed is None for check in checks)
     ):
-        outcome: Literal["pass", "fail", "inconclusive"] = "inconclusive"
-    elif any(check.passed is False for check in checks):
-        outcome = "fail"
+        outcome = "inconclusive"
     else:
         outcome = "pass"
     return RepeatabilityResult(

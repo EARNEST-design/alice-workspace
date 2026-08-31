@@ -251,6 +251,46 @@ def test_repeatability_thresholds_fail_pass_and_require_reviewed_configuration()
     assert all(check.passed is True for check in passed.checks)
 
 
+def test_repeatability_exceeded_check_dominates_another_missing_check() -> None:
+    reference = estimate_local_jacobian(_samples("a") + _samples("b"))
+    repeat_samples = [
+        sample.model_copy(
+            update={
+                "blendshapes": {
+                    "jawOpen": sample.blendshapes["jawOpen"]
+                    + 0.4 * sample.normalized_position,
+                    "mouthSmile": sample.blendshapes["mouthSmile"],
+                }
+            }
+        )
+        for sample in (_samples("c") + _samples("d"))
+    ]
+    repeat = estimate_local_jacobian(repeat_samples)
+    thresholds = RepeatabilityThresholds.model_validate(
+        {
+            "schema_version": "identification-repeatability-thresholds/v1",
+            "cells": [
+                {
+                    "blendshape_name": "jawOpen",
+                    "actuator_name": "mouth_open",
+                    "maximum_absolute_delta": 0.1,
+                },
+                {
+                    "blendshape_name": "unused",
+                    "actuator_name": "mouth_open",
+                    "maximum_absolute_delta": 0.1,
+                },
+            ],
+        }
+    )
+
+    result = compare_repeat_run(reference, repeat, thresholds)
+
+    assert any(check.passed is False for check in result.checks)
+    assert any(check.passed is None for check in result.checks)
+    assert result.outcome == "fail"
+
+
 def _write_jsonl(path: Path, records: list[dict[str, object]]) -> None:
     payload = b"".join(
         json.dumps(record, sort_keys=True, separators=(",", ":")).encode() + b"\n"
