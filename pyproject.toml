@@ -12,6 +12,7 @@ dependencies = [
   "numpy",
   "opencv-contrib-python",
   "pydantic>=2,<3",
+  "pyserial>=3.5,<4",
   "pyyaml",
 ]
 
@@ -24,6 +25,7 @@ dev = [
   "mypy",
   "pytest",
   "ruff",
+  "types-pyserial",
 ]
 
 [tool.hatch.build.targets.wheel]

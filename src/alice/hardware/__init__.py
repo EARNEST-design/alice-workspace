@@ -1,4 +1,8 @@
-"""Hardware descriptions and adapters for Alice."""
+"""Hardware descriptions for Alice.
+
+Adapters intentionally use explicit submodule imports so importing the safety
+supervisor cannot cycle through its hardware dependencies.
+"""
 
 from alice.hardware.manifest import HardwareManifest, load_manifest
 
