@@ -2,7 +2,7 @@
 
 Date: 2026-08-31
 
-Outcome: provisional thresholds declared; replacement capture pending
+Outcome: replacement evidence failed the frozen provisional thresholds
 
 ## Camera Inventory
 
@@ -96,6 +96,48 @@ Cross-run provisional repeat thresholds for the fresh acceptance repeats:
 | `eyeWideRight` | `0.001` |
 | `mouthPucker` | `0.012` |
 
+## Replacement Acceptance Runs
+
+All three replacement runs were captured after the confirmed preview using the exact C525 selector, with `retain_frames: false`, OBS closed, and manifests pinned to the frozen threshold revision `214ddd9`.
+
+| Kind | Run ID | Start (UTC) | Duration (s) | Detection Rate | Analyzer Outcome |
+| --- | --- | --- | ---: | ---: | --- |
+| Warm-up | `passive-alice-face-confirmed-warmup-20260831T104222Z` | `2026-08-31T10:46:11.162739Z` | 120.98 | 1.0000 | `pass` |
+| Repeat 1 | `passive-alice-face-confirmed-repeat-1-20260831T104222Z` | `2026-08-31T10:48:20.458832Z` | 120.98 | 1.0000 | `fail` |
+| Repeat 2 | `passive-alice-face-confirmed-repeat-2-20260831T104222Z` | `2026-08-31T10:50:29.634959Z` | 120.98 | 1.0000 | `fail` |
+
+Each replacement run produced 1200 valid observations, zero invalid observations, and only the provenance-safe files `manifest.json`, `observations.jsonl`, `stability-metrics.json`, and `phase-1-conclusion.md`. No raw images or video were saved.
+
+## Replacement Run Findings
+
+- The warm-up run passed every frozen per-run threshold.
+- Repeat 1 failed one threshold:
+  - `browOuterUpLeft.warmup_drift`: observed `0.002551` vs threshold `0.002`
+- Repeat 2 failed three thresholds:
+  - `browOuterUpLeft.warmup_drift`: observed `0.006622` vs threshold `0.002`
+  - `browOuterUpRight.warmup_drift`: observed `0.018544` vs threshold `0.008`
+  - `mouthSmileRight.warmup_drift`: observed `0.025463` vs threshold `0.024`
+- All three replacement runs met the global `minimum_detection_rate >= 0.995` threshold with `1.0000`.
+- The failures are therefore stability failures, not face-detection failures.
+
+## Repeat-To-Repeat Comparison
+
+The two fresh acceptance repeats were also compared against the predeclared cross-run `maximum_abs_mean_delta` limits:
+
+| Category | Repeat 1 Mean | Repeat 2 Mean | Abs Delta | Threshold | Status |
+| --- | ---: | ---: | ---: | ---: | --- |
+| `browOuterUpLeft` | `0.964202` | `0.951952` | `0.012251` | `0.017` | `pass` |
+| `browInnerUp` | `0.915934` | `0.909489` | `0.006445` | `0.024` | `pass` |
+| `browOuterUpRight` | `0.916115` | `0.894727` | `0.021388` | `0.010` | `fail` |
+| `eyeLookDownLeft` | `0.527691` | `0.497882` | `0.029809` | `0.001` | `fail` |
+| `eyeLookDownRight` | `0.488912` | `0.459697` | `0.029215` | `0.004` | `fail` |
+| `mouthSmileLeft` | `0.128366` | `0.148851` | `0.020484` | `0.046` | `pass` |
+| `mouthSmileRight` | `0.145299` | `0.162976` | `0.017677` | `0.052` | `pass` |
+| `eyeWideRight` | `0.399650` | `0.436298` | `0.036648` | `0.001` | `fail` |
+| `mouthPucker` | `0.091812` | `0.106644` | `0.014832` | `0.012` | `fail` |
+
+Five of the nine dominant categories exceeded their predeclared repeat-to-repeat mean-delta limits.
+
 ## Archived Exploratory Runs
 
 | Kind | Run ID | Start (UTC) | Duration (s) | Detection Rate |
@@ -126,19 +168,24 @@ The largest repeat-to-repeat mean shifts were:
 - `mouthSmileLeft`: `0.4729` to `0.4278` (`abs delta 0.0451`)
 - `browInnerUp`: `0.8946` to `0.8714` (`abs delta 0.0232`)
 
-## Pre-Capture Status
+## Conclusion
 
-The archived runs remain exploratory and inconclusive.
+The archived runs remain exploratory and inconclusive, but the replacement evidence is not inconclusive.
 
-The procedural gap is now explicit: the original three runs were captured before a pre-capture confirmation of full-face framing and participant exclusion. That alone disqualifies them from Phase 1 acceptance evidence. They still remain useful as exploratory observations, and their analyzer outcome also stays `inconclusive` because no acceptance thresholds were predeclared.
+Phase 1 failed the frozen provisional thresholds:
 
-That blocker is now cleared. Replacement capture can proceed under the frozen threshold set above. No robot motion was commanded.
+- Warm-up passed, but both fresh acceptance repeats failed the per-run analyzer thresholds.
+- Five of nine dominant categories also failed the predeclared repeat-to-repeat mean-delta limits.
+- Detection remained perfect in all three replacement runs, so the failure is stability-related rather than detector-availability-related.
 
-## Confirmatory Rerun Requirements
+This is still a provisional Phase 1 judgment because the thresholds themselves were derived from earlier exploratory runs rather than a separately approved acceptance study. Even so, the replacement evidence shows that the confirmed-preview setup did not stay within the frozen provisional stability envelope.
 
-- Predeclare acceptance thresholds before capture for minimum detection rate, maximum within-run standard deviation, maximum percentile range, maximum warm-up drift, and maximum repeat-to-repeat mean delta for the dominant categories.
-- Keep the same stable by-id capture node unless new evidence shows a better mapping.
-- Record measured distance and angle instead of leaving them unknown.
-- Lock focus/exposure if possible, or at minimum record the exact auto/manual state before the run.
-- Independently verify participant exclusion.
-- Provide a repo-supported read-only capability probe such as `v4l2-ctl`, or record an equivalent reviewed capability listing before the rerun.
+No robot motion was commanded. Unknowns remain unchanged: distance, angle, lighting state, focus mode, and exposure mode were not measured or locked during this Phase 1 work.
+
+## Follow-Up Requirements
+
+- Keep the same stable by-id C525 capture selector unless new reviewed evidence shows a better mapping.
+- Measure and record distance and angle instead of leaving them unknown.
+- Record the exact lighting state and lock focus/exposure if possible, or at minimum record the exact auto/manual state before the run.
+- Preserve the same preview confirmation procedure for participant exclusion and full-face framing before any future rerun.
+- If a future rerun is intended as acceptance evidence, review and approve the threshold-setting method separately instead of deriving it from the same exploratory family of runs.
