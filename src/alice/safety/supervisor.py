@@ -487,6 +487,19 @@ class SafetySupervisor:
         self._recovery_wait = None
         return TransitionResult(accepted=True, state=self._state, fault=fault)
 
+    def revoke_external_authority(self, detail: str) -> TransitionResult:
+        """Fail closed when an independent hardware authority detects a fault."""
+
+        self._permit_registry.revoke_all()
+        self._pending_request = None
+        self._recovery_request = None
+        self._recovery_authorization = None
+        self._recovery_wait = None
+        fault = self._record_fault("external-authority-revoked", detail)
+        self._state = RunState.FAULTED
+        self._safe_state_verified = False
+        return TransitionResult(accepted=True, state=self._state, fault=fault)
+
     def acknowledge_fault(self, evidence: PreflightEvidence) -> TransitionResult:
         if self._state is not RunState.FAULTED:
             return self._invalid_transition("acknowledge_fault", RunState.FAULTED)

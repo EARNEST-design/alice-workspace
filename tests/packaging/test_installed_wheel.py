@@ -16,7 +16,7 @@ def _run(*args: str, cwd: Path, env: dict[str, str] | None = None) -> str:
     return result.stdout
 
 
-def test_built_wheel_runs_both_entry_points_without_repository_files(
+def test_built_wheel_runs_entry_points_without_repository_files(
     tmp_path: Path,
 ) -> None:
     repository = Path(__file__).resolve().parents[2]
@@ -57,6 +57,12 @@ def test_built_wheel_runs_both_entry_points_without_repository_files(
         cwd=outside_repository,
         env=clean_env,
     )
+    hardware_help = _run(
+        str(environment / "bin" / "alice-hardware-preflight"),
+        "--help",
+        cwd=outside_repository,
+        env=clean_env,
+    )
     probe = _run(
         str(environment / "bin" / "python"),
         "-c",
@@ -77,6 +83,7 @@ def test_built_wheel_runs_both_entry_points_without_repository_files(
 
     assert "alice-camera" in camera_help
     assert "alice-passive-capture" in passive_help
+    assert "Phase 2 hardware" in hardware_help
     assert "['opencv-contrib-python']" in probe
     assert "# Passive Blendshape Conclusion" in probe
     assert "# Actuator-identification conclusion" in probe

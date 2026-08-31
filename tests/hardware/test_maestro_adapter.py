@@ -236,6 +236,23 @@ def test_apply_writes_exact_command_confirms_position_and_checks_errors(
     )
 
 
+def test_read_only_preflight_reads_errors_and_positions_without_set_target(
+    manifest: HardwareManifest,
+) -> None:
+    names = ("mouth_open",)
+    home = manifest.actuator("mouth_open").home_qus
+    fake = FakeSerial(reads=(b"\x00\x00", home.to_bytes(2, "little")))
+    instance = adapter(manifest, fake)
+    instance.open(ENABLE)
+
+    snapshot = instance.read_only_preflight(names)
+
+    assert snapshot.controller_error_register == 0
+    assert snapshot.positions_qus == {"mouth_open": home}
+    assert bytes(fake.written) == encode_get_errors() + encode_get_position(6)
+    assert b"\x84" not in bytes(fake.written)
+
+
 def test_partial_write_poisons_transport_and_prevents_reuse(
     manifest: HardwareManifest,
 ) -> None:

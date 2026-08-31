@@ -19,6 +19,7 @@ dependencies = [
 [project.scripts]
 alice-camera = "alice.perception.cli:main"
 alice-passive-capture = "alice.experiments.passive_capture:main"
+alice-hardware-preflight = "alice.experiments.hardware_cli:main"
 
 [dependency-groups]
 dev = [

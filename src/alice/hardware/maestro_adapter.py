@@ -5,7 +5,9 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import Protocol
+from typing import Annotated, Protocol
+
+from pydantic import BaseModel, ConfigDict, Field
 
 from alice.contracts.actuation import (
     ActuatorStatus,
@@ -44,6 +46,16 @@ TransportFactory = Callable[[str, float], SerialTransport]
 
 class MaestroConnectionError(RuntimeError):
     """A connection lifecycle or explicit-enable requirement failed."""
+
+
+class MaestroPreflightSnapshot(BaseModel):
+    """Read-only command-port state; positions are controller outputs, not mechanics."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    controller_error_register: Annotated[int, Field(ge=0, le=0xFFFF)]
+    positions_qus: dict[str, Annotated[int, Field(ge=0, le=0xFFFF)]]
+    observed_monotonic_ns: Annotated[int, Field(ge=0)]
 
 
 class _TransportFailure(RuntimeError):
@@ -219,6 +231,32 @@ class MaestroAdapter:
             state=ActuatorStatusState.APPLIED,
             confirmed=confirmed,
             controller_samples=controller_samples,
+        )
+
+    def read_only_preflight(
+        self, actuator_names: tuple[str, ...]
+    ) -> MaestroPreflightSnapshot:
+        """Read errors and commanded output positions without issuing Set Target."""
+
+        if self._transport is None:
+            raise MaestroConnectionError("adapter is not open")
+        try:
+            self._write_all(encode_get_errors())
+            errors = parse_error_register(self._read_exact(2))
+            positions: dict[str, int] = {}
+            for name in actuator_names:
+                definition = self._manifest.actuator(name)
+                self._write_all(encode_get_position(definition.channel))
+                positions[name] = parse_position(self._read_exact(2))
+        except _TransportFailure as exc:
+            self._poison_transport()
+            raise MaestroConnectionError(
+                f"read-only controller preflight failed: {exc.detail}"
+            ) from exc
+        return MaestroPreflightSnapshot(
+            controller_error_register=errors,
+            positions_qus=positions,
+            observed_monotonic_ns=self._clock(),
         )
 
     def _wait_for_target(
