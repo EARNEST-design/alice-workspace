@@ -12,24 +12,31 @@ from typing import Final, Literal, TypeVar
 import yaml  # type: ignore[import-untyped]
 
 from alice.experiments.hardware_identification import (
+    FailedRunPowerRemovalConfirmation,
     HardwareApproval,
     HardwarePreflightAttestation,
     PowerEnableConfirmation,
     PowerRemovalConfirmation,
     abandon_pending_hardware_identification,
+    bind_prepared_hardware_output,
     cancel_prepared_hardware_identification,
     execute_prepared_hardware_identification,
     finalize_hardware_identification,
     load_hardware_identification_config,
     prepare_hardware_identification,
+    record_failed_hardware_power_removal,
+    record_failed_hardware_power_removal_unconfirmed,
 )
 
 _load_config = load_hardware_identification_config
 _prepare = prepare_hardware_identification
+_bind_output = bind_prepared_hardware_output
 _execute = execute_prepared_hardware_identification
 _finalize = finalize_hardware_identification
 _cancel = cancel_prepared_hardware_identification
 _abandon = abandon_pending_hardware_identification
+_record_failed_power_off = record_failed_hardware_power_removal
+_record_failed_unconfirmed = record_failed_hardware_power_removal_unconfirmed
 _input = input
 _POWER_ON: Final[
     Literal["I CONFIRM MASTER SERVO POWER IS ON AND POWER REMOVAL IS READY"]
@@ -87,6 +94,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         attestation=attestation,
         enable_hardware=True,
     )
+    prepared = _bind_output(prepared=prepared, output_dir=args.output)
     challenge = prepared.challenge
     print("CHECKPOINT: preparation complete with master servo power OFF")
     try:
@@ -105,13 +113,60 @@ def main(argv: Sequence[str] | None = None) -> int:
         config_sha256=challenge.config_sha256,
         manifest_sha256=challenge.manifest_sha256,
         electrical_evidence_sha256=challenge.electrical_evidence_sha256,
+        output_identity_sha256=challenge.output_identity_sha256,
         challenge_sha256=challenge.challenge_sha256,
         confirmed_at=datetime.now(UTC),
         confirmed_monotonic_ns=time.monotonic_ns(),
         source="interactive hardware-run CLI",
         operator_acknowledgment=_POWER_ON,
     )
-    pending = _execute(prepared=prepared, output_dir=args.output, confirmation=power_on)
+    try:
+        pending = _execute(
+            prepared=prepared, output_dir=args.output, confirmation=power_on
+        )
+    except BaseException as primary_error:
+        print(
+            "URGENT CHECKPOINT: REMOVE MASTER SERVO POWER NOW; "
+            "execution did not complete safely"
+        )
+        try:
+            failed_off_reply = _input(
+                f"Type exactly after power is OFF: {_POWER_OFF}\n> "
+            )
+        except (EOFError, KeyboardInterrupt):
+            try:
+                _record_failed_unconfirmed(output_dir=args.output, challenge=challenge)
+            except Exception:
+                pass
+            print("power_removal_unconfirmed")
+            raise primary_error
+        if failed_off_reply != _POWER_OFF:
+            try:
+                _record_failed_unconfirmed(output_dir=args.output, challenge=challenge)
+            except Exception:
+                pass
+            print("power_removal_unconfirmed")
+        else:
+            try:
+                if challenge.output_identity_sha256 is None:
+                    raise RuntimeError("prepared output identity was not bound")
+                _record_failed_power_off(
+                    output_dir=args.output,
+                    confirmation=FailedRunPowerRemovalConfirmation(
+                        run_id=challenge.run_id,
+                        challenge_id=challenge.challenge_id,
+                        config_sha256=challenge.config_sha256,
+                        manifest_sha256=challenge.manifest_sha256,
+                        output_identity_sha256=challenge.output_identity_sha256,
+                        confirmed_at=datetime.now(UTC),
+                        confirmed_monotonic_ns=time.monotonic_ns(),
+                        source="interactive hardware-run CLI",
+                        operator_acknowledgment=_POWER_OFF,
+                    ),
+                )
+            except Exception:
+                print("power_removal_record_failed")
+        raise primary_error
     print("CHECKPOINT: motion ended and interfaces closed; remove master servo power")
     try:
         power_off_reply = _input(f"Type exactly after power is OFF: {_POWER_OFF}\n> ")

@@ -457,7 +457,7 @@ def _run_identification_core(
     )
     if stage_hardware_completion and hardware_provenance is None:
         raise ValueError("hardware staging requires typed hardware provenance")
-    files = _artifact_payloads(config=config, log=log, status=durable_status)
+    files = _artifact_payloads(config=config, log=log)
     if hardware_provenance is not None:
         files["hardware-provenance.json"] = _json_bytes(
             hardware_provenance.model_dump(mode="json"), indent=2
@@ -1513,7 +1513,7 @@ def _log_status(log: _RunLog, step_id: str, status: Any, now_ns: int) -> None:
 
 
 def _artifact_payloads(
-    *, config: IdentificationConfig, log: _RunLog, status: RunStatus
+    *, config: IdentificationConfig, log: _RunLog
 ) -> dict[str, bytes]:
     payloads = {
         name: b"".join(_json_bytes(record) for record in records)
@@ -1521,10 +1521,9 @@ def _artifact_payloads(
     }
     payloads["metrics.json"] = _json_bytes(
         {
-            "schema_version": "identification-metrics-placeholder/v1",
+            "schema_version": "identification-metrics-placeholder/v2",
             "run_id": config.run_id,
             "state": "pending_analysis",
-            "run_status": status.value,
         },
         indent=2,
     )

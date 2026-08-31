@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 import alice.experiments.hardware_run_cli as cli
 
 ROOT = Path(__file__).parents[2]
@@ -73,12 +75,21 @@ def test_power_enable_rejection_explicitly_cancels_prepared_handle(
     monkeypatch, tmp_path: Path
 ) -> None:
     prepared = SimpleNamespace(challenge=object())
+    bound = SimpleNamespace(challenge=object())
     cancelled: list[object] = []
+    events: list[str] = []
     monkeypatch.setattr(cli, "_load_config", lambda _: _enabled_config())
     monkeypatch.setattr(cli, "_load", lambda *_: object())
     monkeypatch.setattr(cli, "_prepare", lambda **_: prepared)
+    monkeypatch.setattr(
+        cli,
+        "_bind_output",
+        lambda **_: events.append("reserve-output") or bound,
+    )
     monkeypatch.setattr(cli, "_cancel", cancelled.append)
-    monkeypatch.setattr(cli, "_input", lambda _: "no")
+    monkeypatch.setattr(
+        cli, "_input", lambda _: events.append("power-on-prompt") or "no"
+    )
 
     result = cli.main(
         [
@@ -97,7 +108,8 @@ def test_power_enable_rejection_explicitly_cancels_prepared_handle(
     )
 
     assert result == 2
-    assert cancelled == [prepared]
+    assert events == ["reserve-output", "power-on-prompt"]
+    assert cancelled == [bound]
 
 
 def test_power_removal_eof_explicitly_abandons_pending_handle(
@@ -109,6 +121,7 @@ def test_power_removal_eof_explicitly_abandons_pending_handle(
         config_sha256="a" * 64,
         manifest_sha256="b" * 64,
         electrical_evidence_sha256="c" * 64,
+        output_identity_sha256="e" * 64,
         challenge_sha256="d" * 64,
     )
     prepared = SimpleNamespace(challenge=challenge)
@@ -133,6 +146,7 @@ def test_power_removal_eof_explicitly_abandons_pending_handle(
     monkeypatch.setattr(cli, "_load_config", lambda _: _enabled_config())
     monkeypatch.setattr(cli, "_load", lambda *_: object())
     monkeypatch.setattr(cli, "_prepare", lambda **_: prepared)
+    monkeypatch.setattr(cli, "_bind_output", lambda **_: prepared)
     monkeypatch.setattr(cli, "_execute", lambda **_: pending)
     monkeypatch.setattr(cli, "_abandon", abandoned.append)
     monkeypatch.setattr(cli, "_input", input_then_eof)
@@ -155,3 +169,54 @@ def test_power_removal_eof_explicitly_abandons_pending_handle(
 
     assert result == 3
     assert abandoned == [pending]
+
+
+def test_execution_failure_still_requires_and_records_power_off(
+    monkeypatch, tmp_path: Path
+) -> None:
+    challenge = SimpleNamespace(
+        run_id="run",
+        challenge_id="challenge",
+        config_sha256="a" * 64,
+        manifest_sha256="b" * 64,
+        electrical_evidence_sha256="c" * 64,
+        output_identity_sha256="e" * 64,
+        challenge_sha256="d" * 64,
+    )
+    prepared = SimpleNamespace(challenge=challenge)
+    events: list[str] = []
+    replies = iter([cli._POWER_ON, cli._POWER_OFF])
+    monkeypatch.setattr(cli, "_load_config", lambda _: _enabled_config())
+    monkeypatch.setattr(cli, "_load", lambda *_: object())
+    monkeypatch.setattr(cli, "_prepare", lambda **_: prepared)
+    monkeypatch.setattr(
+        cli, "_bind_output", lambda **_: events.append("reserve") or prepared
+    )
+    monkeypatch.setattr(
+        cli, "_input", lambda _: events.append("prompt") or next(replies)
+    )
+    monkeypatch.setattr(
+        cli, "_execute", lambda **_: (_ for _ in ()).throw(RuntimeError("primary"))
+    )
+    monkeypatch.setattr(
+        cli, "_record_failed_power_off", lambda **_: events.append("record-off")
+    )
+
+    with pytest.raises(RuntimeError, match="primary"):
+        cli.main(
+            [
+                "--config",
+                "config",
+                "--manifest",
+                "manifest",
+                "--approval",
+                "approval",
+                "--attestation",
+                "attestation",
+                "--output",
+                str(tmp_path / "output"),
+                "--enable-hardware",
+            ]
+        )
+
+    assert events == ["reserve", "prompt", "prompt", "record-off"]

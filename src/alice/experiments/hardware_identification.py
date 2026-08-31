@@ -218,6 +218,7 @@ class PowerEnableChallenge(BaseModel):
     config_sha256: Sha256Hex
     manifest_sha256: Sha256Hex
     electrical_evidence_sha256: Sha256Hex
+    output_identity_sha256: Sha256Hex | None = None
     issued_at: AwareDatetime
     issued_monotonic_ns: Annotated[int, Field(ge=0)]
     expires_monotonic_ns: Annotated[int, Field(gt=0)]
@@ -232,6 +233,7 @@ class PowerEnableConfirmation(BaseModel):
     config_sha256: Sha256Hex
     manifest_sha256: Sha256Hex
     electrical_evidence_sha256: Sha256Hex
+    output_identity_sha256: Sha256Hex | None = None
     challenge_sha256: Sha256Hex
     confirmed_at: AwareDatetime
     confirmed_monotonic_ns: Annotated[int, Field(ge=0)]
@@ -253,6 +255,65 @@ class PowerRemovalConfirmation(BaseModel):
     confirmed_monotonic_ns: Annotated[int, Field(ge=0)]
     source: NonEmptyString
     operator_acknowledgment: Literal["I CONFIRM MASTER SERVO POWER IS OFF"]
+
+
+class FailedRunPowerRemovalConfirmation(BaseModel):
+    """Fresh power-OFF fact for an execution that could not reach staging."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    run_id: NonEmptyString
+    challenge_id: NonEmptyString
+    config_sha256: Sha256Hex
+    manifest_sha256: Sha256Hex
+    output_identity_sha256: Sha256Hex
+    confirmed_at: AwareDatetime
+    confirmed_monotonic_ns: Annotated[int, Field(ge=0)]
+    source: NonEmptyString
+    operator_acknowledgment: Literal["I CONFIRM MASTER SERVO POWER IS OFF"]
+
+
+def record_failed_hardware_power_removal(
+    *, output_dir: Path, confirmation: FailedRunPowerRemovalConfirmation
+) -> None:
+    """Durably record shutdown after a failed/aborted hardware execution."""
+
+    payload = {
+        "schema_version": "aborted-hardware-shutdown/v1",
+        "status": "aborted",
+        "power_removal_unconfirmed": False,
+        **confirmation.model_dump(mode="json"),
+    }
+    atomic_write_bytes(
+        output_dir / "aborted-shutdown.json",
+        json.dumps(payload, sort_keys=True, indent=2).encode(),
+    )
+
+
+def record_failed_hardware_power_removal_unconfirmed(
+    *, output_dir: Path, challenge: PowerEnableChallenge
+) -> None:
+    """Durably mark a failed run when the operator did not acknowledge power OFF."""
+
+    if not output_dir.is_dir():
+        return
+    atomic_write_bytes(
+        output_dir / "aborted-shutdown.json",
+        json.dumps(
+            {
+                "schema_version": "aborted-hardware-shutdown/v1",
+                "status": "aborted",
+                "run_id": challenge.run_id,
+                "challenge_id": challenge.challenge_id,
+                "config_sha256": challenge.config_sha256,
+                "manifest_sha256": challenge.manifest_sha256,
+                "output_identity_sha256": challenge.output_identity_sha256,
+                "power_removal_unconfirmed": True,
+            },
+            sort_keys=True,
+            indent=2,
+        ).encode(),
+    )
 
 
 class HardwareRunDraft(BaseModel):
@@ -378,6 +439,7 @@ class _PreparedState:
         "issuing_pid",
         "raw_fd",
         "challenge",
+        "reservation",
         "timer",
     )
 
@@ -402,6 +464,7 @@ class _PreparedState:
         raw_fd: int,
     ) -> None:
         self.challenge = challenge
+        self.reservation: _OutputReservation | None = None
         self._config = config
         self._config_bytes = config_bytes
         self._execution_config = execution_config
@@ -574,6 +637,8 @@ def _close_state(state: _PreparedState, detail: str) -> None:
         state._adapter.close()
     except Exception:
         pass
+    if state.reservation is not None and state.reservation.marker.exists():
+        _release_reservation(state.reservation, remove_empty_output=True)
 
 
 def _remove_state(token: str) -> _PreparedState | None:
@@ -621,6 +686,53 @@ def _consume_handle(handle: PreparedHardwareHandle) -> _PreparedState:
         _close_state(state, "prepared hardware challenge integrity failed")
         raise ValueError("prepared hardware challenge was mutated or forged")
     return state
+
+
+def _issue_prepared_handle(state: _PreparedState) -> PreparedHardwareHandle:
+    with _registry_lock:
+        issuance_token = secrets.token_urlsafe(48)
+        while issuance_token in _prepared_registry:
+            issuance_token = secrets.token_urlsafe(48)
+        handle = PreparedHardwareHandle(
+            challenge=state.challenge,
+            issuance_token=SecretStr(issuance_token),
+        )
+        state.handle_ref = weakref.ref(handle)
+        _prepared_registry[issuance_token] = state
+    timeout_seconds = max(
+        0.0,
+        (state.challenge.expires_monotonic_ns - time.monotonic_ns()) / 1_000_000_000,
+    )
+    timer = threading.Timer(timeout_seconds, _expire_or_abandon, args=(issuance_token,))
+    timer.daemon = True
+    state.timer = timer
+    timer.start()
+    weakref.finalize(handle, _expire_or_abandon, issuance_token)
+    return handle
+
+
+def bind_prepared_hardware_output(
+    *, prepared: PreparedHardwareHandle, output_dir: Path
+) -> PreparedHardwareHandle:
+    """Reserve and cryptographically bind the destination while power is OFF."""
+
+    state = _consume_handle(prepared)
+    try:
+        reservation = _reserve_output(output_dir, state._execution_config.run_id)
+        state.reservation = reservation
+        provisional = state.challenge.model_copy(
+            update={
+                "output_identity_sha256": reservation.identity_sha256,
+                "challenge_sha256": "0" * 64,
+            }
+        )
+        state.challenge = provisional.model_copy(
+            update={"challenge_sha256": _challenge_digest(provisional)}
+        )
+        return _issue_prepared_handle(state)
+    except BaseException:
+        _close_state(state, "output reservation failed before power enable")
+        raise
 
 
 def _sha256_bytes(payload: bytes) -> str:
@@ -919,28 +1031,7 @@ def prepare_hardware_identification(
             adapter=adapter,
             raw_fd=raw_fd,
         )
-        with _registry_lock:
-            issuance_token = secrets.token_urlsafe(48)
-            while issuance_token in _prepared_registry:
-                issuance_token = secrets.token_urlsafe(48)
-            handle = PreparedHardwareHandle(
-                challenge=challenge,
-                issuance_token=SecretStr(issuance_token),
-            )
-            state.handle_ref = weakref.ref(handle)
-            _prepared_registry[issuance_token] = state
-        timeout_seconds = max(
-            0.0,
-            (challenge.expires_monotonic_ns - time.monotonic_ns()) / 1_000_000_000,
-        )
-        timer = threading.Timer(
-            timeout_seconds, _expire_or_abandon, args=(issuance_token,)
-        )
-        timer.daemon = True
-        state.timer = timer
-        timer.start()
-        weakref.finalize(handle, _expire_or_abandon, issuance_token)
-        return handle
+        return _issue_prepared_handle(state)
     except BaseException:
         try:
             supervisor.revoke_external_authority("hardware preparation failed")
@@ -967,6 +1058,7 @@ def _validate_power_confirmation(
         and confirmation.manifest_sha256 == challenge.manifest_sha256
         and confirmation.electrical_evidence_sha256
         == challenge.electrical_evidence_sha256
+        and confirmation.output_identity_sha256 == challenge.output_identity_sha256
         and confirmation.challenge_sha256 == challenge.challenge_sha256
     )
     if not bindings:
@@ -1252,7 +1344,7 @@ def execute_prepared_hardware_identification(
     adapter = state._adapter
     observer: ProductionIdentificationObserver | None = None
     draft_root: Path | None = None
-    reservation: _OutputReservation | None = None
+    reservation = state.reservation
     watchdog = IndependentHardwareWatchdog(
         timeout_seconds=config.independent_watchdog_ms / 1_000,
         revoke=lambda: supervisor.revoke_external_authority(
@@ -1267,7 +1359,12 @@ def execute_prepared_hardware_identification(
             now_wall=datetime.now(UTC),
             now_ns=time.monotonic_ns(),
         )
-        reservation = _reserve_output(output_dir, config.run_id)
+        if reservation is None:
+            # Compatibility for the advanced low-level API. The installed trusted
+            # CLI always binds while power is OFF before requesting POWER_ON.
+            reservation = _reserve_output(output_dir, config.run_id)
+        elif reservation.output_dir != output_dir.absolute():
+            raise ValueError("output differs from the pre-power reserved destination")
         observer = ProductionIdentificationObserver.open(
             camera_device=config.camera_device,
             model_path=Path(config.detector_model_path),
@@ -1348,18 +1445,22 @@ def execute_prepared_hardware_identification(
                 draft.model_dump(mode="json"), sort_keys=True, indent=2
             ).encode(),
         )
-        token = secrets.token_urlsafe(48)
-        handle = PendingPowerRemovalHandle(draft=draft, issuance_token=SecretStr(token))
-        pending_state = _PendingState(
-            prepared=state,
-            draft=draft,
-            draft_directory=draft_directory,
-            output_dir=output_dir,
-            manifest=manifest,
-            reservation=reservation,
-        )
-        pending_state.handle_ref = weakref.ref(handle)
         with _registry_lock:
+            token = secrets.token_urlsafe(48)
+            while token in _pending_registry:
+                token = secrets.token_urlsafe(48)
+            handle = PendingPowerRemovalHandle(
+                draft=draft, issuance_token=SecretStr(token)
+            )
+            pending_state = _PendingState(
+                prepared=state,
+                draft=draft,
+                draft_directory=draft_directory,
+                output_dir=output_dir,
+                manifest=manifest,
+                reservation=reservation,
+            )
+            pending_state.handle_ref = weakref.ref(handle)
             _pending_registry[token] = pending_state
         timeout_seconds = max(
             0.0,

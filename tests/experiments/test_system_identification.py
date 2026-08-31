@@ -435,6 +435,9 @@ def test_exact_sequence_waits_for_status_and_settling_and_correlates_artifacts(
         json.loads((run_dir / "metrics.json").read_text())["state"]
         == "pending_analysis"
     )
+    metrics = json.loads((run_dir / "metrics.json").read_text())
+    assert metrics["schema_version"] == "identification-metrics-placeholder/v2"
+    assert "run_status" not in metrics
     assert "pending" in (run_dir / "conclusion.md").read_text().lower()
     controller = jsonl(run_dir, "controller-settling.jsonl")
     assert controller

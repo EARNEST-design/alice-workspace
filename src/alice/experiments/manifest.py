@@ -146,6 +146,7 @@ class PowerChallengeProvenance(BaseModel):
     config_sha256: Sha256Hex
     manifest_sha256: Sha256Hex
     electrical_evidence_sha256: Sha256Hex
+    output_identity_sha256: Sha256Hex | None = None
     issued_at: AwareDatetime
     issued_monotonic_ns: Annotated[int, Field(ge=0)]
     expires_monotonic_ns: Annotated[int, Field(gt=0)]
@@ -160,6 +161,7 @@ class PowerConfirmationProvenance(BaseModel):
     config_sha256: Sha256Hex
     manifest_sha256: Sha256Hex
     electrical_evidence_sha256: Sha256Hex
+    output_identity_sha256: Sha256Hex | None = None
     challenge_sha256: Sha256Hex
     confirmed_at: AwareDatetime
     confirmed_monotonic_ns: Annotated[int, Field(ge=0)]
