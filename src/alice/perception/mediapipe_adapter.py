@@ -80,10 +80,6 @@ def _extract_face_confidence(result: object) -> float | None:
     if confidence is not None:
         return confidence
 
-    # The Python FaceLandmarkerResult does not expose a direct confidence field.
-    face_blendshapes = getattr(result, "face_blendshapes", [])
-    if face_blendshapes:
-        return 1.0
     return None
 
 
@@ -148,7 +144,7 @@ class MediaPipeBlendshapeAdapter:
         face_confidence, raw_scores = self.detector.detect_scores(rgb)
         image_height, image_width = frame.bgr.shape[:2]
 
-        if face_confidence is None or not raw_scores:
+        if not raw_scores:
             return BlendshapeObservation(
                 schema_version="blendshape-observation/v1",
                 captured_at=frame.captured_at,

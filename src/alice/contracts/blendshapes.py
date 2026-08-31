@@ -64,8 +64,6 @@ class BlendshapeObservation(BaseModel):
         if self.validity is ObservationValidity.VALID:
             if self.invalid_reason is not None:
                 raise ValueError("invalid_reason must be None when validity is valid")
-            if self.face_confidence is None:
-                raise ValueError("face_confidence is required when validity is valid")
             if not self.scores:
                 raise ValueError("scores must be present when validity is valid")
             return self

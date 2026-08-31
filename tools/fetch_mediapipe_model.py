@@ -53,11 +53,44 @@ class InstalledModel(BaseModel):
 ModelManifest.model_rebuild()
 InstalledModel.model_rebuild()
 
+TRACKED_MANIFEST_PATH = (
+    Path(__file__).resolve().parent.parent
+    / "config/models/mediapipe-face-landmarker-v1.yaml"
+).resolve()
+PINNED_MANIFEST = ModelManifest.model_validate(
+    {
+        "schema_version": "mediapipe-model-manifest/v1",
+        "model_id": "mediapipe-face-landmarker-v1",
+        "model_asset_name": "face_landmarker.task",
+        "source_url": (
+            "https://storage.googleapis.com/mediapipe-models/face_landmarker/"
+            "face_landmarker/float16/latest/face_landmarker.task"
+        ),
+        "published_model_identity": (
+            "MediaPipe Face Landmarker float16 latest "
+            "(storage generation 1683136941468629, "
+            "last_modified 2023-05-03T18:02:21Z)"
+        ),
+        "sha256": "64184e229b263107bc2b804c6625db1341ff2bb731874b0bcc2fe6544e0bc9ff",
+        "retrieved_at": "2026-08-31",
+        "permitted_use_reference": "https://ai.google.dev/edge/mediapipe/solutions/guide",
+    }
+)
+
 
 def load_manifest(manifest_path: Path) -> ModelManifest:
+    resolved_path = manifest_path.resolve()
+    if resolved_path != TRACKED_MANIFEST_PATH:
+        raise ValueError(
+            f"manifest_path must be the tracked manifest: {TRACKED_MANIFEST_PATH}"
+        )
+
     with manifest_path.open("r", encoding="utf-8") as handle:
         payload = yaml.safe_load(handle)
-    return ModelManifest.model_validate(payload)
+    manifest = ModelManifest.model_validate(payload)
+    if manifest != PINNED_MANIFEST:
+        raise ValueError("tracked manifest does not match pinned provenance")
+    return manifest
 
 
 def install_model(

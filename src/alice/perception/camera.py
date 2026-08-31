@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import re
+import subprocess
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -34,6 +36,11 @@ class CameraInfo:
     device: str
     label: str
     capabilities: tuple[str, ...] = ()
+    capability_error: str | None = None
+
+
+class CameraProbeError(RuntimeError):
+    """Raised when read-only camera capability probing fails."""
 
 
 class FrameSource(Protocol):
@@ -56,6 +63,7 @@ class VideoCaptureLike(Protocol):
 
 
 CaptureFactory = Callable[[str | int], VideoCaptureLike]
+CapabilityProbe = Callable[[str], tuple[str, ...]]
 
 
 class OpenCVCamera(FrameSource):
@@ -136,9 +144,11 @@ def list_cameras(
     *,
     by_id_glob: Callable[[str], list[str]] = glob,
     resolve_path: Callable[[str], str] = os.path.realpath,
+    capability_probe: CapabilityProbe | None = None,
 ) -> list[CameraInfo]:
     """Discover camera device nodes without opening them."""
 
+    probe = capability_probe or probe_camera_capabilities
     by_id_paths = sorted(by_id_glob("/dev/v4l/by-id/*"))
     if by_id_paths:
         seen_devices: set[str] = set()
@@ -149,20 +159,93 @@ def list_cameras(
                 continue
             seen_devices.add(device)
             stable_name = Path(stable_path).name
+            capabilities, capability_error = _probe_capabilities(device, probe)
             cameras.append(
                 CameraInfo(
                     camera_id=stable_name,
                     device=device,
                     label=stable_name,
+                    capabilities=capabilities,
+                    capability_error=capability_error,
                 )
             )
         return cameras
 
     return [
-        CameraInfo(
-            camera_id=Path(device).name,
-            device=device,
-            label=Path(device).name,
-        )
+        _camera_info_from_device(device, probe)
         for device in sorted(by_id_glob("/dev/video*"))
     ]
+
+
+def _camera_info_from_device(
+    device: str,
+    probe: CapabilityProbe,
+) -> CameraInfo:
+    capabilities, capability_error = _probe_capabilities(device, probe)
+    return CameraInfo(
+        camera_id=Path(device).name,
+        device=device,
+        label=Path(device).name,
+        capabilities=capabilities,
+        capability_error=capability_error,
+    )
+
+
+def _probe_capabilities(
+    device: str,
+    capability_probe: CapabilityProbe,
+) -> tuple[tuple[str, ...], str | None]:
+    try:
+        return capability_probe(device), None
+    except CameraProbeError as error:
+        return (), str(error)
+
+
+def parse_v4l2_capabilities(output: str) -> tuple[str, ...]:
+    """Parse `v4l2-ctl --list-formats-ext` output into `WIDTHxHEIGHT@FPS` modes."""
+
+    size_pattern = re.compile(r"Size:\s+Discrete\s+(\d+)x(\d+)")
+    interval_pattern = re.compile(r"Interval:\s+Discrete\s+([0-9.]+)s")
+    current_size: tuple[str, str] | None = None
+    modes: list[str] = []
+
+    for line in output.splitlines():
+        size_match = size_pattern.search(line)
+        if size_match is not None:
+            current_size = (size_match.group(1), size_match.group(2))
+            continue
+
+        interval_match = interval_pattern.search(line)
+        if interval_match is None or current_size is None:
+            continue
+
+        seconds = float(interval_match.group(1))
+        if seconds <= 0.0:
+            continue
+        width, height = current_size
+        fps = round(1.0 / seconds)
+        modes.append(f"{width}x{height}@{fps}")
+
+    return tuple(dict.fromkeys(modes))
+
+
+def probe_camera_capabilities(device: str) -> tuple[str, ...]:
+    """Read camera supported modes via a read-only `v4l2-ctl` probe."""
+
+    try:
+        result = subprocess.run(
+            ["v4l2-ctl", "--list-formats-ext", "--device", device],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError as error:
+        raise CameraProbeError("v4l2-ctl unavailable") from error
+    except subprocess.CalledProcessError as error:
+        stderr = error.stderr.strip() or error.stdout.strip() or "probe failed"
+        raise CameraProbeError(stderr) from error
+
+    capabilities = parse_v4l2_capabilities(result.stdout)
+    if capabilities:
+        return capabilities
+    raise CameraProbeError("no supported modes reported")

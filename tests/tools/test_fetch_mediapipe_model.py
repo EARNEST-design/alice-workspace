@@ -48,10 +48,30 @@ def _write_manifest(path: Path, *, sha256: str) -> None:
     )
 
 
+def _pin_temp_manifest(module: object, manifest_path: Path) -> None:
+    module.TRACKED_MANIFEST_PATH = manifest_path.resolve()
+    model_manifest = module.load_manifest.__globals__["ModelManifest"]
+    module.PINNED_MANIFEST = model_manifest.model_validate(
+        {
+            "schema_version": "mediapipe-model-manifest/v1",
+            "model_id": "mediapipe-face-landmarker-v1",
+            "model_asset_name": "face_landmarker.task",
+            "source_url": "https://example.invalid/face_landmarker.task",
+            "published_model_identity": "FaceLandmarker float16 latest",
+            "sha256": hashlib.sha256(b"good-model").hexdigest(),
+            "retrieved_at": "2026-08-31",
+            "permitted_use_reference": (
+                "https://ai.google.dev/edge/mediapipe/solutions/guide#terms"
+            ),
+        }
+    )
+
+
 def test_fetch_rejects_payload_with_mismatched_sha256(tmp_path: Path) -> None:
     module = _load_module()
     manifest_path = tmp_path / "manifest.yaml"
     _write_manifest(manifest_path, sha256=hashlib.sha256(b"good-model").hexdigest())
+    _pin_temp_manifest(module, manifest_path)
 
     with pytest.raises(ValueError, match="SHA-256 mismatch"):
         module.install_model(
@@ -63,6 +83,45 @@ def test_fetch_rejects_payload_with_mismatched_sha256(tmp_path: Path) -> None:
     assert not any((tmp_path / "models").glob("*"))
 
 
+def test_fetch_rejects_non_tracked_manifest_before_download(tmp_path: Path) -> None:
+    module = _load_module()
+    payload = b"good-model"
+    sha256 = hashlib.sha256(payload).hexdigest()
+    manifest_path = tmp_path / "manifest.yaml"
+    _write_manifest(manifest_path, sha256=sha256)
+
+    with pytest.raises(ValueError, match="tracked manifest"):
+        module.install_model(
+            manifest_path=manifest_path,
+            install_dir=tmp_path / "models",
+            urlopen=lambda _url: (_ for _ in ()).throw(AssertionError("downloaded")),
+        )
+
+
+def test_fetch_rejects_tracked_manifest_with_altered_pinned_values(
+    tmp_path: Path,
+) -> None:
+    # Catch a caller-controlled change to tracked provenance without reaching download.
+    module = _load_module()
+    payload = b"good-model"
+    sha256 = hashlib.sha256(payload).hexdigest()
+    manifest_path = tmp_path / "manifest.yaml"
+    _write_manifest(manifest_path, sha256=sha256)
+    altered_text = manifest_path.read_text().replace(
+        'source_url: "https://example.invalid/face_landmarker.task"',
+        'source_url: "https://example.invalid/other.task"',
+    )
+    manifest_path.write_text(altered_text)
+    module.TRACKED_MANIFEST_PATH = manifest_path.resolve()
+
+    with pytest.raises(ValueError, match="pinned provenance"):
+        module.install_model(
+            manifest_path=manifest_path,
+            install_dir=tmp_path / "models",
+            urlopen=lambda _url: (_ for _ in ()).throw(AssertionError("downloaded")),
+        )
+
+
 def test_fetch_installs_matching_payload_atomically(tmp_path: Path) -> None:
     module = _load_module()
     payload = b"good-model"
@@ -70,6 +129,7 @@ def test_fetch_installs_matching_payload_atomically(tmp_path: Path) -> None:
     manifest_path = tmp_path / "manifest.yaml"
     install_dir = tmp_path / "models"
     _write_manifest(manifest_path, sha256=sha256)
+    _pin_temp_manifest(module, manifest_path)
 
     installed = module.install_model(
         manifest_path=manifest_path,

@@ -51,6 +51,16 @@ def test_invalid_observation_requires_reason() -> None:
         BlendshapeObservation.model_validate(source)
 
 
+def test_valid_observation_allows_missing_face_confidence() -> None:
+    source = valid_observation().model_dump()
+    source["face_confidence"] = None
+
+    observation = BlendshapeObservation.model_validate(source)
+
+    assert observation.validity is ObservationValidity.VALID
+    assert observation.face_confidence is None
+
+
 def test_category_schema_is_order_independent_but_name_exact() -> None:
     observation = valid_observation()
     validate_category_schema(observation, ("eyeBlinkLeft",))

@@ -11,11 +11,11 @@ from alice.perception.camera import CameraInfo, list_cameras
 
 
 def _write_camera_table(stdout: TextIO, cameras: list[CameraInfo]) -> None:
-    stdout.write("camera_id\tdevice\tlabel\tcapabilities\n")
+    stdout.write("camera_id\tdevice\tlabel\tcapabilities\tcapability_error\n")
     for camera in cameras:
         stdout.write(
             f"{camera.camera_id}\t{camera.device}\t{camera.label}\t"
-            f"{','.join(camera.capabilities)}\n"
+            f"{','.join(camera.capabilities)}\t{camera.capability_error or ''}\n"
         )
 
 

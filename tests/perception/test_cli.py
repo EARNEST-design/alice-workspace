@@ -19,6 +19,7 @@ def test_list_command_reports_injected_camera_capabilities() -> None:
                 device="/dev/video0",
                 label="USB Camera",
                 capabilities=("640x480@30", "1280x720@30"),
+                capability_error=None,
             )
         ],
     )
@@ -27,6 +28,27 @@ def test_list_command_reports_injected_camera_capabilities() -> None:
     assert "alice-face-webcam" in output.getvalue()
     assert "/dev/video0" in output.getvalue()
     assert "1280x720@30" in output.getvalue()
+
+
+def test_list_command_reports_probe_failure_honestly() -> None:
+    output = io.StringIO()
+
+    exit_code = main(
+        ["list"],
+        stdout=output,
+        enumerate_cameras=lambda: [
+            CameraInfo(
+                camera_id="alice-face-webcam",
+                device="/dev/video0",
+                label="USB Camera",
+                capabilities=(),
+                capability_error="v4l2-ctl unavailable",
+            )
+        ],
+    )
+
+    assert exit_code == 0
+    assert "v4l2-ctl unavailable" in output.getvalue()
 
 
 def test_cli_module_import_does_not_import_serial_or_actuator_modules(

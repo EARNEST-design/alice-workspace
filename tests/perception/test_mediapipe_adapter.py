@@ -27,6 +27,13 @@ class NoFaceDetector:
         return None, []
 
 
+class UnknownConfidenceDetector:
+    def detect_scores(
+        self, _rgb: np.ndarray
+    ) -> tuple[float | None, list[tuple[str, float]]]:
+        return None, [("jawOpen", 0.2)]
+
+
 class FakeLandmarker:
     def __init__(self, result: object) -> None:
         self.result = result
@@ -98,6 +105,29 @@ def test_adapter_emits_no_face_without_stale_scores(tmp_path: Path) -> None:
     assert observation.scores == ()
     assert observation.image_width == 5
     assert observation.image_height == 4
+
+
+def test_adapter_preserves_valid_scores_when_face_confidence_is_unavailable(
+    tmp_path: Path,
+) -> None:
+    model = tmp_path / "face.task"
+    model.write_bytes(b"fixture-model")
+    adapter = MediaPipeBlendshapeAdapter(
+        camera_id="alice-face-webcam",
+        model_path=model,
+        detector=UnknownConfidenceDetector(),
+    )
+    frame = CapturedFrame(
+        captured_at=datetime(2026, 8, 31, tzinfo=UTC),
+        monotonic_ns=42,
+        bgr=np.ones((4, 5, 3), dtype=np.uint8),
+    )
+
+    observation = adapter.observe(frame, run_id="passive-001")
+
+    assert observation.validity is ObservationValidity.VALID
+    assert observation.face_confidence is None
+    assert [item.name for item in observation.scores] == ["jawOpen"]
 
 
 def test_task_detector_reads_fixture_result_shape() -> None:

@@ -3,7 +3,12 @@ from datetime import UTC, datetime
 import numpy as np
 import pytest
 
-from alice.perception.camera import OpenCVCamera
+from alice.perception.camera import (
+    CameraInfo,
+    CameraProbeError,
+    OpenCVCamera,
+    list_cameras,
+)
 
 
 class FakeCapture:
@@ -105,3 +110,41 @@ def test_camera_read_raises_when_capture_returns_no_frame() -> None:
 
     with pytest.raises(RuntimeError, match="capture frame"):
         camera.read()
+
+
+def test_list_cameras_populates_injected_capabilities() -> None:
+    cameras = list_cameras(
+        by_id_glob=lambda pattern: ["/dev/v4l/by-id/usb-Logitech"],
+        resolve_path=lambda path: "/dev/video2",
+        capability_probe=lambda device: ("640x480@30", "1280x720@30"),
+    )
+
+    assert cameras == [
+        CameraInfo(
+            camera_id="usb-Logitech",
+            device="/dev/video2",
+            label="usb-Logitech",
+            capabilities=("640x480@30", "1280x720@30"),
+            capability_error=None,
+        )
+    ]
+
+
+def test_list_cameras_reports_probe_failure_honestly() -> None:
+    def probe(_device: str) -> tuple[str, ...]:
+        raise CameraProbeError("v4l2-ctl unavailable")
+
+    cameras = list_cameras(
+        by_id_glob=lambda pattern: ["/dev/video0"] if pattern == "/dev/video*" else [],
+        capability_probe=probe,
+    )
+
+    assert cameras == [
+        CameraInfo(
+            camera_id="video0",
+            device="/dev/video0",
+            label="video0",
+            capabilities=(),
+            capability_error="v4l2-ctl unavailable",
+        )
+    ]
