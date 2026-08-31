@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import platform
 import subprocess
+import sys
 import time
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
-from typing import Callable, Protocol, TextIO, TypeVar
+from typing import TYPE_CHECKING, Any, Callable, Protocol, TextIO, TypeVar
 
 import cv2
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -29,6 +32,20 @@ from alice.perception import CapturedFrame, FrameSource
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _T = TypeVar("_T")
 _ABORTED_REASON = "capture aborted; see failure metadata"
+_CONCLUSION_TEMPLATE_PATH = (
+    _REPO_ROOT
+    / "docs"
+    / "experiments"
+    / "templates"
+    / "passive-blendshape-conclusion.md"
+)
+
+if TYPE_CHECKING:
+    from alice.analysis.blendshape_stability import (
+        AcceptanceCheck,
+        AcceptanceResult,
+        StabilityMetrics,
+    )
 
 
 class BlendshapeObserver(Protocol):
@@ -53,6 +70,7 @@ class PassiveCaptureConfig(BaseModel):
     sample_interval_ms: int = Field(ge=0)
     retain_frames: bool = False
     retention_approval: NonEmptyString | None = None
+    acceptance_thresholds: dict[str, Any] | None = None
     operator_metadata: dict[str, NonEmptyString] = Field(default_factory=dict)
 
     @model_validator(mode="after")
@@ -167,6 +185,78 @@ def run_passive_capture(
     )
     _write_json_atomic(run_dir / "manifest.json", manifest.model_dump(mode="json"))
     return manifest
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="alice-passive-capture")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    analyze_parser = subparsers.add_parser("analyze")
+    analyze_parser.add_argument("run_dir", type=Path)
+    return parser
+
+
+def main(argv: Sequence[str] | None = None, *, stdout: TextIO | None = None) -> int:
+    output = stdout or sys.stdout
+    args = build_parser().parse_args(list(argv) if argv is not None else None)
+    if args.command == "analyze":
+        analyze_passive_run(args.run_dir, stdout=output)
+        return 0
+    return 1
+
+
+def analyze_passive_run(
+    run_dir: Path,
+    *,
+    stdout: TextIO | None = None,
+) -> ArtifactManifest:
+    """Analyze one completed passive capture run and update its conclusion."""
+
+    from alice.analysis.blendshape_stability import (
+        AcceptanceThresholds,
+        analyze_stability,
+        phase_1_acceptance,
+    )
+
+    output = stdout or sys.stdout
+    resolved_run_dir = run_dir.resolve()
+    manifest_path = resolved_run_dir / "manifest.json"
+    manifest = ArtifactManifest.model_validate_json(
+        manifest_path.read_text(encoding="utf-8")
+    )
+    metrics = analyze_stability(resolved_run_dir)
+    thresholds_payload = manifest.config.get("acceptance_thresholds")
+    thresholds = (
+        None
+        if thresholds_payload is None
+        else AcceptanceThresholds.model_validate(thresholds_payload)
+    )
+    acceptance = phase_1_acceptance(metrics, thresholds)
+
+    metrics_path = resolved_run_dir / "stability-metrics.json"
+    _write_json_atomic(metrics_path, metrics.model_dump(mode="json"))
+    conclusion_path = resolved_run_dir / "phase-1-conclusion.md"
+    conclusion_text = _render_phase_1_conclusion(
+        manifest=manifest,
+        metrics=metrics,
+        acceptance=acceptance,
+    )
+    _write_bytes_atomic(conclusion_path, conclusion_text.encode("utf-8"))
+
+    artifacts = dict(manifest.artifacts)
+    artifacts[metrics_path.name] = _artifact_record(metrics_path)
+    artifacts[conclusion_path.name] = _artifact_record(conclusion_path)
+    updated_manifest = manifest.model_copy(
+        update={
+            "artifacts": artifacts,
+            "conclusion": f"Phase 1 acceptance: {acceptance.outcome}",
+        }
+    )
+    _write_json_atomic(manifest_path, updated_manifest.model_dump(mode="json"))
+
+    output.write(
+        f"{updated_manifest.run_id}\t{acceptance.outcome}\t{resolved_run_dir}\n"
+    )
+    return updated_manifest
 
 
 def _prepare_run_dir(output_dir: Path) -> Path:
@@ -341,6 +431,87 @@ def _dependency_lock_sha256() -> str | None:
     if not lock_path.is_file():
         return None
     return _sha256_path(lock_path)
+
+
+def _render_phase_1_conclusion(
+    *,
+    manifest: ArtifactManifest,
+    metrics: StabilityMetrics,
+    acceptance: AcceptanceResult,
+) -> str:
+    template = _CONCLUSION_TEMPLATE_PATH.read_text(encoding="utf-8")
+    operator_metadata = manifest.config.get("operator_metadata", {})
+    if not isinstance(operator_metadata, dict):
+        operator_metadata = {}
+
+    threshold_lines = _format_threshold_lines(acceptance)
+    anomaly_lines = _format_anomaly_lines(metrics, acceptance)
+    return template.format(
+        outcome=acceptance.outcome,
+        run_id=manifest.run_id,
+        camera_id=metrics.camera_id or manifest.config.get("camera_id", "unknown"),
+        camera_placement=operator_metadata.get("camera_placement", "not recorded"),
+        lighting=operator_metadata.get("lighting", "not recorded"),
+        detector=metrics.detector or "unknown",
+        detector_model_sha256=metrics.detector_model_sha256 or "unknown",
+        privacy_retention=_privacy_retention_summary(manifest.config),
+        threshold_lines=threshold_lines,
+        anomaly_lines=anomaly_lines,
+    )
+
+
+def _privacy_retention_summary(config: dict[str, Any]) -> str:
+    if not config.get("retain_frames", False):
+        return "Frame retention disabled."
+
+    retention_approval = config.get("retention_approval")
+    if retention_approval:
+        return f"Frame retention enabled with approval {retention_approval}."
+    return "Frame retention enabled without recorded approval."
+
+
+def _format_threshold_lines(acceptance: AcceptanceResult) -> str:
+    if not acceptance.checks:
+        return "- No thresholds configured."
+
+    return "\n".join(_format_check_line(check) for check in acceptance.checks)
+
+
+def _format_check_line(check: AcceptanceCheck) -> str:
+    observed = "undefined" if check.observed is None else f"{check.observed:.6f}"
+    return (
+        f"- {check.metric_path}: expected {check.comparator} {check.expected:.6f}; "
+        f"observed {observed}; status {check.status}"
+    )
+
+
+def _format_anomaly_lines(
+    metrics: StabilityMetrics,
+    acceptance: AcceptanceResult,
+) -> str:
+    anomalies: list[str] = []
+    invalid_count = metrics.total_frames - metrics.valid_frames
+    if invalid_count:
+        details = ", ".join(
+            f"{reason}={count}" for reason, count in metrics.invalid_reasons.items()
+        )
+        anomalies.append(f"- {invalid_count} invalid observations ({details}).")
+
+    for name, category in metrics.categories.items():
+        if category.lag1_autocorrelation is None:
+            anomalies.append(
+                f"- {name} lag-1 autocorrelation was undefined because the series "
+                "was too short or constant."
+            )
+
+    anomalies.extend(f"- {reason}." for reason in acceptance.inconclusive_reasons)
+    if not anomalies:
+        anomalies.append("- None observed.")
+    return "\n".join(anomalies)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
 
 
 def _failure_record(stage: str, error: BaseException) -> FailureRecord:
