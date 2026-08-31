@@ -12,7 +12,7 @@ Do not use this document as approval. A hardware run requires a fresh operator r
 - Recorded interfaces:
   - interface 00: `/dev/serial/by-id/usb-Pololu_Corporation_Pololu_Mini_Maestro_12-Channel_USB_Servo_Controller_00037376-if00`
   - interface 02: `/dev/serial/by-id/usb-Pololu_Corporation_Pololu_Mini_Maestro_12-Channel_USB_Servo_Controller_00037376-if02`
-- The functional command-port role of interface 00 is **unresolved**. Confirm it without Set Target before approval. The preparation code also resolves the stable symlink through Linux sysfs and independently requires USB serial `00037376` and interface number `00`; the filename alone is not identity evidence.
+- Official Pololu Linux port ordering plus read-only udev/sysfs/USB evidence identifies interface 00 as this unit's Command Port; see `hardware/maestro-command-port-evidence-2026-09-01.md`. Reconfirm it without Set Target immediately before approval. The preparation code also resolves the stable symlink through Linux sysfs and independently requires USB serial `00037376` and interface number `00`; the filename alone is not identity evidence.
 - Reviewed manifest file SHA-256: `626a37d265bc7f2b055682cc1b1d287b1f0d659040d60ef4e5634ee675c05a8a`.
 - Calibration SHA-256: `8ad9ad1f59dc70c47515c9a37b4531c5070c22a40ed66fb673d0e72a0d3dadb4`.
 - `mouth_open`: channel 6; firmware speed `0`, acceleration `11`; Home `5059` quarter-microseconds; software range `4608..5440`.
@@ -34,7 +34,7 @@ With master servo power OFF:
 3. Establish supply/current limits from reviewed electrical evidence. Record a typed evidence ID, source and exact source-document SHA-256, review time and reviewer, supply voltage, current limit, and scope. Preparation verifies both the evidence-file hash and source-document hash. This remains unresolved: the repository config deliberately contains `REQUIRED_...` evidence path/hash placeholders and no safe values.
 4. Confirm the emergency power-removal control works and remains reachable.
 5. Confirm no ROS, Maestro Control Center, serial terminal, prior Alice process, or other program owns either Maestro interface.
-6. Confirm, without Set Target, that interface 00 is the command interface for serial `00037376`. This remains unresolved in the repository.
+6. Reconfirm, without Set Target, that interface 00 is the command interface for serial `00037376`, consistent with `hardware/maestro-command-port-evidence-2026-09-01.md`.
 7. Confirm Phase 1 camera acceptance from a fixed, locked setup. The recorded pilot currently **failed** its frozen stability thresholds, so this gate is unresolved.
 8. Copy the hardware YAML outside version control; replace the `REQUIRED_...` run ID, approval ID, enable token, electrical-evidence path, and electrical-evidence hash. Never commit the token or proprietary evidence.
 9. Run the dry verifier. It prints the exact hashes and has no serial-open or Set Target path:
