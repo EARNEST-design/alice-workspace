@@ -293,7 +293,6 @@ def _run_identification_core(
     sleeper: Callable[[float], object],
     retained_manifest: HardwareManifest | None = None,
     retained_manifest_sha256: str | None = None,
-    retained_config_sha256: str | None = None,
     hardware_provenance: HardwareIdentificationProvenance | None = None,
 ) -> ArtifactManifest:
     """Run the deterministic sequence for a trusted composition root.
@@ -502,7 +501,7 @@ def _run_identification_core(
                 config.hardware_manifest_canonical_sha256
             ),
             calibration_sha256=config.calibration_sha256,
-            config_sha256=retained_config_sha256 or _config_sha256(config),
+            config_sha256=_config_sha256(config),
             hardware_provenance=hardware_provenance,
         ),
     )

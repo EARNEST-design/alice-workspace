@@ -220,7 +220,8 @@ class IndependentWatchdogProvenance(BaseModel):
 class HardwareIdentificationProvenance(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    raw_config_sha256: Sha256Hex
+    approved_raw_config_sha256: Sha256Hex
+    execution_config_sha256: Sha256Hex
     hardware_approval: HardwareApprovalProvenance
     power_challenge: PowerChallengeProvenance
     power_confirmation: PowerConfirmationProvenance
@@ -228,6 +229,37 @@ class HardwareIdentificationProvenance(BaseModel):
     usb_identity: UsbIdentityProvenance
     read_only_preflight: ReadOnlyControllerPreflightProvenance
     independent_watchdog: IndependentWatchdogProvenance
+
+    @model_validator(mode="after")
+    def validate_bound_identities(self) -> HardwareIdentificationProvenance:
+        if not (
+            self.approved_raw_config_sha256
+            == self.hardware_approval.config_sha256
+            == self.power_challenge.config_sha256
+            == self.power_confirmation.config_sha256
+        ):
+            raise ValueError("raw approved config identity is not consistently bound")
+        if not (
+            self.hardware_approval.electrical_evidence_sha256
+            == self.power_challenge.electrical_evidence_sha256
+            == self.power_confirmation.electrical_evidence_sha256
+            == self.electrical_safety.evidence_sha256
+        ):
+            raise ValueError("electrical evidence identity is not consistently bound")
+        if not (
+            self.hardware_approval.run_id
+            == self.power_challenge.run_id
+            == self.power_confirmation.run_id
+        ):
+            raise ValueError("hardware provenance run identity mismatch")
+        if not (
+            self.power_challenge.challenge_id
+            == self.power_confirmation.challenge_id
+            and self.power_challenge.challenge_sha256
+            == self.power_confirmation.challenge_sha256
+        ):
+            raise ValueError("power confirmation challenge identity mismatch")
+        return self
 
 
 class IdentificationRunMetadata(BaseModel):
@@ -247,6 +279,16 @@ class IdentificationRunMetadata(BaseModel):
     calibration_sha256: Sha256Hex
     config_sha256: Sha256Hex
     hardware_provenance: HardwareIdentificationProvenance | None = None
+
+    @model_validator(mode="after")
+    def validate_hardware_config_identity(self) -> IdentificationRunMetadata:
+        if (
+            self.hardware_provenance is not None
+            and self.config_sha256
+            != self.hardware_provenance.execution_config_sha256
+        ):
+            raise ValueError("execution config checksum does not match provenance")
+        return self
 
 
 class FailureRecord(BaseModel):

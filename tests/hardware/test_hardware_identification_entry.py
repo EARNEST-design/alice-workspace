@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import copy
 import gc
 import hashlib
 import inspect
 import json
+import os
+import pickle
 import time
 from dataclasses import fields, replace
 from datetime import UTC, datetime, timedelta
@@ -233,7 +236,7 @@ def test_challenge_is_frozen_and_mutated_copy_burns_prepared_authority(
         result,
         challenge=result.challenge.model_copy(update={"run_id": "mutated"}),
     )
-    with pytest.raises(ValueError, match="challenge"):
+    with pytest.raises(ValueError, match="authority"):
         execute_prepared_hardware_identification(
             prepared=copied,
             observer=object(),
@@ -243,6 +246,67 @@ def test_challenge_is_frozen_and_mutated_copy_burns_prepared_authority(
     assert RecordingMaestro.instances[-1].closed is True
     with pytest.raises(ValueError, match="unknown|consumed"):
         cancel_prepared_hardware_identification(result)
+
+
+def test_copied_capability_is_unusable_and_burns_original(prepared) -> None:
+    result, _, _ = prepared
+    copied = PreparedHardwareHandle(
+        challenge=result.challenge,
+        issuance_token=SecretStr(result.issuance_token.get_secret_value()),
+    )
+
+    with pytest.raises(ValueError, match="authority"):
+        cancel_prepared_hardware_identification(copied)
+    assert RecordingMaestro.instances[-1].closed is True
+    with pytest.raises(ValueError, match="unknown|consumed"):
+        cancel_prepared_hardware_identification(result)
+
+
+def test_prepared_capability_disallows_copy_and_serialization(prepared) -> None:
+    result, _, _ = prepared
+    for operation in (
+        lambda: copy.copy(result),
+        lambda: copy.deepcopy(result),
+        lambda: pickle.dumps(result),
+    ):
+        with pytest.raises(TypeError, match="cannot be (copied|serialized)"):
+            operation()
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX fork")
+def test_fork_detaches_child_authority_and_parent_remains_valid(prepared) -> None:
+    result, _, _ = prepared
+    read_fd, write_fd = os.pipe()
+    pid = os.fork()
+    if pid == 0:
+        os.close(read_fd)
+        try:
+            rejected = False
+            try:
+                cancel_prepared_hardware_identification(result)
+            except ValueError:
+                rejected = True
+            payload = json.dumps(
+                {
+                    "rejected": rejected,
+                    "closed": RecordingMaestro.instances[-1].closed,
+                }
+            ).encode()
+            os.write(write_fd, payload)
+        finally:
+            os.close(write_fd)
+            os._exit(0)
+
+    os.close(write_fd)
+    payload = os.read(read_fd, 4096)
+    os.close(read_fd)
+    _, status = os.waitpid(pid, 0)
+    assert os.waitstatus_to_exitcode(status) == 0
+    child = json.loads(payload)
+    assert child == {"rejected": True, "closed": True}
+    assert RecordingMaestro.instances[-1].closed is False
+    cancel_prepared_hardware_identification(result)
+    assert RecordingMaestro.instances[-1].closed is True
 
 
 def test_prepare_returns_zero_motion_challenge(prepared) -> None:
@@ -298,9 +362,14 @@ def test_execution_requires_new_confirmation_and_is_single_use(
     stored_config = captured["config"].model_dump(mode="json")
     assert "enable_token" not in stored_config
     assert "run-secret-not-in-repository" not in json.dumps(stored_config)
-    assert captured["retained_config_sha256"] == result.challenge.config_sha256
     provenance = captured["hardware_provenance"]
-    assert provenance.raw_config_sha256 == result.challenge.config_sha256
+    assert (
+        provenance.approved_raw_config_sha256 == result.challenge.config_sha256
+    )
+    execution_hash = hashlib.sha256(
+        json.dumps(stored_config, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    assert provenance.execution_config_sha256 == execution_hash
     assert provenance.usb_identity.interface_number == "00"
     assert provenance.read_only_preflight.issued_set_target is False
     assert provenance.independent_watchdog.survives_process_death is False

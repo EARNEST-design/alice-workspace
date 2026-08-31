@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import platform
 import secrets
 import subprocess
@@ -14,7 +15,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Never, SupportsIndex
 
 import yaml  # type: ignore[import-untyped]
 from pydantic import (
@@ -295,6 +296,8 @@ class _PreparedState:
         "_usb_identity",
         "_started_at",
         "_supervisor",
+        "handle_ref",
+        "issuing_pid",
         "challenge",
         "timer",
     )
@@ -334,6 +337,8 @@ class _PreparedState:
         self._supervisor = supervisor
         self._adapter = adapter
         self._started_at = datetime.now(UTC)
+        self.issuing_pid = os.getpid()
+        self.handle_ref: weakref.ReferenceType[PreparedHardwareHandle] | None = None
         self.timer: threading.Timer | None = None
 
 
@@ -344,9 +349,47 @@ class PreparedHardwareHandle:
     challenge: PowerEnableChallenge
     issuance_token: SecretStr
 
+    def __copy__(self) -> Never:
+        raise TypeError("prepared hardware handles cannot be copied")
+
+    def __deepcopy__(self, memo: object) -> Never:
+        raise TypeError("prepared hardware handles cannot be copied")
+
+    def __reduce__(self) -> Never:
+        raise TypeError("prepared hardware handles cannot be serialized")
+
+    def __reduce_ex__(self, protocol: SupportsIndex) -> Never:
+        raise TypeError("prepared hardware handles cannot be serialized")
+
 
 _registry_lock = threading.Lock()
 _prepared_registry: dict[str, _PreparedState] = {}
+
+
+def _before_fork() -> None:
+    _registry_lock.acquire()
+
+
+def _after_fork_parent() -> None:
+    _registry_lock.release()
+
+
+def _after_fork_child() -> None:
+    inherited = tuple(_prepared_registry.values())
+    _prepared_registry.clear()
+    _registry_lock.release()
+    for state in inherited:
+        if state.timer is not None:
+            state.timer.cancel()
+        _close_state(state, "prepared hardware authority detached after fork")
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(
+        before=_before_fork,
+        after_in_parent=_after_fork_parent,
+        after_in_child=_after_fork_child,
+    )
 
 
 def _close_state(state: _PreparedState, detail: str) -> None:
@@ -386,6 +429,14 @@ def _consume_handle(handle: PreparedHardwareHandle) -> _PreparedState:
     state = _remove_state(token)
     if state is None:
         raise ValueError("prepared hardware handle is unknown or consumed")
+    authority_ok = (
+        state.issuing_pid == os.getpid()
+        and state.handle_ref is not None
+        and state.handle_ref() is handle
+    )
+    if not authority_ok:
+        _close_state(state, "prepared hardware authority identity failed")
+        raise ValueError("prepared hardware handle authority is invalid")
     challenge_ok = (
         handle.challenge == state.challenge
         and _challenge_digest(handle.challenge) == handle.challenge.challenge_sha256
@@ -688,6 +739,11 @@ def prepare_hardware_identification(
             adapter=adapter,
         )
         issuance_token = secrets.token_urlsafe(48)
+        handle = PreparedHardwareHandle(
+            challenge=challenge,
+            issuance_token=SecretStr(issuance_token),
+        )
+        state.handle_ref = weakref.ref(handle)
         with _registry_lock:
             while issuance_token in _prepared_registry:
                 issuance_token = secrets.token_urlsafe(48)
@@ -702,10 +758,6 @@ def prepare_hardware_identification(
         timer.daemon = True
         state.timer = timer
         timer.start()
-        handle = PreparedHardwareHandle(
-            challenge=challenge,
-            issuance_token=SecretStr(issuance_token),
-        )
         weakref.finalize(handle, _expire_or_abandon, issuance_token)
         return handle
     except BaseException:
@@ -822,8 +874,16 @@ def _hardware_provenance(
     approval_values = state._approval.model_dump(
         mode="python", exclude={"enable_token", "confirmation_text"}
     )
+    execution_config_sha256 = _sha256_bytes(
+        json.dumps(
+            state._execution_config.model_dump(mode="json"),
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    )
     return HardwareIdentificationProvenance(
-        raw_config_sha256=state.challenge.config_sha256,
+        approved_raw_config_sha256=state.challenge.config_sha256,
+        execution_config_sha256=execution_config_sha256,
         hardware_approval=HardwareApprovalProvenance.model_validate(
             approval_values
         ),
@@ -891,7 +951,8 @@ def _publish_unexpected_failure(
             "schema_version": "hardware-failure/v1",
             "run_id": config.run_id,
             "error_type": type(error).__name__,
-            "config_sha256": prepared.challenge.config_sha256,
+            "approved_raw_config_sha256": prepared.challenge.config_sha256,
+            "execution_config_sha256": provenance.execution_config_sha256,
             "manifest_sha256": prepared.challenge.manifest_sha256,
             "electrical_evidence_sha256": (
                 prepared.challenge.electrical_evidence_sha256
@@ -946,7 +1007,7 @@ def _publish_unexpected_failure(
             hardware_manifest_sha256=prepared.challenge.manifest_sha256,
             hardware_manifest_canonical_sha256=prepared._manifest.canonical_sha256,
             calibration_sha256=prepared._manifest.calibration_sha256,
-            config_sha256=prepared.challenge.config_sha256,
+            config_sha256=provenance.execution_config_sha256,
             hardware_provenance=provenance,
         ),
     )
@@ -1007,7 +1068,6 @@ def execute_prepared_hardware_identification(
             sleeper=time.sleep,
             retained_manifest=state._manifest,
             retained_manifest_sha256=state.challenge.manifest_sha256,
-            retained_config_sha256=state.challenge.config_sha256,
             hardware_provenance=_hardware_provenance(state, confirmation),
         )
     except BaseException as error:

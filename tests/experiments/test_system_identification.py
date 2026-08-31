@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 import yaml
 
+from alice.analysis.system_identification import analyze_identification_artifacts
 from alice.contracts.actuation import ActuatorStatus, ActuatorStatusState
 from alice.contracts.blendshapes import (
     BlendshapeObservation,
@@ -469,9 +470,17 @@ def test_private_core_records_raw_config_and_checksummed_hardware_provenance(
         permit_verifier=supervisor.actuation_permit_verifier,
     )
     raw_config_sha256 = "e" * 64
+    execution_config_sha256 = hashlib.sha256(
+        json.dumps(
+            config(manifest).model_dump(mode="json"),
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
     provenance = system_identification.HardwareIdentificationProvenance.model_validate(
         {
-            "raw_config_sha256": raw_config_sha256,
+            "approved_raw_config_sha256": raw_config_sha256,
+            "execution_config_sha256": execution_config_sha256,
             "hardware_approval": {
                 "approval_id": "approval",
                 "run_id": "mock-identification-001",
@@ -555,17 +564,18 @@ def test_private_core_records_raw_config_and_checksummed_hardware_provenance(
         output_dir=run_dir,
         clock=clock,
         sleeper=clock.sleep,
-        retained_config_sha256=raw_config_sha256,
         hardware_provenance=provenance,
     )
 
     assert result.identification_metadata is not None
-    assert result.identification_metadata.config_sha256 == raw_config_sha256
+    assert result.identification_metadata.config_sha256 == execution_config_sha256
     assert result.identification_metadata.hardware_provenance == provenance
     record = result.artifacts["hardware-provenance.json"]
     assert record.sha256 == hashlib.sha256(
         (run_dir / "hardware-provenance.json").read_bytes()
     ).hexdigest()
+    metrics = analyze_identification_artifacts([run_dir])
+    assert metrics.session_ids == ("mock-identification-001",)
 
 
 @pytest.mark.parametrize("failure", ["camera", "variance", "timeout"])
