@@ -25,6 +25,16 @@ class ArtifactRecord(BaseModel):
     size_bytes: int = Field(ge=0)
 
 
+class FailureRecord(BaseModel):
+    """Sanitized structured failure details for aborted runs."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    stage: NonEmptyString
+    error_type: NonEmptyString
+    message: NonEmptyString
+
+
 class ArtifactManifest(BaseModel):
     """Immutable metadata describing one passive capture run."""
 
@@ -46,4 +56,5 @@ class ArtifactManifest(BaseModel):
     platform_release: NonEmptyString
     platform_machine: NonEmptyString
     aborted_reason: NonEmptyString | None = None
+    failure: FailureRecord | None = None
     conclusion: NonEmptyString | None = None

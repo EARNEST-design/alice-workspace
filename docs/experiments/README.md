@@ -12,7 +12,8 @@ uv run alice-camera list
 
 That command may inspect video-device capabilities but must stay separate from
 capture. A reviewed passive run should use a stable camera identifier, 640x480
-at 10 samples/second for 120 seconds (`sample_count: 1200`,
-`sample_interval_ms: 100`), and operator-entered notes for camera placement and
-lighting. The example file is
+at 10 samples/second for 120 seconds (`requested_width: 640`,
+`requested_height: 480`, `requested_fps: 10`, `duration_seconds: 120`,
+`sample_count: 1200`, `sample_interval_ms: 100`), and operator-entered notes
+for camera placement and lighting. The example file is
 `config/experiments/passive-alice-face.example.yaml`.
