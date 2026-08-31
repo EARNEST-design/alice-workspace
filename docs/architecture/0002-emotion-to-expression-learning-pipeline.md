@@ -47,6 +47,14 @@ versions, configuration, artifact checksums, and a short conclusion. Derived
 blendshape observations are stored by default. Raw frames or video require an
 explicit retention, consent, and privacy decision in the run configuration.
 
+The capture manifest is never extended by analysis. Each offline analysis is a
+separate immutable generation whose manifest records analyzer package and Git
+identity, exact capture-manifest and observation hashes, typed thresholds, and
+hashes of all derived metrics, acceptance, and conclusion artifacts. A
+generation is published only by an atomic directory rename after its files and
+directories are synced. Cross-run repeatability uses the same versioned
+generation mechanism and typed thresholds rather than operator metadata.
+
 Passive experiments measure:
 
 - detection rate and loss-of-face behavior;

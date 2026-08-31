@@ -5,7 +5,14 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    FiniteFloat,
+    model_validator,
+)
 
 from alice.contracts.blendshapes import NonEmptyString, Sha256Hex
 
@@ -20,6 +27,7 @@ class FailureCategory(StrEnum):
     CAPTURE_ERROR = "capture_error"
     OBSERVER_ERROR = "observer_error"
     OBSERVATION_IDENTITY_MISMATCH = "observation_identity_mismatch"
+    OBSERVATION_SEQUENCE_INVALID = "observation_sequence_invalid"
     FRAME_ENCODING_ERROR = "frame_encoding_error"
 
 
@@ -31,6 +39,59 @@ class ArtifactRecord(BaseModel):
     path: NonEmptyString
     sha256: Sha256Hex
     size_bytes: int = Field(ge=0)
+
+
+class SettingAvailability(StrEnum):
+    AVAILABLE = "available"
+    UNAVAILABLE = "unavailable"
+
+
+class CameraPropertySetting(BaseModel):
+    """An actual negotiated camera property and requested-set outcome."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    availability: SettingAvailability
+    value: FiniteFloat | None
+    set_succeeded: bool | None
+
+    @model_validator(mode="after")
+    def validate_value_availability(self) -> CameraPropertySetting:
+        if self.availability is SettingAvailability.AVAILABLE and self.value is None:
+            raise ValueError("available camera setting requires a value")
+        if (
+            self.availability is SettingAvailability.UNAVAILABLE
+            and self.value is not None
+        ):
+            raise ValueError("unavailable camera setting must not have a value")
+        return self
+
+
+class NegotiatedCameraSettings(BaseModel):
+    """Actual camera state recorded in every capture manifest."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    width: CameraPropertySetting
+    height: CameraPropertySetting
+    fps: CameraPropertySetting
+    focus: CameraPropertySetting
+    exposure: CameraPropertySetting
+
+    @classmethod
+    def unavailable(cls) -> NegotiatedCameraSettings:
+        unavailable = CameraPropertySetting(
+            availability=SettingAvailability.UNAVAILABLE,
+            value=None,
+            set_succeeded=None,
+        )
+        return cls(
+            width=unavailable,
+            height=unavailable,
+            fps=unavailable,
+            focus=unavailable,
+            exposure=unavailable,
+        )
 
 
 class FailureRecord(BaseModel):
@@ -62,6 +123,31 @@ class ArtifactManifest(BaseModel):
     platform_system: NonEmptyString
     platform_release: NonEmptyString
     platform_machine: NonEmptyString
+    camera_settings: NegotiatedCameraSettings
     aborted_reason: NonEmptyString | None = None
     failure: FailureRecord | None = None
     conclusion: NonEmptyString | None = None
+
+    @model_validator(mode="after")
+    def validate_manifest_state(self) -> ArtifactManifest:
+        if self.ended_at < self.started_at:
+            raise ValueError("ended_at must not precede started_at")
+        for key, artifact in self.artifacts.items():
+            if key != artifact.path:
+                raise ValueError("artifact key must equal artifact path")
+        if self.conclusion is not None:
+            raise ValueError("capture manifest conclusion must remain unset")
+
+        if self.status is RunStatus.COMPLETED:
+            if self.failure is not None or self.aborted_reason is not None:
+                raise ValueError("completed manifest must not contain failure state")
+            observation_artifact = self.artifacts.get("observations.jsonl")
+            if observation_artifact is None:
+                raise ValueError("completed manifest requires observations.jsonl")
+            if observation_artifact.path != "observations.jsonl":
+                raise ValueError(
+                    "observations artifact path must be observations.jsonl"
+                )
+        elif self.failure is None or self.aborted_reason is None:
+            raise ValueError("aborted manifest requires failure and aborted_reason")
+        return self

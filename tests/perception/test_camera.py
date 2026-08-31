@@ -7,6 +7,7 @@ from alice.perception.camera import (
     CameraInfo,
     CameraProbeError,
     OpenCVCamera,
+    SettingAvailability,
     list_cameras,
 )
 
@@ -28,6 +29,8 @@ class FakeCapture:
         self.settings: list[tuple[int, float]] = []
         self.released = False
         self.raise_on_setting: set[int] = set()
+        self.set_results: dict[int, bool] = {}
+        self.get_results: dict[int, float] = {}
 
     def isOpened(self) -> bool:
         if self._raise_on_is_opened is not None:
@@ -44,7 +47,10 @@ class FakeCapture:
         if prop_id in self.raise_on_setting:
             raise RuntimeError(f"set failed for {prop_id}")
         self.settings.append((prop_id, value))
-        return True
+        return self.set_results.get(prop_id, True)
+
+    def get(self, prop_id: int) -> float:
+        return self.get_results.get(prop_id, float("nan"))
 
 
 def test_camera_does_not_open_device_until_explicit_open() -> None:
@@ -185,3 +191,37 @@ def test_list_cameras_reports_probe_failure_honestly() -> None:
             capability_error="v4l2-ctl unavailable",
         )
     ]
+
+
+def test_camera_records_negotiated_settings_and_failed_property_writes() -> None:
+    import cv2
+
+    capture = FakeCapture()
+    capture.set_results[cv2.CAP_PROP_FPS] = False
+    capture.get_results = {
+        cv2.CAP_PROP_FRAME_WIDTH: 640.0,
+        cv2.CAP_PROP_FRAME_HEIGHT: 480.0,
+        cv2.CAP_PROP_FPS: 30.0,
+        cv2.CAP_PROP_FOCUS: 0.0,
+        cv2.CAP_PROP_EXPOSURE: -6.0,
+    }
+    camera = OpenCVCamera(
+        camera_id="alice-face-webcam",
+        device="/dev/video0",
+        width=640,
+        height=480,
+        fps=10.0,
+        capture_factory=lambda _device: capture,
+    )
+
+    camera.open()
+    settings = camera.negotiated_settings
+
+    assert settings.width.value == 640.0
+    assert settings.width.set_succeeded is True
+    assert settings.height.value == 480.0
+    assert settings.fps.value == 30.0
+    assert settings.fps.set_succeeded is False
+    assert settings.focus.availability is SettingAvailability.AVAILABLE
+    assert settings.focus.value == 0.0
+    assert settings.exposure.value == -6.0

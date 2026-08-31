@@ -4,20 +4,21 @@ from __future__ import annotations
 
 import argparse
 import os
+import tempfile
 import urllib.request
-from datetime import date
 from hashlib import sha256
 from pathlib import Path
-from typing import Annotated, Callable, Literal, Protocol, TextIO
+from typing import Callable, Protocol, TextIO
 
-import yaml  # type: ignore[import-untyped]
-from pydantic import BaseModel, ConfigDict, StringConstraints
+from pydantic import BaseModel, ConfigDict
 
-Sha256Hex = Annotated[
-    str,
-    StringConstraints(pattern=r"^[0-9a-f]{64}$"),
-]
-NonEmptyString = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+from alice.contracts.blendshapes import Sha256Hex
+from alice.perception.model_manifest import (
+    PINNED_MANIFEST,
+    ModelManifest,
+    load_model_manifest,
+    require_pinned_manifest,
+)
 
 
 class ResponseLike(Protocol):
@@ -26,21 +27,6 @@ class ResponseLike(Protocol):
     def __exit__(self, *_args: object) -> None: ...
 
     def read(self, size: int = -1) -> bytes: ...
-
-
-class ModelManifest(BaseModel):
-    """Validated manifest for the pinned MediaPipe task bundle."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    schema_version: Literal["mediapipe-model-manifest/v1"]
-    model_id: Literal["mediapipe-face-landmarker-v1"]
-    model_asset_name: NonEmptyString
-    source_url: NonEmptyString
-    published_model_identity: NonEmptyString
-    sha256: Sha256Hex
-    retrieved_at: date
-    permitted_use_reference: NonEmptyString
 
 
 class InstalledModel(BaseModel):
@@ -57,27 +43,6 @@ TRACKED_MANIFEST_PATH = (
     Path(__file__).resolve().parent.parent
     / "config/models/mediapipe-face-landmarker-v1.yaml"
 ).resolve()
-PINNED_MANIFEST = ModelManifest.model_validate(
-    {
-        "schema_version": "mediapipe-model-manifest/v1",
-        "model_id": "mediapipe-face-landmarker-v1",
-        "model_asset_name": "face_landmarker.task",
-        "source_url": (
-            "https://storage.googleapis.com/mediapipe-models/face_landmarker/"
-            "face_landmarker/float16/latest/face_landmarker.task"
-        ),
-        "published_model_identity": (
-            "MediaPipe Face Landmarker float16 latest "
-            "(storage generation 1683136941468629, "
-            "last_modified 2023-05-03T18:02:21Z)"
-        ),
-        "sha256": "64184e229b263107bc2b804c6625db1341ff2bb731874b0bcc2fe6544e0bc9ff",
-        "retrieved_at": "2026-08-31",
-        "permitted_use_reference": "https://ai.google.dev/edge/mediapipe/solutions/guide",
-    }
-)
-
-
 def load_manifest(manifest_path: Path) -> ModelManifest:
     resolved_path = manifest_path.resolve()
     if resolved_path != TRACKED_MANIFEST_PATH:
@@ -85,12 +50,8 @@ def load_manifest(manifest_path: Path) -> ModelManifest:
             f"manifest_path must be the tracked manifest: {TRACKED_MANIFEST_PATH}"
         )
 
-    with manifest_path.open("r", encoding="utf-8") as handle:
-        payload = yaml.safe_load(handle)
-    manifest = ModelManifest.model_validate(payload)
-    if manifest != PINNED_MANIFEST:
-        raise ValueError("tracked manifest does not match pinned provenance")
-    return manifest
+    manifest = load_model_manifest(manifest_path)
+    return require_pinned_manifest(manifest, pinned_manifest=PINNED_MANIFEST)
 
 
 def install_model(
@@ -101,12 +62,22 @@ def install_model(
 ) -> InstalledModel:
     manifest = load_manifest(manifest_path)
     install_dir.mkdir(parents=True, exist_ok=True)
-    temp_path = install_dir / f".{manifest.model_asset_name}.tmp"
     final_path = install_dir / manifest.model_asset_name
     digest = sha256()
+    temp_fd, temp_name = tempfile.mkstemp(
+        prefix=f".{manifest.model_asset_name}.",
+        suffix=".tmp",
+        dir=install_dir,
+    )
+    temp_path = Path(temp_name)
+    os.fchmod(temp_fd, 0o600)
 
     try:
-        with urlopen(manifest.source_url) as response, temp_path.open("wb") as handle:
+        with (
+            urlopen(manifest.source_url) as response,
+            os.fdopen(temp_fd, "wb") as handle,
+        ):
+            temp_fd = -1
             while True:
                 chunk = response.read(1024 * 1024)
                 if chunk == b"":
@@ -118,17 +89,27 @@ def install_model(
 
         observed_sha256 = digest.hexdigest()
         if observed_sha256 != manifest.sha256:
-            temp_path.unlink(missing_ok=True)
             raise ValueError(
                 "SHA-256 mismatch: "
                 f"expected {manifest.sha256} but downloaded {observed_sha256}"
             )
 
-        temp_path.replace(final_path)
+        os.replace(temp_path, final_path)
+        _fsync_directory(install_dir)
         return InstalledModel(path=final_path, sha256=observed_sha256)
     finally:
-        if temp_path.exists():
-            temp_path.unlink()
+        if temp_fd >= 0:
+            os.close(temp_fd)
+        temp_path.unlink(missing_ok=True)
+
+
+def _fsync_directory(path: Path) -> None:
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    directory_fd = os.open(path, flags)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
 
 
 def build_parser() -> argparse.ArgumentParser:

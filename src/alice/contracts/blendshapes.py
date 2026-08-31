@@ -43,6 +43,7 @@ class BlendshapeObservation(BaseModel):
 
     schema_version: Literal["blendshape-observation/v1"]
     captured_at: AwareDatetime
+    observed_at: AwareDatetime | None = None
     monotonic_ns: Annotated[int, Field(ge=0)]
     camera_id: NonEmptyString
     run_id: NonEmptyString

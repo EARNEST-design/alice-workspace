@@ -7,7 +7,12 @@ requested_fps: 10
 duration_seconds: 120
 sample_count: 1200
 sample_interval_ms: 100
+maximum_observation_age_ms: 250
 retain_frames: false
+retention_policy:
+  policy_id: "derived-observations-365d"
+  mode: "derived_observations_only"
+  retention_duration_days: 365
 acceptance_thresholds:
   minimum_detection_rate: 0.995
   categories:
@@ -47,29 +52,33 @@ acceptance_thresholds:
       maximum_standard_deviation: 0.044
       maximum_percentile_range: 0.111
       maximum_warmup_drift: 0.015
-operator_metadata:
-  usb_identity: "Logitech HD Webcam C525, serial 79C73260"
-  stable_capture_selector: "/dev/v4l/by-id/usb-046d_HD_Webcam_C525_79C73260-video-index0"
-  stable_metadata_selector: "/dev/v4l/by-id/usb-046d_HD_Webcam_C525_79C73260-video-index1"
-  future_user_camera_selector: "/dev/v4l/by-id/usb-046d_HD_Pro_Webcam_C920_BF4BEEAF-video-index0"
-  camera_hub_note: "C525 inventory path pci-0000:75:00.3-usb-0:3:1.2; future user-facing C920 inventory path pci-0000:75:00.4-usb-0:2.3:1.0"
-  supported_mode: "C525 index0 supports 640x480 at 30/10/5 fps, 1280x720 at 30/10/5 fps, and 1920x1080 at 30/10/5 fps in read-only inventory"
-  camera_placement: "User reported the webcam is pointed at Alice's face"
-  distance: "unknown"
-  angle: "unknown"
-  lighting: "unknown"
-  focus: "unknown"
-  exposure: "unknown"
-  preview_confirmation_utc: "2026-08-31T10:42:22Z"
-  preview_confirmation_local: "2026-08-31T18:42:22+0800 HKT"
-  full_face_framing: "Confirmed in alice-camera preview on the C525 selector at 2026-08-31T10:42:22Z"
-  participant_exclusion: "Confirmed in alice-camera preview at 2026-08-31T10:42:22Z; no participant was visible"
-  preview_tracking: "Confirmed in alice-camera preview at 2026-08-31T10:42:22Z; overlay tracked Alice correctly"
-  preview_window_state: "The preview window was closed before replacement capture"
-  obs_status: "OBS Studio was closed before the confirmation preview and replacement capture"
-  stationary_setup: "Alice should remain stationary during capture"
-  preview_gate: "Satisfied on 2026-08-31 after alice-camera preview on the exact C525 selector"
-  raw_frame_retention: "Disabled; no raw frames or video may be saved"
-  threshold_reference_runs: "Derived only from archived exploratory runs passive-alice-face-warmup-20260831, passive-alice-face-repeat-1-20260831, and passive-alice-face-repeat-2-20260831"
-  threshold_formula: "Dominant categories are those with exploratory mean >= 0.30 in all three archived runs. minimum_detection_rate is fixed at 0.995. Per-category maximum standard deviation, percentile range, and warm-up drift thresholds are the archived worst-case values rounded up to 0.001. Repeat mean-delta thresholds are documented in docs and are not part of the per-run analyzer schema."
-  repeat_mean_delta_thresholds: "browOuterUpLeft<=0.017; browInnerUp<=0.024; browOuterUpRight<=0.010; eyeLookDownLeft<=0.001; eyeLookDownRight<=0.004; mouthSmileLeft<=0.046; mouthSmileRight<=0.052; eyeWideRight<=0.001; mouthPucker<=0.012"
+setup:
+  stable_camera_identity: "Logitech HD Webcam C525, USB serial 79C73260, video-index0"
+  alice_full_face_confirmed: true
+  participant_exclusion_confirmed: true
+  confirmation:
+    confirmed_at: "2026-08-31T10:42:22Z"
+    source: "Operator confirmation using alice-camera preview on the exact C525 selector"
+  lighting:
+    state: "unknown"
+    detail: "Pilot did not instrument room illuminance"
+  placement:
+    state: "confirmed"
+    detail: "C525 pointed at Alice's full face; distance and angle were not measured"
+  focus:
+    state: "unknown"
+    detail: "Pilot could not read a reliable focus value"
+  exposure:
+    state: "unknown"
+    detail: "Pilot could not read a reliable exposure value"
+repeatability_thresholds:
+  maximum_mean_delta:
+    browOuterUpLeft: 0.017
+    browInnerUp: 0.024
+    browOuterUpRight: 0.010
+    eyeLookDownLeft: 0.001
+    eyeLookDownRight: 0.004
+    mouthSmileLeft: 0.046
+    mouthSmileRight: 0.052
+    eyeWideRight: 0.001
+    mouthPucker: 0.012

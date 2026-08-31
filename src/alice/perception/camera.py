@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import re
 import subprocess
@@ -15,6 +16,12 @@ from typing import Callable, Protocol, cast
 import cv2
 import numpy as np
 from numpy.typing import NDArray
+
+from alice.experiments.manifest import (
+    CameraPropertySetting,
+    NegotiatedCameraSettings,
+    SettingAvailability,
+)
 
 FrameArray = NDArray[np.uint8]
 _V4L2_DEVICE_PATTERN = re.compile(
@@ -64,6 +71,8 @@ class VideoCaptureLike(Protocol):
 
     def set(self, prop_id: int, value: float) -> bool: ...
 
+    def get(self, prop_id: int) -> float: ...
+
 
 CaptureFactory = Callable[[str | int], VideoCaptureLike]
 CapabilityProbe = Callable[[str], tuple[str, ...]]
@@ -95,6 +104,7 @@ class OpenCVCamera(FrameSource):
         self._now = now or (lambda: datetime.now(UTC))
         self._monotonic_ns = monotonic_ns or time.monotonic_ns
         self._capture: VideoCaptureLike | None = None
+        self._negotiated_settings = NegotiatedCameraSettings.unavailable()
 
     def open(self) -> None:
         """Open the configured device explicitly."""
@@ -113,17 +123,48 @@ class OpenCVCamera(FrameSource):
             raise RuntimeError(f"failed to open camera {self.camera_id!r}")
 
         try:
-            if self.width is not None:
-                capture.set(cv2.CAP_PROP_FRAME_WIDTH, float(self.width))
-            if self.height is not None:
-                capture.set(cv2.CAP_PROP_FRAME_HEIGHT, float(self.height))
-            if self.fps is not None:
-                capture.set(cv2.CAP_PROP_FPS, self.fps)
+            set_results: dict[int, bool | None] = {}
+            for prop_id, requested in (
+                (cv2.CAP_PROP_FRAME_WIDTH, self.width),
+                (cv2.CAP_PROP_FRAME_HEIGHT, self.height),
+                (cv2.CAP_PROP_FPS, self.fps),
+            ):
+                set_results[prop_id] = (
+                    None if requested is None else bool(capture.set(prop_id, requested))
+                )
+            self._negotiated_settings = NegotiatedCameraSettings(
+                width=_read_camera_property(
+                    capture,
+                    cv2.CAP_PROP_FRAME_WIDTH,
+                    set_results[cv2.CAP_PROP_FRAME_WIDTH],
+                    positive=True,
+                ),
+                height=_read_camera_property(
+                    capture,
+                    cv2.CAP_PROP_FRAME_HEIGHT,
+                    set_results[cv2.CAP_PROP_FRAME_HEIGHT],
+                    positive=True,
+                ),
+                fps=_read_camera_property(
+                    capture,
+                    cv2.CAP_PROP_FPS,
+                    set_results[cv2.CAP_PROP_FPS],
+                    positive=True,
+                ),
+                focus=_read_camera_property(capture, cv2.CAP_PROP_FOCUS, None),
+                exposure=_read_camera_property(capture, cv2.CAP_PROP_EXPOSURE, None),
+            )
         except Exception:
             capture.release()
             raise
 
         self._capture = capture
+
+    @property
+    def negotiated_settings(self) -> NegotiatedCameraSettings:
+        """Return actual properties or an explicit unavailable state."""
+
+        return self._negotiated_settings
 
     def read(self) -> CapturedFrame:
         """Read one frame from the opened camera."""
@@ -272,3 +313,32 @@ def probe_camera_capabilities(device: str) -> tuple[str, ...]:
     if capabilities:
         return capabilities
     raise CameraProbeError("no supported modes reported")
+
+
+def _read_camera_property(
+    capture: VideoCaptureLike,
+    prop_id: int,
+    set_succeeded: bool | None,
+    *,
+    positive: bool = False,
+) -> CameraPropertySetting:
+    getter = getattr(capture, "get", None)
+    if not callable(getter):
+        value = None
+    else:
+        try:
+            candidate = float(getter(prop_id))
+        except Exception:
+            candidate = float("nan")
+        value = candidate if math.isfinite(candidate) else None
+        if positive and value is not None and value <= 0.0:
+            value = None
+    return CameraPropertySetting(
+        availability=(
+            SettingAvailability.AVAILABLE
+            if value is not None
+            else SettingAvailability.UNAVAILABLE
+        ),
+        value=value,
+        set_succeeded=set_succeeded,
+    )

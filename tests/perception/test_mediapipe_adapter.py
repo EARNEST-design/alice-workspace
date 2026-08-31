@@ -152,20 +152,63 @@ def test_task_detector_reads_fixture_result_shape() -> None:
     assert image_factory.rgb is not None
 
 
-def test_adapter_closes_owned_detector_when_model_hashing_fails(tmp_path: Path) -> None:
+def test_adapter_hashes_model_before_constructing_detector(tmp_path: Path) -> None:
     model = tmp_path / "face.task"
     model.write_bytes(b"fixture-model")
-    landmarker = FakeLandmarker(result=SimpleNamespace(face_blendshapes=[]))
-    detector = MediaPipeTaskDetector(landmarker=landmarker)
+    factory_called = False
 
-    with pytest.raises(RuntimeError, match="hash failed"):
+    def detector_factory(_model_path: Path) -> FakeDetector:
+        nonlocal factory_called
+        factory_called = True
+        return FakeDetector()
+
+    with pytest.raises(ValueError, match="pinned model SHA-256"):
         MediaPipeBlendshapeAdapter(
             camera_id="alice-face-webcam",
             model_path=model,
-            detector_factory=lambda _model_path: detector,
-            model_hasher=lambda _model_path: (_ for _ in ()).throw(
-                RuntimeError("hash failed")
-            ),
+            detector_factory=detector_factory,
         )
 
-    assert landmarker.closed is True
+    assert factory_called is False
+
+
+def test_adapter_constructs_detector_only_after_matching_pinned_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = b"fixture-model"
+    model = tmp_path / "face.task"
+    model.write_bytes(payload)
+    from alice.perception import mediapipe_adapter
+
+    monkeypatch.setattr(
+        mediapipe_adapter,
+        "validate_model_artifact",
+        lambda _path: "a" * 64,
+    )
+    calls: list[Path] = []
+
+    MediaPipeBlendshapeAdapter(
+        camera_id="alice-face-webcam",
+        model_path=model,
+        detector_factory=lambda path: calls.append(path) or FakeDetector(),
+        now=lambda: datetime(2026, 8, 31, 0, 0, 1, tzinfo=UTC),
+    )
+
+    assert calls == [model]
+
+
+def test_task_detector_rejects_mismatch_before_landmarker_factory(
+    tmp_path: Path,
+) -> None:
+    model = tmp_path / "face.task"
+    model.write_bytes(b"not-pinned")
+    calls: list[Path] = []
+
+    with pytest.raises(ValueError, match="pinned model SHA-256"):
+        MediaPipeTaskDetector.from_model_path(
+            model,
+            landmarker_factory=lambda path: calls.append(path) or FakeLandmarker({}),
+        )
+
+    assert calls == []

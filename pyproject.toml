@@ -10,7 +10,7 @@ requires-python = ">=3.12,<3.14"
 dependencies = [
   "mediapipe",
   "numpy",
-  "opencv-python-headless",
+  "opencv-contrib-python",
   "pydantic>=2,<3",
   "pyyaml",
 ]

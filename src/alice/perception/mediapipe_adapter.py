@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from hashlib import sha256
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable, Protocol, Sequence, cast
 
@@ -16,6 +16,10 @@ from alice.contracts.blendshapes import (
     ObservationValidity,
 )
 from alice.perception.camera import CapturedFrame
+from alice.perception.model_manifest import (
+    sha256_path,
+    validate_model_artifact,
+)
 from alice.perception.preview import PreviewDetection
 
 RgbImage = NDArray[np.uint8]
@@ -85,14 +89,6 @@ def _extract_face_confidence(result: object) -> float | None:
     return None
 
 
-def _hash_model(model_path: Path) -> str:
-    digest = sha256()
-    with model_path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 @dataclass
 class MediaPipeTaskDetector(BlendshapeDetector):
     """Adapter over the MediaPipe Face Landmarker task API."""
@@ -101,8 +97,16 @@ class MediaPipeTaskDetector(BlendshapeDetector):
     image_factory: Callable[[RgbImage], object] = _default_image_factory
 
     @classmethod
-    def from_model_path(cls, model_path: Path) -> "MediaPipeTaskDetector":
-        return cls(landmarker=_default_landmarker_factory(model_path))
+    def from_model_path(
+        cls,
+        model_path: Path,
+        *,
+        landmarker_factory: Callable[[Path], FaceLandmarkerLike] = (
+            _default_landmarker_factory
+        ),
+    ) -> "MediaPipeTaskDetector":
+        validate_model_artifact(model_path)
+        return cls(landmarker=landmarker_factory(model_path))
 
     def detect_scores(
         self, rgb: RgbImage
@@ -150,23 +154,23 @@ class MediaPipeBlendshapeAdapter:
         model_path: Path,
         detector: BlendshapeDetector | None = None,
         detector_factory: DetectorFactory | None = None,
-        model_hasher: Callable[[Path], str] = _hash_model,
+        model_hasher: Callable[[Path], str] = sha256_path,
+        now: Callable[[], datetime] | None = None,
     ) -> None:
         self.camera_id = camera_id
         self.model_path = model_path
         owns_detector = detector is None
-        created_detector = detector or (
-            detector_factory or MediaPipeTaskDetector.from_model_path
-        )(model_path)
-        try:
-            model_sha256 = model_hasher(model_path)
-        except Exception:
-            if owns_detector:
-                _close_detector(created_detector)
-            raise
+        model_sha256 = model_hasher(model_path)
+        if detector is None:
+            model_sha256 = validate_model_artifact(model_path)
+            factory = detector_factory or _verified_detector_factory
+            created_detector = factory(model_path)
+        else:
+            created_detector = detector
         self.detector = created_detector
         self._owns_detector = owns_detector
         self._model_sha256 = model_sha256
+        self._now = now or (lambda: datetime.now(UTC))
 
     def observe(self, frame: CapturedFrame, run_id: str) -> BlendshapeObservation:
         rgb = np.ascontiguousarray(frame.bgr[..., ::-1])
@@ -177,6 +181,7 @@ class MediaPipeBlendshapeAdapter:
             return BlendshapeObservation(
                 schema_version="blendshape-observation/v1",
                 captured_at=frame.captured_at,
+                observed_at=self._now(),
                 monotonic_ns=frame.monotonic_ns,
                 camera_id=self.camera_id,
                 run_id=run_id,
@@ -197,6 +202,7 @@ class MediaPipeBlendshapeAdapter:
         return BlendshapeObservation(
             schema_version="blendshape-observation/v1",
             captured_at=frame.captured_at,
+            observed_at=self._now(),
             monotonic_ns=frame.monotonic_ns,
             camera_id=self.camera_id,
             run_id=run_id,
@@ -221,3 +227,9 @@ def _close_detector(detector: BlendshapeDetector) -> None:
     close = getattr(detector, "close", None)
     if callable(close):
         close()
+
+
+def _verified_detector_factory(model_path: Path) -> BlendshapeDetector:
+    """Construct a landmarker only after the adapter verified its hash."""
+
+    return MediaPipeTaskDetector(landmarker=_default_landmarker_factory(model_path))

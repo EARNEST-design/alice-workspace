@@ -1,5 +1,5 @@
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import numpy as np
@@ -46,6 +46,7 @@ class FakeObserver:
         return BlendshapeObservation(
             schema_version="blendshape-observation/v1",
             captured_at=frame.captured_at,
+            observed_at=frame.captured_at + timedelta(milliseconds=5),
             monotonic_ns=frame.monotonic_ns,
             camera_id=self._camera_id,
             run_id=self._run_id or run_id,
@@ -83,7 +84,26 @@ def capture_config(**overrides: object) -> PassiveCaptureConfig:
         "duration_seconds": 120,
         "sample_count": 1200,
         "sample_interval_ms": 100,
+        "maximum_observation_age_ms": 250,
         "retain_frames": False,
+        "retention_policy": {
+            "policy_id": "derived-observations-365d",
+            "mode": "derived_observations_only",
+            "retention_duration_days": 365,
+        },
+        "setup": {
+            "stable_camera_identity": "usb-Alice-video-index0",
+            "alice_full_face_confirmed": True,
+            "participant_exclusion_confirmed": True,
+            "confirmation": {
+                "confirmed_at": "2026-08-31T09:00:00Z",
+                "source": "operator preview",
+            },
+            "lighting": {"state": "confirmed", "detail": "lab lights"},
+            "placement": {"state": "confirmed", "detail": "tripod"},
+            "focus": {"state": "unknown", "detail": "not measurable"},
+            "exposure": {"state": "unknown", "detail": "not measurable"},
+        },
     }
     base.update(overrides)
     return PassiveCaptureConfig(**base)
@@ -122,7 +142,11 @@ def test_capture_requires_retention_approval_when_frames_are_retained() -> None:
             sample_interval_ms=1000,
             duration_seconds=1,
             retain_frames=True,
-            retention_approval=" ",
+            retention_policy={
+                "policy_id": "raw-policy",
+                "mode": "raw_frames",
+                "retention_duration_days": 30,
+            },
         )
 
 
@@ -143,7 +167,17 @@ def test_capture_retains_frames_only_with_approval(
         sample_interval_ms=0,
         duration_seconds=1,
         retain_frames=True,
-        retention_approval="privacy-approval-001",
+        retention_policy={
+            "policy_id": "raw-policy",
+            "mode": "raw_frames",
+            "retention_duration_days": 30,
+            "raw_approval": {
+                "approval_id": "privacy-approval-001",
+                "scope": "Alice robot-face calibration frames only",
+                "expires_at": "2026-09-30T00:00:00Z",
+                "retention_duration_days": 30,
+            },
+        },
     )
 
     manifest = run_passive_capture(config, frame_source, FakeObserver(), tmp_path)
@@ -309,3 +343,99 @@ def test_capture_sleeps_to_deadlines_instead_of_interval_plus_processing(
 
     assert manifest.status == "completed"
     assert sleep_calls == [0.08, 0.08]
+
+
+def test_capture_requires_typed_setup_and_privacy_confirmation() -> None:
+    with pytest.raises(ValueError, match="setup"):
+        PassiveCaptureConfig.model_validate(
+            {
+                "run_id": "passive-001",
+                "camera_id": "alice-face-webcam",
+                "requested_width": 640,
+                "requested_height": 480,
+                "requested_fps": 10,
+                "duration_seconds": 1,
+                "sample_count": 1,
+                "sample_interval_ms": 0,
+                "maximum_observation_age_ms": 250,
+                "retain_frames": False,
+                "retention_policy": {
+                    "policy_id": "derived-only",
+                    "mode": "derived_observations_only",
+                    "retention_duration_days": 365,
+                },
+            }
+        )
+
+    with pytest.raises(ValueError, match="alice_full_face_confirmed"):
+        capture_config(
+            setup={
+                **capture_config().setup.model_dump(mode="json"),
+                "alice_full_face_confirmed": False,
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    ("captured_times", "monotonic_values", "message"),
+    [
+        ([0, 0], [100, 101], "captured_at"),
+        ([0, 1], [100, 100], "monotonic_ns"),
+        ([1, 0], [100, 101], "captured_at"),
+        ([0, 1], [101, 100], "monotonic_ns"),
+    ],
+)
+def test_capture_aborts_on_duplicate_or_decreasing_observation_timestamps(
+    tmp_path: Path,
+    captured_times: list[int],
+    monotonic_values: list[int],
+    message: str,
+) -> None:
+    frames = [
+        CapturedFrame(
+            captured_at=datetime(2026, 8, 31, 9, 0, second, tzinfo=UTC),
+            monotonic_ns=monotonic,
+            bgr=np.zeros((2, 3, 3), dtype=np.uint8),
+        )
+        for second, monotonic in zip(captured_times, monotonic_values, strict=True)
+    ]
+
+    with pytest.raises(ValueError, match=message):
+        run_passive_capture(
+            capture_config(sample_count=2, sample_interval_ms=0, duration_seconds=1),
+            FakeFrameSource(frames),
+            FakeObserver(),
+            tmp_path,
+        )
+
+    payload = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
+    assert payload["status"] == "aborted"
+    assert payload["failure"]["category"] == "observation_sequence_invalid"
+
+
+def test_capture_aborts_when_observation_exceeds_configured_maximum_age(
+    tmp_path: Path,
+) -> None:
+    class StaleObserver(FakeObserver):
+        def observe(self, frame: CapturedFrame, run_id: str) -> BlendshapeObservation:
+            observation = super().observe(frame, run_id)
+            return observation.model_copy(
+                update={
+                    "observed_at": frame.captured_at + timedelta(milliseconds=251)
+                }
+            )
+
+    frames = [
+        CapturedFrame(
+            captured_at=datetime(2026, 8, 31, 9, 0, tzinfo=UTC),
+            monotonic_ns=100,
+            bgr=np.zeros((2, 3, 3), dtype=np.uint8),
+        )
+    ]
+    with pytest.raises(ValueError, match="maximum_observation_age_ms"):
+        run_passive_capture(
+            capture_config(sample_count=1, sample_interval_ms=0, duration_seconds=1),
+            FakeFrameSource(frames),
+            StaleObserver(),
+            tmp_path,
+        )

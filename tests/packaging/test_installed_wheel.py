@@ -1,0 +1,79 @@
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+
+def _run(*args: str, cwd: Path, env: dict[str, str] | None = None) -> str:
+    result = subprocess.run(
+        list(args),
+        cwd=cwd,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout
+
+
+def test_built_wheel_runs_both_entry_points_without_repository_files(
+    tmp_path: Path,
+) -> None:
+    repository = Path(__file__).resolve().parents[2]
+    dist = tmp_path / "dist"
+    environment = tmp_path / "venv"
+    outside_repository = tmp_path / "outside"
+    outside_repository.mkdir()
+    _run("uv", "build", "--wheel", "--out-dir", str(dist), cwd=repository)
+    wheel = next(dist.glob("alice-*.whl"))
+    _run(
+        "uv",
+        "venv",
+        "--python",
+        sys.executable,
+        str(environment),
+        cwd=outside_repository,
+    )
+    _run(
+        "uv",
+        "pip",
+        "install",
+        "--python",
+        str(environment / "bin" / "python"),
+        str(wheel),
+        cwd=outside_repository,
+    )
+    clean_env = dict(os.environ)
+    clean_env.pop("PYTHONPATH", None)
+    camera_help = _run(
+        str(environment / "bin" / "alice-camera"),
+        "--help",
+        cwd=outside_repository,
+        env=clean_env,
+    )
+    passive_help = _run(
+        str(environment / "bin" / "alice-passive-capture"),
+        "--help",
+        cwd=outside_repository,
+        env=clean_env,
+    )
+    probe = _run(
+        str(environment / "bin" / "python"),
+        "-c",
+        (
+            "from importlib.metadata import distributions; "
+            "from importlib.resources import files; "
+            "names=sorted(d.metadata['Name'].lower() for d in distributions() "
+            "if d.metadata['Name'].lower().startswith('opencv-')); "
+            "print(names); "
+            "print(files('alice.resources').joinpath("
+            "'passive-blendshape-conclusion.md').read_text()[:31])"
+        ),
+        cwd=outside_repository,
+        env=clean_env,
+    )
+
+    assert "alice-camera" in camera_help
+    assert "alice-passive-capture" in passive_help
+    assert "['opencv-contrib-python']" in probe
+    assert "# Passive Blendshape Conclusion" in probe

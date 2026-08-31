@@ -1,3 +1,4 @@
+import math
 from datetime import UTC, datetime
 
 import pytest
@@ -73,3 +74,23 @@ def test_category_schema_rejects_duplicate_expected_names() -> None:
 
     with pytest.raises(ValueError, match="duplicate"):
         validate_category_schema(observation, ("eyeBlinkLeft", "eyeBlinkLeft"))
+
+
+@pytest.mark.parametrize("score", [-0.0001, 1.0001, math.nan, math.inf, -math.inf])
+def test_blendshape_score_rejects_out_of_range_or_non_finite_values(
+    score: float,
+) -> None:
+    with pytest.raises(ValidationError):
+        BlendshapeScore(name="jawOpen", score=score)
+
+
+@pytest.mark.parametrize(
+    "model_sha256",
+    ["a" * 63, "a" * 65, "A" * 64, "g" * 64, "0x" + "a" * 64],
+)
+def test_observation_rejects_noncanonical_sha256(model_sha256: str) -> None:
+    source = valid_observation().model_dump()
+    source["detector_model_sha256"] = model_sha256
+
+    with pytest.raises(ValidationError):
+        BlendshapeObservation.model_validate(source)

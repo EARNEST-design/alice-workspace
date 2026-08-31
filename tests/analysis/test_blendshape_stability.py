@@ -8,7 +8,6 @@ import pytest
 
 from alice.analysis.blendshape_stability import analyze_observations, phase_1_acceptance
 from alice.contracts import BlendshapeObservation, BlendshapeScore, ObservationValidity
-from alice.experiments.manifest import ArtifactManifest
 from alice.experiments.passive_capture import main as passive_capture_main
 
 
@@ -22,6 +21,8 @@ def _observation(
         schema_version="blendshape-observation/v1",
         captured_at=datetime(2026, 8, 31, 9, 0, 0, tzinfo=UTC)
         + timedelta(milliseconds=100 * frame_index),
+        observed_at=datetime(2026, 8, 31, 9, 0, 0, tzinfo=UTC)
+        + timedelta(milliseconds=100 * frame_index + 5),
         monotonic_ns=1_000_000 + frame_index,
         camera_id="alice-face-webcam",
         run_id="passive-001",
@@ -57,14 +58,14 @@ def _write_manifest(
     conclusion: str | None = None,
     acceptance_thresholds: dict[str, object] | None = None,
 ) -> None:
-    manifest = ArtifactManifest(
-        schema_version="artifact-manifest/v1",
-        run_id="passive-001",
-        status=status,
-        started_at=datetime(2026, 8, 31, 9, 0, 0, tzinfo=UTC),
-        ended_at=datetime(2026, 8, 31, 9, 2, 0, tzinfo=UTC),
-        observation_count=4,
-        config={
+    payload: dict[str, object] = {
+        "schema_version": "artifact-manifest/v1",
+        "run_id": "passive-001",
+        "status": status,
+        "started_at": "2026-08-31T09:00:00Z",
+        "ended_at": "2026-08-31T09:02:00Z",
+        "observation_count": 4,
+        "config": {
             "run_id": "passive-001",
             "camera_id": "alice-face-webcam",
             "requested_width": 640,
@@ -73,27 +74,60 @@ def _write_manifest(
             "duration_seconds": 120,
             "sample_count": 4,
             "sample_interval_ms": 100,
+            "maximum_observation_age_ms": 250,
             "retain_frames": False,
-            "operator_metadata": {
-                "camera_placement": "Tripod at eye level, 45 cm from Alice.",
-                "lighting": "Overhead lab lights only.",
+            "retention_policy": {
+                "policy_id": "derived-only",
+                "mode": "derived_observations_only",
+                "retention_duration_days": 365,
+            },
+            "setup": {
+                "stable_camera_identity": "usb-Alice-video-index0",
+                "alice_full_face_confirmed": True,
+                "participant_exclusion_confirmed": True,
+                "confirmation": {
+                    "confirmed_at": "2026-08-31T09:00:00Z",
+                    "source": "operator preview",
+                },
+                "placement": {
+                    "state": "confirmed",
+                    "detail": "Tripod at eye level, 45 cm from Alice.",
+                },
+                "lighting": {
+                    "state": "confirmed",
+                    "detail": "Overhead lab lights only.",
+                },
+                "focus": {"state": "unknown", "detail": "not measurable"},
+                "exposure": {"state": "unknown", "detail": "not measurable"},
             },
             "acceptance_thresholds": acceptance_thresholds,
         },
-        artifacts=artifacts or {},
-        git_revision="b" * 40,
-        dependency_lock_path="uv.lock",
-        dependency_lock_sha256="c" * 64,
-        python_version="3.13.7",
-        platform_system="Linux",
-        platform_release="6.8.0",
-        platform_machine="x86_64",
-        aborted_reason=None if status == "completed" else "capture aborted",
-        failure=None,
-        conclusion=conclusion,
-    )
+        "artifacts": artifacts or {},
+        "git_revision": "b" * 40,
+        "dependency_lock_path": "uv.lock",
+        "dependency_lock_sha256": "c" * 64,
+        "python_version": "3.13.7",
+        "platform_system": "Linux",
+        "platform_release": "6.8.0",
+        "platform_machine": "x86_64",
+        "camera_settings": {
+            name: {
+                "availability": "unavailable",
+                "value": None,
+                "set_succeeded": None,
+            }
+            for name in ("width", "height", "fps", "focus", "exposure")
+        },
+        "aborted_reason": None if status == "completed" else "capture aborted",
+        "failure": (
+            None
+            if status == "completed"
+            else {"category": "interrupted", "error_type": "KeyboardInterrupt"}
+        ),
+        "conclusion": conclusion,
+    }
     path.write_text(
-        json.dumps(manifest.model_dump(mode="json"), indent=2, sort_keys=True) + "\n",
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
 
@@ -154,6 +188,11 @@ def test_stability_reports_detection_and_per_category_variance(
     assert mouth_smile.percentile_range == pytest.approx(0.36)
     assert mouth_smile.warmup_drift == pytest.approx(0.3)
     assert mouth_smile.lag1_autocorrelation == pytest.approx(1.0)
+    assert metrics.correlation_matrix == {
+        "jawOpen": {"jawOpen": None, "mouthSmile": None},
+        "mouthSmile": {"jawOpen": None, "mouthSmile": pytest.approx(1.0)},
+    }
+    assert metrics.effective_dimensionality == pytest.approx(1.0)
 
 
 @pytest.mark.parametrize(
@@ -288,7 +327,7 @@ def test_phase_1_acceptance_is_inconclusive_for_no_face_with_category_thresholds
         },
     )
 
-    assert result.outcome == "inconclusive"
+    assert result.outcome == "fail"
     assert [check.status for check in result.checks] == [
         "fail",
         "inconclusive",
@@ -297,6 +336,110 @@ def test_phase_1_acceptance_is_inconclusive_for_no_face_with_category_thresholds
         "no valid frames available for stability analysis"
         in result.inconclusive_reasons
     )
+
+
+@pytest.mark.parametrize(
+    ("captured_indexes", "monotonic_values", "message"),
+    [
+        ([0, 0], [10, 11], "captured_at"),
+        ([0, 1], [10, 10], "monotonic_ns"),
+        ([1, 0], [10, 11], "captured_at"),
+        ([0, 1], [11, 10], "monotonic_ns"),
+    ],
+)
+def test_analysis_rejects_duplicate_or_decreasing_timestamps(
+    captured_indexes: list[int],
+    monotonic_values: list[int],
+    message: str,
+) -> None:
+    observations = [
+        _observation(
+            frame_index=frame_index,
+            validity=ObservationValidity.VALID,
+            scores=(("jawOpen", 0.2),),
+        ).model_copy(update={"monotonic_ns": monotonic})
+        for frame_index, monotonic in zip(
+            captured_indexes,
+            monotonic_values,
+            strict=True,
+        )
+    ]
+
+    with pytest.raises(ValueError, match=message):
+        analyze_observations(observations)
+
+
+def test_analysis_rejects_observation_older_than_manifest_limit(tmp_path: Path) -> None:
+    observation = _observation(
+        frame_index=0,
+        validity=ObservationValidity.VALID,
+        scores=(("jawOpen", 0.2),),
+    ).model_copy(
+        update={
+            "observed_at": datetime(2026, 8, 31, 9, 0, tzinfo=UTC)
+            + timedelta(milliseconds=251)
+        }
+    )
+    observations_path = tmp_path / "observations.jsonl"
+    observations_path.write_text(
+        json.dumps(observation.model_dump(mode="json"), sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    _write_manifest(
+        tmp_path / "manifest.json",
+        artifacts={"observations.jsonl": _artifact_record_payload(observations_path)},
+    )
+    payload = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
+    payload["observation_count"] = 1
+    (tmp_path / "manifest.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    from alice.analysis.blendshape_stability import analyze_stability
+
+    with pytest.raises(ValueError, match="maximum_observation_age_ms"):
+        analyze_stability(tmp_path)
+
+
+def test_acceptance_uses_maximum_absolute_lag1_autocorrelation() -> None:
+    observations = [
+        _observation(
+            frame_index=index,
+            validity=ObservationValidity.VALID,
+            scores=(("jawOpen", score),),
+        )
+        for index, score in enumerate((0.0, 1.0, 0.0, 1.0))
+    ]
+    metrics = analyze_observations(observations)
+
+    result = phase_1_acceptance(
+        metrics,
+        {
+            "categories": {
+                "jawOpen": {"maximum_absolute_lag1_autocorrelation": 0.5}
+            }
+        },
+    )
+
+    assert result.outcome == "fail"
+    assert result.failed_thresholds[0].comparator == "abs<="
+    assert result.failed_thresholds[0].observed == pytest.approx(-1.0)
+
+
+def test_effective_dimensionality_is_two_for_independent_equal_variance_axes() -> None:
+    observations = [
+        _observation(
+            frame_index=index,
+            validity=ObservationValidity.VALID,
+            scores=(("x", x), ("y", y)),
+        )
+        for index, (x, y) in enumerate(
+            ((0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0))
+        )
+    ]
+
+    metrics = analyze_observations(observations)
+
+    assert metrics.correlation_matrix["x"]["y"] == pytest.approx(0.0)
+    assert metrics.effective_dimensionality == pytest.approx(2.0)
 
 
 def test_cli_analysis_refuses_missing_observation_artifact_provenance(
@@ -315,12 +458,12 @@ def test_cli_analysis_refuses_missing_observation_artifact_provenance(
     _write_manifest(
         tmp_path / "manifest.json",
         artifacts={},
-        conclusion="existing conclusion",
+        conclusion=None,
         acceptance_thresholds={"minimum_detection_rate": 0.7},
     )
     before_manifest = (tmp_path / "manifest.json").read_text(encoding="utf-8")
 
-    with pytest.raises(ValueError, match="observations.jsonl artifact"):
+    with pytest.raises(ValueError, match="observations.jsonl"):
         passive_capture_main(["analyze", str(tmp_path)], stdout=io.StringIO())
 
     assert (tmp_path / "manifest.json").read_text(encoding="utf-8") == before_manifest
@@ -350,7 +493,7 @@ def test_cli_analysis_refuses_observation_artifact_checksum_mismatch(
                 "size_bytes": observations_path.stat().st_size,
             }
         },
-        conclusion="existing conclusion",
+        conclusion=None,
         acceptance_thresholds={"minimum_detection_rate": 0.7},
     )
     before_manifest = (tmp_path / "manifest.json").read_text(encoding="utf-8")
@@ -419,6 +562,7 @@ def test_cli_analysis_writes_metrics_and_phase_1_conclusion(
         },
     )
 
+    manifest_before = (tmp_path / "manifest.json").read_bytes()
     stdout = io.StringIO()
     exit_code = passive_capture_main(["analyze", str(tmp_path)], stdout=stdout)
 
@@ -426,15 +570,21 @@ def test_cli_analysis_writes_metrics_and_phase_1_conclusion(
     assert "passive-001" in stdout.getvalue()
     assert "pass" in stdout.getvalue()
 
+    assert (tmp_path / "manifest.json").read_bytes() == manifest_before
+    generation_dirs = list((tmp_path / "analysis" / "generations").iterdir())
+    assert len(generation_dirs) == 1
+    generation_dir = generation_dirs[0]
     metrics_payload = json.loads(
-        (tmp_path / "stability-metrics.json").read_text(encoding="utf-8")
+        (generation_dir / "stability-metrics.json").read_text(encoding="utf-8")
     )
     assert metrics_payload["detection_rate"] == pytest.approx(0.75)
     assert metrics_payload["categories"]["mouthSmile"]["percentile_range"] == (
         pytest.approx(0.36)
     )
 
-    conclusion_text = (tmp_path / "phase-1-conclusion.md").read_text(encoding="utf-8")
+    conclusion_text = (generation_dir / "phase-1-conclusion.md").read_text(
+        encoding="utf-8"
+    )
     assert "Tripod at eye level, 45 cm from Alice." in conclusion_text
     assert "Overhead lab lights only." in conclusion_text
     assert "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" in (
@@ -444,7 +594,25 @@ def test_cli_analysis_writes_metrics_and_phase_1_conclusion(
     assert "Frame retention disabled." in conclusion_text
     assert "1 invalid observations" in conclusion_text
 
-    updated_manifest = json.loads((tmp_path / "manifest.json").read_text("utf-8"))
-    assert updated_manifest["conclusion"] == "Phase 1 acceptance: pass"
-    assert "stability-metrics.json" in updated_manifest["artifacts"]
-    assert "phase-1-conclusion.md" in updated_manifest["artifacts"]
+    analysis_manifest = json.loads(
+        (generation_dir / "analysis-manifest.json").read_text(encoding="utf-8")
+    )
+    assert analysis_manifest["schema_version"] == "analysis-manifest/v1"
+    assert analysis_manifest["analysis_kind"] == "stability"
+    assert analysis_manifest["analyzer"]["package_version"]
+    assert "git_revision" in analysis_manifest["analyzer"]
+    assert analysis_manifest["inputs"]["capture_manifest"]["sha256"] == sha256(
+        manifest_before
+    ).hexdigest()
+    assert analysis_manifest["inputs"]["observations"]["sha256"] == sha256(
+        observations_path.read_bytes()
+    ).hexdigest()
+    for artifact_name in (
+        "stability-metrics.json",
+        "acceptance.json",
+        "phase-1-conclusion.md",
+    ):
+        record = analysis_manifest["artifacts"][artifact_name]
+        assert sha256((generation_dir / artifact_name).read_bytes()).hexdigest() == (
+            record["sha256"]
+        )

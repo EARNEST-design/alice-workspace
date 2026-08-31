@@ -52,6 +52,8 @@ class StabilityMetrics(BaseModel):
     category_names: tuple[NonEmptyString, ...]
     categories: dict[NonEmptyString, CategoryStabilityMetrics]
     invalid_reasons: dict[NonEmptyString, int]
+    correlation_matrix: dict[NonEmptyString, dict[NonEmptyString, float | None]]
+    effective_dimensionality: float = Field(ge=0.0)
 
 
 class CategoryAcceptanceThresholds(BaseModel):
@@ -62,9 +64,9 @@ class CategoryAcceptanceThresholds(BaseModel):
     maximum_standard_deviation: float | None = Field(default=None, ge=0.0)
     maximum_percentile_range: float | None = Field(default=None, ge=0.0)
     maximum_warmup_drift: float | None = Field(default=None, ge=0.0)
-    minimum_lag1_autocorrelation: float | None = Field(
+    maximum_absolute_lag1_autocorrelation: float | None = Field(
         default=None,
-        ge=-1.0,
+        ge=0.0,
         le=1.0,
     )
 
@@ -92,7 +94,7 @@ class AcceptanceCheck(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     metric_path: NonEmptyString
-    comparator: Literal[">=", "<="]
+    comparator: Literal[">=", "<=", "abs<="]
     expected: float
     observed: float | None
     status: CheckStatus
@@ -118,10 +120,16 @@ class AcceptanceResult(BaseModel):
 
 def analyze_observations(
     observations: Sequence[BlendshapeObservation],
+    *,
+    maximum_observation_age_ms: int | None = None,
 ) -> StabilityMetrics:
     """Compute deterministic per-category stability metrics from observations."""
 
     observation_list = list(observations)
+    _validate_observation_sequence(
+        observation_list,
+        maximum_observation_age_ms=maximum_observation_age_ms,
+    )
     identity = _resolve_identity(observation_list)
     invalid_reasons = Counter(
         observation.invalid_reason
@@ -153,6 +161,11 @@ def analyze_observations(
         for name, values in category_scores.items()
     }
     detection_rate = 0.0 if total_frames == 0 else valid_frames / total_frames
+    correlation_matrix = _correlation_matrix(category_scores, category_names)
+    effective_dimensionality = _effective_dimensionality(
+        category_scores,
+        category_names,
+    )
     return StabilityMetrics(
         run_id=identity["run_id"],
         camera_id=identity["camera_id"],
@@ -164,6 +177,8 @@ def analyze_observations(
         category_names=category_names,
         categories=categories,
         invalid_reasons=dict(sorted(invalid_reasons.items())),
+        correlation_matrix=correlation_matrix,
+        effective_dimensionality=effective_dimensionality,
     )
 
 
@@ -182,7 +197,13 @@ def analyze_stability(run_dir: Path) -> StabilityMetrics:
 
     observations_path = _verified_observations_path(manifest, run_path)
     observations = _load_observations(observations_path)
-    metrics = analyze_observations(observations)
+    maximum_age = manifest.config.get("maximum_observation_age_ms")
+    if not isinstance(maximum_age, int) or maximum_age <= 0:
+        raise ValueError("manifest maximum_observation_age_ms must be a positive int")
+    metrics = analyze_observations(
+        observations,
+        maximum_observation_age_ms=maximum_age,
+    )
 
     if manifest.observation_count != metrics.total_frames:
         raise ValueError(
@@ -237,12 +258,17 @@ def phase_1_acceptance(
                     "no valid frames available for stability analysis",
                 )
             )
+        failed_thresholds = tuple(
+            check for check in checks if check.status is CheckStatus.FAIL
+        )
         return AcceptanceResult(
-            outcome=AcceptanceOutcome.INCONCLUSIVE,
-            checks=tuple(checks),
-            failed_thresholds=tuple(
-                check for check in checks if check.status is CheckStatus.FAIL
+            outcome=(
+                AcceptanceOutcome.FAIL
+                if failed_thresholds
+                else AcceptanceOutcome.INCONCLUSIVE
             ),
+            checks=tuple(checks),
+            failed_thresholds=failed_thresholds,
             inconclusive_reasons=("no valid frames available for stability analysis",),
         )
 
@@ -279,12 +305,14 @@ def phase_1_acceptance(
                     observed=category_metrics.warmup_drift,
                 )
             )
-        if category_thresholds.minimum_lag1_autocorrelation is not None:
+        if category_thresholds.maximum_absolute_lag1_autocorrelation is not None:
             checks.append(
                 _evaluate_check(
                     metric_path=f"{category_name}.lag1_autocorrelation",
-                    comparator=">=",
-                    expected=category_thresholds.minimum_lag1_autocorrelation,
+                    comparator="abs<=",
+                    expected=(
+                        category_thresholds.maximum_absolute_lag1_autocorrelation
+                    ),
                     observed=category_metrics.lag1_autocorrelation,
                 )
             )
@@ -306,10 +334,10 @@ def phase_1_acceptance(
     failed_thresholds = tuple(
         check for check in checks if check.status is CheckStatus.FAIL
     )
-    if inconclusive_reasons:
-        outcome = AcceptanceOutcome.INCONCLUSIVE
-    elif failed_thresholds:
+    if failed_thresholds:
         outcome = AcceptanceOutcome.FAIL
+    elif inconclusive_reasons:
+        outcome = AcceptanceOutcome.INCONCLUSIVE
     else:
         outcome = AcceptanceOutcome.PASS
 
@@ -450,12 +478,12 @@ def _inconclusive_category_checks(
                 reason=reason,
             )
         )
-    if thresholds.minimum_lag1_autocorrelation is not None:
+    if thresholds.maximum_absolute_lag1_autocorrelation is not None:
         checks.append(
             _inconclusive_check(
                 metric_path=f"{category_name}.lag1_autocorrelation",
-                comparator=">=",
-                expected=thresholds.minimum_lag1_autocorrelation,
+                comparator="abs<=",
+                expected=thresholds.maximum_absolute_lag1_autocorrelation,
                 reason=reason,
             )
         )
@@ -465,7 +493,7 @@ def _inconclusive_category_checks(
 def _inconclusive_check(
     *,
     metric_path: str,
-    comparator: Literal[">=", "<="],
+    comparator: Literal[">=", "<=", "abs<="],
     expected: float,
     reason: str,
 ) -> AcceptanceCheck:
@@ -504,6 +532,76 @@ def _lag1_autocorrelation(score_array: np.ndarray) -> float | None:
     return float(np.corrcoef(leading, lagged)[0, 1])
 
 
+def _validate_observation_sequence(
+    observations: Sequence[BlendshapeObservation],
+    *,
+    maximum_observation_age_ms: int | None,
+) -> None:
+    previous: BlendshapeObservation | None = None
+    for observation in observations:
+        if previous is not None:
+            if observation.captured_at <= previous.captured_at:
+                raise ValueError("observation captured_at must be strictly increasing")
+            if observation.monotonic_ns <= previous.monotonic_ns:
+                raise ValueError("observation monotonic_ns must be strictly increasing")
+        if maximum_observation_age_ms is not None:
+            if observation.observed_at is None:
+                raise ValueError(
+                    "observed_at is required to enforce maximum_observation_age_ms"
+                )
+            age_ms = (
+                observation.observed_at - observation.captured_at
+            ).total_seconds() * 1000
+            if age_ms < 0 or age_ms > maximum_observation_age_ms:
+                raise ValueError(
+                    "observation exceeds maximum_observation_age_ms: "
+                    f"{age_ms:.3f} > {maximum_observation_age_ms}"
+                )
+        previous = observation
+
+
+def _correlation_matrix(
+    category_scores: Mapping[str, Sequence[float]],
+    category_names: Sequence[str],
+) -> dict[str, dict[str, float | None]]:
+    result: dict[str, dict[str, float | None]] = {}
+    for left_name in category_names:
+        left = np.asarray(category_scores[left_name], dtype=float)
+        row: dict[str, float | None] = {}
+        for right_name in category_names:
+            right = np.asarray(category_scores[right_name], dtype=float)
+            if (
+                left.size < 2
+                or np.allclose(left, left[0])
+                or np.allclose(right, right[0])
+            ):
+                row[right_name] = None
+            else:
+                row[right_name] = float(np.corrcoef(left, right)[0, 1])
+        result[left_name] = row
+    return result
+
+
+def _effective_dimensionality(
+    category_scores: Mapping[str, Sequence[float]],
+    category_names: Sequence[str],
+) -> float:
+    if not category_names:
+        return 0.0
+    matrix = np.column_stack(
+        [np.asarray(category_scores[name], dtype=float) for name in category_names]
+    )
+    if matrix.shape[0] < 2:
+        return 0.0
+    covariance = np.atleast_2d(np.cov(matrix, rowvar=False, bias=True))
+    eigenvalues = np.clip(np.linalg.eigvalsh(covariance), 0.0, None)
+    total = float(np.sum(eigenvalues))
+    squared_total = float(np.sum(np.square(eigenvalues)))
+    if np.isclose(total, 0.0) or np.isclose(squared_total, 0.0):
+        return 0.0
+    return total * total / squared_total
+
+
 def _sha256_path(path: Path) -> str:
     digest = sha256()
     with path.open("rb") as handle:
@@ -515,7 +613,7 @@ def _sha256_path(path: Path) -> str:
 def _evaluate_check(
     *,
     metric_path: str,
-    comparator: Literal[">=", "<="],
+    comparator: Literal[">=", "<=", "abs<="],
     expected: float,
     observed: float | None,
 ) -> AcceptanceCheck:
@@ -531,6 +629,8 @@ def _evaluate_check(
 
     if comparator == ">=":
         passed = observed >= expected
+    elif comparator == "abs<=":
+        passed = abs(observed) <= expected
     else:
         passed = observed <= expected
     status = CheckStatus.PASS if passed else CheckStatus.FAIL

@@ -1,6 +1,9 @@
 import hashlib
 import importlib.util
 import io
+import os
+import stat
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -142,3 +145,130 @@ def test_fetch_installs_matching_payload_atomically(tmp_path: Path) -> None:
     assert installed.sha256 == sha256
     assert installed_path.read_bytes() == payload
     assert list(install_dir.glob("*.tmp")) == []
+    assert stat.S_IMODE(installed_path.stat().st_mode) == 0o600
+
+
+def test_fetch_ignores_preexisting_fixed_temp_symlink(tmp_path: Path) -> None:
+    module = _load_module()
+    payload = b"good-model"
+    manifest_path = tmp_path / "manifest.yaml"
+    install_dir = tmp_path / "models"
+    install_dir.mkdir()
+    victim = tmp_path / "victim"
+    victim.write_bytes(b"do-not-touch")
+    legacy_temp = install_dir / ".face_landmarker.task.tmp"
+    legacy_temp.symlink_to(victim)
+    _write_manifest(manifest_path, sha256=hashlib.sha256(payload).hexdigest())
+    _pin_temp_manifest(module, manifest_path)
+
+    module.install_model(
+        manifest_path=manifest_path,
+        install_dir=install_dir,
+        urlopen=lambda _url: FakeResponse(payload),
+    )
+
+    assert victim.read_bytes() == b"do-not-touch"
+    assert legacy_temp.is_symlink()
+
+
+def test_fetch_replaces_destination_symlink_without_following_it(
+    tmp_path: Path,
+) -> None:
+    module = _load_module()
+    payload = b"good-model"
+    manifest_path = tmp_path / "manifest.yaml"
+    install_dir = tmp_path / "models"
+    install_dir.mkdir()
+    victim = tmp_path / "victim"
+    victim.write_bytes(b"do-not-touch")
+    destination = install_dir / "face_landmarker.task"
+    destination.symlink_to(victim)
+    _write_manifest(manifest_path, sha256=hashlib.sha256(payload).hexdigest())
+    _pin_temp_manifest(module, manifest_path)
+
+    module.install_model(
+        manifest_path=manifest_path,
+        install_dir=install_dir,
+        urlopen=lambda _url: FakeResponse(payload),
+    )
+
+    assert victim.read_bytes() == b"do-not-touch"
+    assert destination.is_file() and not destination.is_symlink()
+    assert destination.read_bytes() == payload
+
+
+def test_concurrent_fetches_use_distinct_temps_and_publish_valid_model(
+    tmp_path: Path,
+) -> None:
+    module = _load_module()
+    payload = b"good-model"
+    manifest_path = tmp_path / "manifest.yaml"
+    install_dir = tmp_path / "models"
+    _write_manifest(manifest_path, sha256=hashlib.sha256(payload).hexdigest())
+    _pin_temp_manifest(module, manifest_path)
+
+    def install() -> object:
+        return module.install_model(
+            manifest_path=manifest_path,
+            install_dir=install_dir,
+            urlopen=lambda _url: FakeResponse(payload),
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(lambda _index: install(), range(2)))
+
+    assert len(results) == 2
+    assert (install_dir / "face_landmarker.task").read_bytes() == payload
+    assert sorted(path.name for path in install_dir.iterdir()) == [
+        "face_landmarker.task"
+    ]
+
+
+def test_fetch_cleans_unique_temp_when_download_raises(tmp_path: Path) -> None:
+    module = _load_module()
+    manifest_path = tmp_path / "manifest.yaml"
+    install_dir = tmp_path / "models"
+    _write_manifest(
+        manifest_path,
+        sha256=hashlib.sha256(b"good-model").hexdigest(),
+    )
+    _pin_temp_manifest(module, manifest_path)
+
+    class BrokenResponse(FakeResponse):
+        def read(self, size: int = -1) -> bytes:
+            raise OSError("download interrupted")
+
+    with pytest.raises(OSError, match="download interrupted"):
+        module.install_model(
+            manifest_path=manifest_path,
+            install_dir=install_dir,
+            urlopen=lambda _url: BrokenResponse(b""),
+        )
+
+    assert list(install_dir.iterdir()) == []
+
+
+def test_fetch_fsyncs_model_and_install_directory(tmp_path: Path, monkeypatch) -> None:
+    module = _load_module()
+    payload = b"good-model"
+    manifest_path = tmp_path / "manifest.yaml"
+    install_dir = tmp_path / "models"
+    _write_manifest(manifest_path, sha256=hashlib.sha256(payload).hexdigest())
+    _pin_temp_manifest(module, manifest_path)
+    real_fsync = os.fsync
+    fsynced_modes: list[int] = []
+
+    def recording_fsync(fd: int) -> None:
+        fsynced_modes.append(os.fstat(fd).st_mode)
+        real_fsync(fd)
+
+    monkeypatch.setattr(module.os, "fsync", recording_fsync)
+
+    module.install_model(
+        manifest_path=manifest_path,
+        install_dir=install_dir,
+        urlopen=lambda _url: FakeResponse(payload),
+    )
+
+    assert any(stat.S_ISREG(mode) for mode in fsynced_modes)
+    assert any(stat.S_ISDIR(mode) for mode in fsynced_modes)

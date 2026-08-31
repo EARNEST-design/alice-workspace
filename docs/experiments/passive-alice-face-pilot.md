@@ -84,6 +84,11 @@ Global per-run threshold:
 
 Cross-run provisional repeat thresholds for the fresh acceptance repeats:
 
+These values are now represented by the typed
+`repeatability_thresholds.maximum_mean_delta` mapping in the tracked pilot
+configuration. The table and the historical calculations below remain the
+original experimental evidence; they have not been recomputed or relabeled.
+
 | Category | Max Abs Mean Delta (`repeat-1` vs `repeat-2`) |
 | --- | ---: |
 | `browOuterUpLeft` | `0.017` |
@@ -107,6 +112,11 @@ All three replacement runs were captured after the confirmed preview using the e
 | Repeat 2 | `passive-alice-face-confirmed-repeat-2-20260831T104222Z` | `2026-08-31T10:50:29.634959Z` | 120.98 | 1.0000 | `fail` |
 
 Each replacement run produced 1200 valid observations, zero invalid observations, and only the provenance-safe files `manifest.json`, `observations.jsonl`, `stability-metrics.json`, and `phase-1-conclusion.md`. No raw images or video were saved.
+
+That sentence describes the 2026-08-31 legacy artifact layout. The current
+analyzer does not rewrite those ignored artifacts automatically. A deliberate
+offline rerun publishes new immutable analysis generations while leaving each
+capture manifest byte-for-byte unchanged.
 
 ## Replacement Run Findings
 
