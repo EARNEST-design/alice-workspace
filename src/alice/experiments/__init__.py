@@ -3,6 +3,7 @@
 from alice.experiments.manifest import (
     ArtifactManifest,
     ArtifactRecord,
+    FailureCategory,
     FailureRecord,
     RunStatus,
 )
@@ -11,6 +12,7 @@ from alice.experiments.passive_capture import PassiveCaptureConfig, run_passive_
 __all__ = [
     "ArtifactManifest",
     "ArtifactRecord",
+    "FailureCategory",
     "FailureRecord",
     "PassiveCaptureConfig",
     "RunStatus",

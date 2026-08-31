@@ -15,6 +15,14 @@ class RunStatus(StrEnum):
     ABORTED = "aborted"
 
 
+class FailureCategory(StrEnum):
+    INTERRUPTED = "interrupted"
+    CAPTURE_ERROR = "capture_error"
+    OBSERVER_ERROR = "observer_error"
+    OBSERVATION_IDENTITY_MISMATCH = "observation_identity_mismatch"
+    FRAME_ENCODING_ERROR = "frame_encoding_error"
+
+
 class ArtifactRecord(BaseModel):
     """A checksummed artifact produced by one experiment run."""
 
@@ -30,9 +38,8 @@ class FailureRecord(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    stage: NonEmptyString
+    category: FailureCategory
     error_type: NonEmptyString
-    message: NonEmptyString
 
 
 class ArtifactManifest(BaseModel):

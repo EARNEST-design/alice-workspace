@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import os
 import platform
-import re
 import subprocess
 import time
 from datetime import UTC, datetime
@@ -21,6 +20,7 @@ from alice.contracts.blendshapes import NonEmptyString
 from alice.experiments.manifest import (
     ArtifactManifest,
     ArtifactRecord,
+    FailureCategory,
     FailureRecord,
     RunStatus,
 )
@@ -28,6 +28,7 @@ from alice.perception import CapturedFrame, FrameSource
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _T = TypeVar("_T")
+_ABORTED_REASON = "capture aborted; see failure metadata"
 
 
 class BlendshapeObserver(Protocol):
@@ -234,7 +235,7 @@ def _build_manifest(
         platform_system=platform.system() or "unknown",
         platform_release=platform.release() or "unknown",
         platform_machine=platform.machine() or "unknown",
-        aborted_reason=failure.message if failure is not None else None,
+        aborted_reason=_ABORTED_REASON if failure is not None else None,
         failure=failure,
         conclusion=None,
     )
@@ -343,11 +344,28 @@ def _dependency_lock_sha256() -> str | None:
 
 
 def _failure_record(stage: str, error: BaseException) -> FailureRecord:
-    sanitized_message = re.sub(r"\s+", " ", str(error)).strip()
-    if not sanitized_message:
-        sanitized_message = error.__class__.__name__
     return FailureRecord(
-        stage=stage,
-        error_type=error.__class__.__name__,
-        message=sanitized_message[:200],
+        category=_failure_category(stage),
+        error_type=_safe_error_type(error),
     )
+
+
+def _failure_category(stage: str) -> FailureCategory:
+    if stage == "interrupted":
+        return FailureCategory.INTERRUPTED
+    if stage == "capture":
+        return FailureCategory.CAPTURE_ERROR
+    if stage == "observe":
+        return FailureCategory.OBSERVER_ERROR
+    if stage == "validate_observation":
+        return FailureCategory.OBSERVATION_IDENTITY_MISMATCH
+    if stage == "encode_frame":
+        return FailureCategory.FRAME_ENCODING_ERROR
+    raise ValueError(f"unknown failure stage: {stage}")
+
+
+def _safe_error_type(error: BaseException) -> str:
+    name = error.__class__.__name__
+    if not name.replace("_", "").isalnum():
+        return "Exception"
+    return name

@@ -178,6 +178,7 @@ def test_interrupted_run_writes_aborted_manifest_without_conclusion(
     assert not (tmp_path / "observations.jsonl").exists()
     payload = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
     assert payload["status"] == "aborted"
+    assert payload["aborted_reason"] == "capture aborted; see failure metadata"
     assert payload["conclusion"] is None
 
 
@@ -216,10 +217,10 @@ def test_operational_failure_writes_aborted_manifest_then_reraises(
     assert not (tmp_path / "observations.jsonl").exists()
     payload = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
     assert payload["status"] == "aborted"
+    assert payload["aborted_reason"] == "capture aborted; see failure metadata"
     assert payload["conclusion"] is None
-    assert payload["failure"]["stage"] == "observe"
+    assert payload["failure"]["category"] == "observer_error"
     assert payload["failure"]["error_type"] == "RuntimeError"
-    assert payload["failure"]["message"] == "observer failed with detail"
 
 
 @pytest.mark.parametrize(
@@ -245,4 +246,40 @@ def test_capture_aborts_and_reraises_on_observation_identity_mismatch(
 
     payload = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
     assert payload["status"] == "aborted"
-    assert payload["failure"]["stage"] == "validate_observation"
+    assert payload["aborted_reason"] == "capture aborted; see failure metadata"
+    assert payload["failure"]["category"] == "observation_identity_mismatch"
+    if message == "camera_id":
+        assert payload["failure"]["error_type"] == "ValueError"
+    else:
+        assert payload["failure"]["error_type"] == "ValueError"
+
+
+def test_failure_manifest_omits_exception_text_and_secrets(
+    tmp_path: Path,
+    frame_source: FakeFrameSource,
+) -> None:
+    secret_token = "TOKEN-abc123-secret"
+    secret_path = "/tmp/private/secret-file.txt"
+
+    class SecretObserver(FakeObserver):
+        def observe(self, frame: CapturedFrame, run_id: str) -> BlendshapeObservation:
+            raise RuntimeError(
+                f"observer failed using {secret_path} and bearer {secret_token}"
+            )
+
+    with pytest.raises(RuntimeError, match=secret_token):
+        run_passive_capture(
+            capture_config(sample_count=1, duration_seconds=1),
+            frame_source,
+            SecretObserver(),
+            tmp_path,
+        )
+
+    manifest_text = (tmp_path / "manifest.json").read_text(encoding="utf-8")
+    assert secret_token not in manifest_text
+    assert secret_path not in manifest_text
+    payload = json.loads(manifest_text)
+    assert payload["aborted_reason"] == "capture aborted; see failure metadata"
+    assert payload["failure"]["category"] == "observer_error"
+    assert payload["failure"]["error_type"] == "RuntimeError"
+    assert "message" not in payload["failure"]
