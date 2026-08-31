@@ -34,9 +34,11 @@ from alice.experiments.manifest import (
     FailureRecord,
     IdentificationObserverProvenance,
     IdentificationRunMetadata,
+    NegotiatedCameraSettings,
     RunKind,
     RunStatus,
 )
+from alice.hardware.adapter import ActuatorAdapter
 from alice.hardware.manifest import load_manifest
 from alice.hardware.mock_adapter import MockActuatorAdapter, MockAdapterScript
 from alice.safety.supervisor import (
@@ -252,7 +254,7 @@ class _ControlledAbort(Exception):
         self.camera_loss = camera_loss
 
 
-def run_identification(
+def run_mock_identification(
     config: IdentificationConfig,
     observer: IdentificationObserver,
     supervisor: SafetySupervisor,
@@ -260,12 +262,42 @@ def run_identification(
     clock: Callable[[], int],
     sleeper: Callable[[float], object],
 ) -> ArtifactManifest:
-    """Run the conservative mock sequence and atomically publish its evidence.
+    """Run mock-only identification with the exact trusted mock adapter."""
+
+    adapter = MockActuatorAdapter(
+        manifest=supervisor.manifest,
+        clock=clock,
+        permit_verifier=supervisor.actuation_permit_verifier,
+        script=config.mock_behavior,
+    )
+    return _run_identification_core(
+        config=config,
+        observer=observer,
+        supervisor=supervisor,
+        adapter=adapter,
+        output_dir=output_dir,
+        clock=clock,
+        sleeper=sleeper,
+    )
+
+
+def _run_identification_core(
+    *,
+    config: IdentificationConfig,
+    observer: IdentificationObserver,
+    supervisor: SafetySupervisor,
+    adapter: ActuatorAdapter,
+    output_dir: Path,
+    clock: Callable[[], int],
+    sleeper: Callable[[float], object],
+) -> ArtifactManifest:
+    """Run the deterministic sequence for a trusted composition root.
 
     The monotonic ``clock`` is the root of request validity and recovery timing.
     If it itself fails, safe reconciliation timestamps cannot be constructed, so
     that exception propagates without a false terminal-state or artifact claim.
-    Other injected runtime boundaries are converted to controlled abort evidence.
+    This is acceptable only for this mock entrypoint. A future hardware composition
+    must add an independent watchdog and revocation path outside this process.
     """
 
     _validate_new_output(output_dir)
@@ -276,18 +308,23 @@ def run_identification(
     aborted_reason: str | None = None
     current_step_id = "run-start"
     baseline: VisualHomeBaseline | None = None
-    runtime_observer = observer.provenance
-    composition_problem = _composition_problem(
-        config=config,
-        supervisor=supervisor,
-        observer=runtime_observer,
-    )
-    adapter = MockActuatorAdapter(
-        manifest=supervisor.manifest,
-        clock=clock,
-        permit_verifier=supervisor.actuation_permit_verifier,
-        script=config.mock_behavior,
-    )
+    runtime_observer: IdentificationObserverProvenance | None
+    composition_problem: tuple[str, str, FailureCategory] | None
+    try:
+        runtime_observer = observer.provenance
+    except Exception:
+        runtime_observer = None
+        composition_problem = (
+            "observer-provenance-error",
+            "runtime observer provenance could not be attested",
+            FailureCategory.CAMERA_LOSS,
+        )
+    else:
+        composition_problem = _composition_problem(
+            config=config,
+            supervisor=supervisor,
+            observer=runtime_observer,
+        )
     runtime_identity = adapter.identity
     if composition_problem is not None:
         status = RunStatus.ABORTED
@@ -433,13 +470,18 @@ def run_identification(
         platform_system=platform.system() or "unknown",
         platform_release=platform.release() or "unknown",
         platform_machine=platform.machine() or "unknown",
-        camera_settings=config.observer.camera_settings,
+        camera_settings=(
+            runtime_observer.camera_settings
+            if runtime_observer is not None
+            else NegotiatedCameraSettings.unavailable()
+        ),
         aborted_reason=aborted_reason,
         failure=failure,
         conclusion=None,
         identification_metadata=IdentificationRunMetadata(
             adapter_identity=runtime_identity,
             observer=runtime_observer,
+            expected_observer=config.observer,
             safety_limits=supervisor.limits,
             preflight=supervisor.preflight_evidence,
             approval=supervisor.operator_approval,
@@ -485,18 +527,19 @@ def _composition_problem(
             "configured hardware manifest does not exist",
             FailureCategory.SAFETY_ERROR,
         )
-    if sha256_path(manifest_path) != config.hardware_manifest_sha256:
+    try:
+        manifest_sha256 = sha256_path(manifest_path)
+        configured_manifest = load_manifest(manifest_path)
+    except (OSError, ValueError):
+        return (
+            "manifest-file-invalid",
+            "configured hardware manifest could not be read and validated",
+            FailureCategory.SAFETY_ERROR,
+        )
+    if manifest_sha256 != config.hardware_manifest_sha256:
         return (
             "manifest-file-hash-mismatch",
             "hardware manifest checksum differs",
-            FailureCategory.SAFETY_ERROR,
-        )
-    try:
-        configured_manifest = load_manifest(manifest_path)
-    except (OSError, ValueError) as exc:
-        return (
-            "manifest-file-invalid",
-            f"configured hardware manifest failed validation: {type(exc).__name__}",
             FailureCategory.SAFETY_ERROR,
         )
     if (
@@ -557,7 +600,7 @@ def _execute_step(
     baseline: VisualHomeBaseline | None,
     observer: IdentificationObserver,
     supervisor: SafetySupervisor,
-    adapter: MockActuatorAdapter,
+    adapter: ActuatorAdapter,
     clock: Callable[[], int],
     sleeper: Callable[[float], object],
     log: _RunLog,
@@ -949,7 +992,7 @@ def _abort_and_recover(
     observer: IdentificationObserver,
     baseline: VisualHomeBaseline | None,
     supervisor: SafetySupervisor,
-    adapter: MockActuatorAdapter,
+    adapter: ActuatorAdapter,
     clock: Callable[[], int],
     sleeper: Callable[[float], object],
     log: _RunLog,

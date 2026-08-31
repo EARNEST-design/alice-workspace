@@ -15,11 +15,12 @@ from alice.contracts.blendshapes import (
     BlendshapeScore,
     ObservationValidity,
 )
+from alice.experiments import system_identification
 from alice.experiments.manifest import IdentificationObserverProvenance, RunStatus
 from alice.experiments.system_identification import (
     IdentificationConfig,
     IdentificationStep,
-    run_identification,
+    run_mock_identification,
 )
 from alice.hardware.adapter import AdapterIdentity, AdapterMode
 from alice.hardware.manifest import HardwareManifest, load_manifest
@@ -199,6 +200,12 @@ class WrongIdentityObserver(RecordingObserver):
     @property
     def provenance(self) -> IdentificationObserverProvenance:
         return super().provenance.model_copy(update={"camera_id": "other-camera"})
+
+
+class RaisingProvenanceObserver(RecordingObserver):
+    @property
+    def provenance(self) -> IdentificationObserverProvenance:
+        raise RuntimeError("secret camera path and participant detail")
 
 
 @pytest.fixture
@@ -384,7 +391,7 @@ def test_exact_sequence_waits_for_status_and_settling_and_correlates_artifacts(
     observer = RecordingObserver(clock)
     run_dir = tmp_path / "run"
 
-    result = run_identification(
+    result = run_mock_identification(
         config(manifest), observer, supervisor, run_dir, clock, clock.sleep
     )
 
@@ -466,7 +473,7 @@ def test_observation_failures_abort_before_next_normal_movement_and_recover_home
     )
     run_dir = tmp_path / failure
 
-    result = run_identification(
+    result = run_mock_identification(
         cfg, observer, supervisor, run_dir, clock, clock.sleep
     )
 
@@ -494,7 +501,7 @@ def test_controller_fault_is_recorded_before_abort_and_no_next_normal_command(
     supervisor = armed_supervisor(manifest, clock)
     run_dir = tmp_path / "fault"
 
-    result = run_identification(
+    result = run_mock_identification(
         config(manifest, mock_behavior={"fault_on_calls": [2]}),
         RecordingObserver(clock),
         supervisor,
@@ -543,7 +550,7 @@ def test_observer_exception_aborts_and_sanitizes_failure(
     supervisor = armed_supervisor(manifest, clock)
     run_dir = tmp_path / "observer-error"
 
-    result = run_identification(
+    result = run_mock_identification(
         config(manifest),
         RaisingObserver(clock),
         supervisor,
@@ -566,7 +573,7 @@ def test_unknown_adapter_application_is_not_inferred_as_home(
     supervisor = armed_supervisor(manifest, clock)
     run_dir = tmp_path / "unknown-application"
 
-    result = run_identification(
+    result = run_mock_identification(
         config(
             manifest,
             mock_behavior={"raise_after_authorization_calls": [2]},
@@ -600,7 +607,7 @@ def test_runner_derives_controller_settling_instead_of_trusting_adapter_flag(
     supervisor = armed_supervisor(manifest, clock)
     run_dir = tmp_path / "lying-settling"
 
-    result = run_identification(
+    result = run_mock_identification(
         config(
             manifest,
             mock_behavior={"controller_output_offset_qus_by_call": {1: 1}},
@@ -622,7 +629,8 @@ def test_runner_derives_controller_settling_instead_of_trusting_adapter_flag(
 def test_public_runner_has_no_adapter_injection_path(
     tmp_path: Path, manifest: HardwareManifest
 ) -> None:
-    assert "adapter" not in inspect.signature(run_identification).parameters
+    assert not hasattr(system_identification, "run_identification")
+    assert "adapter" not in inspect.signature(run_mock_identification).parameters
     clock = FakeClock()
     supervisor = armed_supervisor(manifest, clock)
     deceptive = HardwareCapableFake(
@@ -632,7 +640,7 @@ def test_public_runner_has_no_adapter_injection_path(
     )
 
     with pytest.raises(TypeError, match="adapter"):
-        run_identification(
+        run_mock_identification(
             config=config(manifest),
             observer=RecordingObserver(clock),
             supervisor=supervisor,
@@ -646,12 +654,42 @@ def test_public_runner_has_no_adapter_injection_path(
     assert deceptive.applied_wrappers == []
 
 
+def test_observer_provenance_failure_is_sanitized_and_cancels_armed_run(
+    tmp_path: Path, manifest: HardwareManifest
+) -> None:
+    clock = FakeClock()
+    supervisor = armed_supervisor(manifest, clock)
+    run_dir = tmp_path / "provenance-failure"
+
+    result = run_mock_identification(
+        config(manifest),
+        RaisingProvenanceObserver(clock),
+        supervisor,
+        run_dir,
+        clock,
+        clock.sleep,
+    )
+
+    assert result.status is RunStatus.ABORTED
+    assert result.failure is not None
+    assert result.failure.category == "camera_loss"
+    assert result.failure.error_type == "ObserverProvenanceError"
+    assert supervisor.state is RunState.DISARMED
+    serialized_manifest = (run_dir / "manifest.json").read_text()
+    assert "secret camera path" not in serialized_manifest
+    assert "participant detail" not in serialized_manifest
+    metadata = result.identification_metadata
+    assert metadata is not None
+    assert metadata.observer is None
+    assert metadata.expected_observer == config(manifest).observer
+
+
 def test_runtime_observer_identity_is_rejected_before_start_or_apply(
     tmp_path: Path, manifest: HardwareManifest
 ) -> None:
     clock = FakeClock()
     supervisor = armed_supervisor(manifest, clock)
-    result = run_identification(
+    result = run_mock_identification(
         config(manifest),
         WrongIdentityObserver(clock),
         supervisor,
@@ -682,7 +720,7 @@ def test_supervisor_manifest_global_preflight_difference_cancels_armed_run(
     clock = FakeClock()
     supervisor = armed_supervisor(changed, clock)
 
-    result = run_identification(
+    result = run_mock_identification(
         config(manifest),
         RecordingObserver(clock),
         supervisor,
@@ -704,7 +742,7 @@ def test_watchdog_runs_after_observer_and_prevents_next_movement(
     supervisor = armed_supervisor(manifest, clock)
     run_dir = tmp_path / "watchdog-observer"
 
-    result = run_identification(
+    result = run_mock_identification(
         config(manifest, step_timeout_ms=20_000),
         SlowObserver(clock),
         supervisor,
@@ -734,7 +772,7 @@ def test_sleeper_failure_after_first_motion_aborts_recovers_and_publishes(
     run_dir = tmp_path / "sleeper-failure"
     failing_sleeper = FailingOnceSleeper(clock, fail_on_call=2)
 
-    result = run_identification(
+    result = run_mock_identification(
         config(manifest),
         RecordingObserver(clock),
         supervisor,
@@ -762,7 +800,7 @@ def test_stable_nonbaseline_home_aborts_before_next_movement(
         {"step-0001": 0.20, "step-0002": 0.50, "step-0003": 0.25},
     )
 
-    result = run_identification(
+    result = run_mock_identification(
         config(manifest),
         observer,
         supervisor,
@@ -789,7 +827,7 @@ def test_start_abort_uses_recovery_driver_and_exits_terminal(
     supervisor = armed_supervisor(manifest, clock)
     clock.sleep(60.0)
 
-    result = run_identification(
+    result = run_mock_identification(
         config(manifest),
         RecordingObserver(clock),
         supervisor,
@@ -813,7 +851,7 @@ def test_recovery_deadline_exhaustion_fails_closed(
     supervisor = armed_supervisor(manifest, clock)
     run_dir = tmp_path / "recovery-exhausted"
 
-    result = run_identification(
+    result = run_mock_identification(
         config(
             manifest,
             recovery_timeout_ms=1,
@@ -856,7 +894,7 @@ def test_run_requires_armed_supervisor_and_does_not_move(
         ),
         clock=clock,
     )
-    result = run_identification(
+    result = run_mock_identification(
         config(manifest),
         RecordingObserver(clock),
         supervisor,
@@ -879,7 +917,7 @@ def test_output_directory_is_immutable(
     supervisor = armed_supervisor(manifest, clock)
 
     with pytest.raises(FileExistsError):
-        run_identification(
+        run_mock_identification(
             config(manifest),
             RecordingObserver(clock),
             supervisor,

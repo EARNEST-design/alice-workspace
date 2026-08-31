@@ -73,6 +73,20 @@ Measure how actuator commands change Alice's observed blendshapes. This phase
 uses a dedicated experiment runner and an actuator interface with separate
 mock, replay, and Maestro implementations. Mock mode is the default.
 
+The public mock composition root is `run_mock_identification`. It constructs
+the exact `MockActuatorAdapter` internally and exposes no adapter argument or
+factory hook. Task 6 will add a separate capability-gated hardware entrypoint
+that constructs the exact Maestro adapter from reviewed configuration. Neither
+public entrypoint accepts an arbitrary adapter object; trusted composition
+roots may share a private deterministic execution core. This ruling supersedes
+the original generic runner signature because review showed that adapter
+injection could disguise a hardware-capable implementation as mock provenance.
+
+The injected monotonic clock is adequate for deterministic mock execution. The
+future hardware composition root must additionally provide an independent
+watchdog and permit-revocation path that remains effective if process-local
+clock or runner logic fails.
+
 Hardware mode requires all of the following:
 
 - an explicit command-line enable flag and reviewed run configuration;

@@ -129,7 +129,8 @@ class IdentificationRunMetadata(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     adapter_identity: AdapterIdentity
-    observer: IdentificationObserverProvenance
+    observer: IdentificationObserverProvenance | None
+    expected_observer: IdentificationObserverProvenance
     safety_limits: SafetyLimits
     preflight: PreflightEvidence | None
     approval: OperatorApproval | None
