@@ -40,6 +40,8 @@ class SerialTransport(Protocol):
 
     def close(self) -> None: ...
 
+    def fileno(self) -> int: ...
+
 
 TransportFactory = Callable[[str, float], SerialTransport]
 
@@ -258,6 +260,24 @@ class MaestroAdapter:
             positions_qus=positions,
             observed_monotonic_ns=self._clock(),
         )
+
+    def fileno(self) -> int:
+        """Return the opened transport fd for minimal post-fork detachment."""
+
+        transport = self._transport
+        if transport is None:
+            raise MaestroConnectionError("adapter is not open")
+        try:
+            fd = transport.fileno()
+        except Exception as exc:
+            raise MaestroConnectionError(
+                "opened transport has no usable raw OS file descriptor"
+            ) from exc
+        if type(fd) is not int or fd < 0:
+            raise MaestroConnectionError(
+                "transport raw OS file descriptor must be a nonnegative integer"
+            )
+        return fd
 
     def _wait_for_target(
         self, *, actuator_name: str, channel: int, target_qus: int

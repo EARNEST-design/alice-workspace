@@ -47,6 +47,7 @@ class RecordingMaestro:
         self.instances.append(self)
         self.writes = 0
         self.closed = False
+        self.raw_fd, self._pipe_writer = os.pipe()
 
     @property
     def identity(self) -> AdapterIdentity:
@@ -69,8 +70,23 @@ class RecordingMaestro:
         self.writes += 1
         raise AssertionError("test must not actuate")
 
+    def fileno(self) -> int:
+        return self.raw_fd
+
     def close(self) -> None:
+        if self.closed:
+            return
         self.closed = True
+        os.close(self.raw_fd)
+        os.close(self._pipe_writer)
+
+
+def _fd_is_closed(fd: int) -> bool:
+    try:
+        os.fstat(fd)
+    except OSError:
+        return True
+    return False
 
 
 def _make_files(tmp_path: Path) -> tuple[Path, Path, ElectricalSafetyEvidence]:
@@ -289,7 +305,9 @@ def test_fork_detaches_child_authority_and_parent_remains_valid(prepared) -> Non
             payload = json.dumps(
                 {
                     "rejected": rejected,
-                    "closed": RecordingMaestro.instances[-1].closed,
+                    "raw_fd_closed": _fd_is_closed(
+                        RecordingMaestro.instances[-1].raw_fd
+                    ),
                 }
             ).encode()
             os.write(write_fd, payload)
@@ -303,9 +321,80 @@ def test_fork_detaches_child_authority_and_parent_remains_valid(prepared) -> Non
     _, status = os.waitpid(pid, 0)
     assert os.waitstatus_to_exitcode(status) == 0
     child = json.loads(payload)
-    assert child == {"rejected": True, "closed": True}
+    assert child == {"rejected": True, "raw_fd_closed": True}
     assert RecordingMaestro.instances[-1].closed is False
     cancel_prepared_hardware_identification(result)
+    assert RecordingMaestro.instances[-1].closed is True
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX fork")
+def test_fork_child_cleanup_ignores_held_python_cleanup_locks(prepared) -> None:
+    result, _, _ = prepared
+    adapter = RecordingMaestro.instances[-1]
+    adapter._cleanup_lock = module.threading.Lock()
+    adapter._cleanup_lock.acquire()
+    module._registry_lock.acquire()
+    read_fd, write_fd = os.pipe()
+    try:
+        pid = os.fork()
+        if pid == 0:
+            os.close(read_fd)
+            rejected = False
+            raw_fd_closed = False
+            try:
+                cancel_prepared_hardware_identification(result)
+            except ValueError:
+                rejected = True
+            try:
+                os.fstat(adapter.raw_fd)
+            except OSError:
+                raw_fd_closed = True
+            os.write(
+                write_fd,
+                json.dumps(
+                    {"rejected": rejected, "raw_fd_closed": raw_fd_closed}
+                ).encode(),
+            )
+            os._exit(0)
+    finally:
+        module._registry_lock.release()
+        adapter._cleanup_lock.release()
+        os.close(write_fd)
+    payload = os.read(read_fd, 4096)
+    os.close(read_fd)
+    _, status = os.waitpid(pid, 0)
+    assert os.waitstatus_to_exitcode(status) == 0
+    assert json.loads(payload) == {"rejected": True, "raw_fd_closed": True}
+    cancel_prepared_hardware_identification(result)
+
+
+def test_prepare_fails_before_issuing_capability_without_raw_fd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_path, _, _ = _make_files(tmp_path)
+    config = load_hardware_identification_config(config_path)
+    monkeypatch.setattr(module, "MaestroAdapter", RecordingMaestro)
+    monkeypatch.setattr(RecordingMaestro, "fileno", lambda self: -1)
+    monkeypatch.setattr(
+        module,
+        "_resolve_linux_usb_identity",
+        lambda _: LinuxUsbIdentity(
+            serial_number="00037376",
+            interface_number="00",
+            resolved_tty="/dev/ttyACM0",
+        ),
+    )
+    attestation = _attestation(config)
+    approval = _approval(config_path, config)
+    with pytest.raises(RuntimeError, match="raw OS file descriptor"):
+        prepare_hardware_identification(
+            config_path=config_path,
+            manifest_path=MANIFEST_PATH,
+            approval=approval,
+            attestation=attestation,
+            enable_hardware=True,
+        )
+    assert module._prepared_registry == {}
     assert RecordingMaestro.instances[-1].closed is True
 
 
@@ -319,6 +408,28 @@ def test_prepare_returns_zero_motion_challenge(prepared) -> None:
     assert RecordingMaestro.constructed[-1]["stable_device_path"].endswith(
         "00037376-if00"
     )
+
+
+def test_token_collision_retry_binds_handle_to_registered_token(
+    prepared, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first, config_path, config = prepared
+    first_token = first.issuance_token.get_secret_value()
+    candidates = iter(
+        ("second-power-challenge", first_token, "fresh-collision-free-token")
+    )
+    monkeypatch.setattr(module.secrets, "token_urlsafe", lambda _: next(candidates))
+    attestation = _attestation(config)
+    approval = _approval(config_path, config)
+    second = prepare_hardware_identification(
+        config_path=config_path,
+        manifest_path=MANIFEST_PATH,
+        approval=approval,
+        attestation=attestation,
+        enable_hardware=True,
+    )
+    assert second.issuance_token.get_secret_value() == "fresh-collision-free-token"
+    cancel_prepared_hardware_identification(second)
 
 
 def _power_confirmation(challenge) -> PowerEnableConfirmation:

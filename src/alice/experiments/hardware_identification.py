@@ -298,6 +298,7 @@ class _PreparedState:
         "_supervisor",
         "handle_ref",
         "issuing_pid",
+        "raw_fd",
         "challenge",
         "timer",
     )
@@ -320,6 +321,7 @@ class _PreparedState:
         usb_identity: LinuxUsbIdentity,
         supervisor: SafetySupervisor,
         adapter: MaestroAdapter,
+        raw_fd: int,
     ) -> None:
         self.challenge = challenge
         self._config = config
@@ -336,6 +338,7 @@ class _PreparedState:
         self._usb_identity = usb_identity
         self._supervisor = supervisor
         self._adapter = adapter
+        self.raw_fd = raw_fd
         self._started_at = datetime.now(UTC)
         self.issuing_pid = os.getpid()
         self.handle_ref: weakref.ReferenceType[PreparedHardwareHandle] | None = None
@@ -366,28 +369,19 @@ _registry_lock = threading.Lock()
 _prepared_registry: dict[str, _PreparedState] = {}
 
 
-def _before_fork() -> None:
-    _registry_lock.acquire()
-
-
-def _after_fork_parent() -> None:
-    _registry_lock.release()
-
-
 def _after_fork_child() -> None:
-    inherited = tuple(_prepared_registry.values())
-    _prepared_registry.clear()
-    _registry_lock.release()
-    for state in inherited:
-        if state.timer is not None:
-            state.timer.cancel()
-        _close_state(state, "prepared hardware authority detached after fork")
+    global _prepared_registry
+    inherited, _prepared_registry = _prepared_registry, {}
+    for token in inherited:
+        try:
+            os.close(inherited[token].raw_fd)
+        except OSError:
+            pass
+    inherited.clear()
 
 
 if hasattr(os, "register_at_fork"):
     os.register_at_fork(
-        before=_before_fork,
-        after_in_parent=_after_fork_parent,
         after_in_child=_after_fork_child,
     )
 
@@ -404,6 +398,8 @@ def _close_state(state: _PreparedState, detail: str) -> None:
 
 
 def _remove_state(token: str) -> _PreparedState | None:
+    if token not in _prepared_registry:
+        return None
     with _registry_lock:
         state = _prepared_registry.pop(token, None)
     if state is not None and state.timer is not None:
@@ -691,6 +687,11 @@ def prepare_hardware_identification(
     )
     try:
         adapter.open(token)
+        raw_fd = adapter.fileno()
+        if type(raw_fd) is not int or raw_fd < 0:
+            raise RuntimeError(
+                "opened transport raw OS file descriptor must be a nonnegative integer"
+            )
         snapshot = adapter.read_only_preflight(config.actuator_names)
         home_ok = all(
             abs(snapshot.positions_qus[name] - manifest.actuator(name).home_qus)
@@ -737,16 +738,17 @@ def prepare_hardware_identification(
             usb_identity=identity,
             supervisor=supervisor,
             adapter=adapter,
+            raw_fd=raw_fd,
         )
-        issuance_token = secrets.token_urlsafe(48)
-        handle = PreparedHardwareHandle(
-            challenge=challenge,
-            issuance_token=SecretStr(issuance_token),
-        )
-        state.handle_ref = weakref.ref(handle)
         with _registry_lock:
+            issuance_token = secrets.token_urlsafe(48)
             while issuance_token in _prepared_registry:
                 issuance_token = secrets.token_urlsafe(48)
+            handle = PreparedHardwareHandle(
+                challenge=challenge,
+                issuance_token=SecretStr(issuance_token),
+            )
+            state.handle_ref = weakref.ref(handle)
             _prepared_registry[issuance_token] = state
         timeout_seconds = max(
             0.0,

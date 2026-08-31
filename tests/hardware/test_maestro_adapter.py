@@ -63,6 +63,9 @@ class FakeSerial:
     def close(self) -> None:
         self.closed = True
 
+    def fileno(self) -> int:
+        return 37
+
 
 class ReadErrorSerial(FakeSerial):
     def read(self, size: int) -> bytes:
@@ -179,6 +182,22 @@ def test_import_and_construction_never_open_serial(
 
     assert calls == 0
     assert instance.is_open is False
+
+
+def test_raw_transport_fd_requires_an_open_transport_and_valid_integer(
+    manifest: HardwareManifest,
+) -> None:
+    fake = FakeSerial()
+    instance = adapter(manifest, fake)
+    with pytest.raises(MaestroConnectionError, match="not open"):
+        instance.fileno()
+
+    instance.open(ENABLE)
+    assert instance.fileno() == 37
+
+    fake.fileno = lambda: -1  # type: ignore[method-assign]
+    with pytest.raises(MaestroConnectionError, match="nonnegative integer"):
+        instance.fileno()
 
 
 @pytest.mark.parametrize(
