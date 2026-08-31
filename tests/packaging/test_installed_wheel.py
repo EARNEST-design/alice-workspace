@@ -67,7 +67,9 @@ def test_built_wheel_runs_both_entry_points_without_repository_files(
             "if d.metadata['Name'].lower().startswith('opencv-')); "
             "print(names); "
             "print(files('alice.resources').joinpath("
-            "'passive-blendshape-conclusion.md').read_text()[:31])"
+            "'passive-blendshape-conclusion.md').read_text()[:31]); "
+            "print(files('alice.resources').joinpath("
+            "'actuator-identification-conclusion.md').read_text()[:36])"
         ),
         cwd=outside_repository,
         env=clean_env,
@@ -77,3 +79,4 @@ def test_built_wheel_runs_both_entry_points_without_repository_files(
     assert "alice-passive-capture" in passive_help
     assert "['opencv-contrib-python']" in probe
     assert "# Passive Blendshape Conclusion" in probe
+    assert "# Actuator-identification conclusion" in probe
