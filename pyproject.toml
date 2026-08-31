@@ -12,7 +12,11 @@ dependencies = [
   "numpy",
   "opencv-python-headless",
   "pydantic>=2,<3",
+  "pyyaml",
 ]
+
+[project.scripts]
+alice-camera = "alice.perception.cli:main"
 
 [dependency-groups]
 dev = [
