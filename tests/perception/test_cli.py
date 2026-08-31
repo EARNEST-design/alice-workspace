@@ -11,6 +11,13 @@ from alice.experiments.passive_capture import PassiveCaptureConfig
 from alice.perception.camera import CameraInfo
 from alice.perception.cli import main
 
+ALICE_PHASE_1_PREVIEW_DEVICE = (
+    "/dev/v4l/by-id/usb-046d_HD_Webcam_C525_79C73260-video-index0"
+)
+FUTURE_USER_CAMERA_DEVICE = (
+    "/dev/v4l/by-id/usb-046d_HD_Pro_Webcam_C920_BF4BEEAF-video-index0"
+)
+
 
 def test_list_command_reports_injected_camera_capabilities() -> None:
     output = io.StringIO()
@@ -387,6 +394,38 @@ def test_preview_command_rejects_non_v4l2_selector_before_factory_calls(
         )
 
 
+@pytest.mark.parametrize(
+    "camera_device",
+    [
+        "/dev/video0",
+        "/dev/v4l/by-id/usb-046d_HD_Webcam_C525_79C73260-video-index1",
+        FUTURE_USER_CAMERA_DEVICE,
+    ],
+)
+def test_preview_command_rejects_non_phase_1_preview_selector_before_factory_calls(
+    tmp_path: Path,
+    camera_device: str,
+) -> None:
+    model_path = tmp_path / "face_landmarker.task"
+    model_path.write_bytes(b"model")
+
+    def forbidden_factory(**_kwargs: object) -> object:
+        raise AssertionError("factory must not be called")
+
+    with pytest.raises(ValueError, match="Phase 1 preview requires"):
+        main(
+            [
+                "preview",
+                camera_device,
+                "--model-path",
+                str(model_path),
+            ],
+            stdout=io.StringIO(),
+            camera_factory=forbidden_factory,
+            observer_factory=forbidden_factory,
+        )
+
+
 def test_preview_command_wires_explicit_selector_and_model_path(tmp_path: Path) -> None:
     model_path = tmp_path / "face_landmarker.task"
     model_path.write_bytes(b"model")
@@ -410,7 +449,7 @@ def test_preview_command_wires_explicit_selector_and_model_path(tmp_path: Path) 
     exit_code = main(
         [
             "preview",
-            "/dev/v4l/by-id/usb-Alice-video-index0",
+            ALICE_PHASE_1_PREVIEW_DEVICE,
             "--model-path",
             str(model_path),
             "--width",
@@ -430,8 +469,8 @@ def test_preview_command_wires_explicit_selector_and_model_path(tmp_path: Path) 
 
     assert exit_code == 0
     assert cameras[0].kwargs == {
-        "camera_id": "usb-Alice-video-index0",
-        "device": "/dev/v4l/by-id/usb-Alice-video-index0",
+        "camera_id": "usb-046d_HD_Webcam_C525_79C73260-video-index0",
+        "device": ALICE_PHASE_1_PREVIEW_DEVICE,
         "width": 640,
         "height": 480,
         "fps": 10.0,
@@ -440,3 +479,29 @@ def test_preview_command_wires_explicit_selector_and_model_path(tmp_path: Path) 
         "model_path": model_path,
     }
     assert preview_calls == [(cameras[0], detectors[0], "Alice Preview")]
+
+
+def test_preview_command_closes_camera_when_detector_factory_fails_on_default_runner(
+    tmp_path: Path,
+) -> None:
+    model_path = tmp_path / "face_landmarker.task"
+    model_path.write_bytes(b"model")
+    camera = FakeCamera()
+
+    def fail_preview_detector_factory(**_kwargs: object) -> object:
+        raise RuntimeError("preview detector init failed")
+
+    with pytest.raises(RuntimeError, match="preview detector init failed"):
+        main(
+            [
+                "preview",
+                ALICE_PHASE_1_PREVIEW_DEVICE,
+                "--model-path",
+                str(model_path),
+            ],
+            stdout=io.StringIO(),
+            camera_factory=lambda **_kwargs: camera,
+            preview_detector_factory=fail_preview_detector_factory,
+        )
+
+    assert camera.closed is True

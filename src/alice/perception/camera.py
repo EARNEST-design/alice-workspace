@@ -103,7 +103,12 @@ class OpenCVCamera(FrameSource):
             return
 
         capture = self._capture_factory(self.device)
-        if not capture.isOpened():
+        try:
+            is_opened = capture.isOpened()
+        except Exception:
+            capture.release()
+            raise
+        if not is_opened:
             capture.release()
             raise RuntimeError(f"failed to open camera {self.camera_id!r}")
 

@@ -16,18 +16,22 @@ class FakeCapture:
         self,
         *,
         opened: bool = True,
+        raise_on_is_opened: BaseException | None = None,
         read_result: tuple[bool, np.ndarray | None] = (
             True,
             np.ones((2, 3, 3), dtype=np.uint8),
         ),
     ) -> None:
         self._opened = opened
+        self._raise_on_is_opened = raise_on_is_opened
         self._read_result = read_result
         self.settings: list[tuple[int, float]] = []
         self.released = False
         self.raise_on_setting: set[int] = set()
 
     def isOpened(self) -> bool:
+        if self._raise_on_is_opened is not None:
+            raise self._raise_on_is_opened
         return self._opened
 
     def read(self) -> tuple[bool, np.ndarray | None]:
@@ -85,6 +89,20 @@ def test_camera_open_releases_capture_when_setting_raises() -> None:
     )
 
     with pytest.raises(RuntimeError, match="set failed"):
+        camera.open()
+
+    assert capture.released is True
+
+
+def test_camera_open_releases_capture_when_is_opened_raises() -> None:
+    capture = FakeCapture(raise_on_is_opened=RuntimeError("probe failed"))
+    camera = OpenCVCamera(
+        camera_id="alice-face-webcam",
+        device="/dev/v4l/by-id/usb-Alice-video-index0",
+        capture_factory=lambda _device: capture,
+    )
+
+    with pytest.raises(RuntimeError, match="probe failed"):
         camera.open()
 
     assert capture.released is True

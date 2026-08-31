@@ -27,6 +27,10 @@ from alice.perception.mediapipe_adapter import (
 )
 from alice.perception.preview import run_preview
 
+PHASE_1_PREVIEW_CAMERA_DEVICE = (
+    "/dev/v4l/by-id/usb-046d_HD_Webcam_C525_79C73260-video-index0"
+)
+
 
 def _write_camera_table(stdout: TextIO, cameras: list[CameraInfo]) -> None:
     stdout.write("camera_id\tdevice\tlabel\tcapabilities\tcapability_error\n")
@@ -93,6 +97,16 @@ def _default_preview_detector_factory(*, model_path: Path) -> MediaPipeTaskDetec
     return MediaPipeTaskDetector.from_model_path(model_path)
 
 
+def _validate_phase_1_preview_camera_device(device: str) -> str:
+    validated_device = validate_camera_device_selector(device)
+    if validated_device != PHASE_1_PREVIEW_CAMERA_DEVICE:
+        raise ValueError(
+            "Phase 1 preview requires "
+            f"{PHASE_1_PREVIEW_CAMERA_DEVICE} as the Alice-facing C525 selector"
+        )
+    return validated_device
+
+
 def main(
     argv: Sequence[str] | None = None,
     *,
@@ -110,11 +124,7 @@ def main(
         _write_camera_table(output, list(enumerate_cameras()))
         return 0
     if args.command == "preview":
-        camera_device = validate_camera_device_selector(args.camera_device)
-        preview_camera: Any | None = None
-        preview_detector: Any | None = None
-        preview_error: BaseException | None = None
-        runner_owns_resources = preview_runner is run_preview
+        camera_device = _validate_phase_1_preview_camera_device(args.camera_device)
         preview_factory = preview_detector_factory
         if (
             preview_factory is None
@@ -123,33 +133,26 @@ def main(
             preview_factory = observer_factory
         if preview_factory is None:
             preview_factory = _default_preview_detector_factory
-        try:
-            preview_camera = camera_factory(
-                camera_id=Path(camera_device).name,
-                device=camera_device,
-                width=args.width,
-                height=args.height,
-                fps=args.fps,
-            )
-            preview_detector = preview_factory(model_path=args.model_path)
-            preview_runner(
-                preview_camera,
-                preview_detector,
-                window_title=args.window_title,
-            )
-        except BaseException as error:
-            preview_error = error
-        close_error = (
-            None
-            if runner_owns_resources
-            else _close_owned_resources(preview_camera, preview_detector)
+
+        preview_camera = camera_factory(
+            camera_id=Path(camera_device).name,
+            device=camera_device,
+            width=args.width,
+            height=args.height,
+            fps=args.fps,
         )
-        if preview_error is not None:
+        try:
+            preview_detector = preview_factory(model_path=args.model_path)
+        except BaseException as error:
+            close_error = _close_owned_resources(preview_camera)
             if close_error is not None:
-                preview_error.add_note(f"cleanup failed: {close_error}")
-            raise preview_error
-        if close_error is not None:
-            raise close_error
+                error.add_note(f"cleanup failed: {close_error}")
+            raise error
+        preview_runner(
+            preview_camera,
+            preview_detector,
+            window_title=args.window_title,
+        )
         return 0
     if args.command == "capture":
         config = _load_capture_config(args.config_path, run_id=args.run_id)
