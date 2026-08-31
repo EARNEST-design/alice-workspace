@@ -88,6 +88,9 @@ def run_passive_capture(
     frame_source: FrameSource,
     observer: BlendshapeObserver,
     output_dir: Path,
+    *,
+    monotonic_ns: Callable[[], int] = time.monotonic_ns,
+    sleep: Callable[[float], object] = time.sleep,
 ) -> ArtifactManifest:
     """Capture a reproducible sequence of passive blendshape observations."""
 
@@ -96,6 +99,7 @@ def run_passive_capture(
     observations_tmp_path = run_dir / ".observations.jsonl.tmp"
     artifacts: dict[str, ArtifactRecord] = {}
     observation_count = 0
+    start_ns = monotonic_ns()
 
     try:
         with observations_tmp_path.open("w", encoding="utf-8") as observations_handle:
@@ -152,7 +156,11 @@ def run_passive_capture(
                     )
 
                 if sample_index + 1 < config.sample_count:
-                    time.sleep(config.sample_interval_ms / 1000.0)
+                    interval_ns = config.sample_interval_ms * 1_000_000
+                    deadline_ns = start_ns + (sample_index + 1) * interval_ns
+                    remaining_ns = deadline_ns - monotonic_ns()
+                    if remaining_ns > 0:
+                        sleep(remaining_ns / 1_000_000_000)
 
             _flush_file(observations_handle)
 

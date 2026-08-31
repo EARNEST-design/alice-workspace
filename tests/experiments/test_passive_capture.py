@@ -283,3 +283,29 @@ def test_failure_manifest_omits_exception_text_and_secrets(
     assert payload["failure"]["category"] == "observer_error"
     assert payload["failure"]["error_type"] == "RuntimeError"
     assert "message" not in payload["failure"]
+
+
+def test_capture_sleeps_to_deadlines_instead_of_interval_plus_processing(
+    tmp_path: Path,
+    frame_source: FakeFrameSource,
+) -> None:
+    monotonic_values = iter(
+        [
+            0,
+            20_000_000,
+            120_000_000,
+        ]
+    )
+    sleep_calls: list[float] = []
+
+    manifest = run_passive_capture(
+        capture_config(sample_count=3, sample_interval_ms=100, duration_seconds=1),
+        frame_source,
+        FakeObserver(),
+        tmp_path,
+        monotonic_ns=lambda: next(monotonic_values),
+        sleep=sleep_calls.append,
+    )
+
+    assert manifest.status == "completed"
+    assert sleep_calls == [0.08, 0.08]

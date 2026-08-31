@@ -17,6 +17,9 @@ import numpy as np
 from numpy.typing import NDArray
 
 FrameArray = NDArray[np.uint8]
+_V4L2_DEVICE_PATTERN = re.compile(
+    r"^/dev/(?:video\d+|v4l/by-(?:id|path)/[^/\s]+-video-index\d+)$"
+)
 
 
 @dataclass(frozen=True)
@@ -104,12 +107,16 @@ class OpenCVCamera(FrameSource):
             capture.release()
             raise RuntimeError(f"failed to open camera {self.camera_id!r}")
 
-        if self.width is not None:
-            capture.set(cv2.CAP_PROP_FRAME_WIDTH, float(self.width))
-        if self.height is not None:
-            capture.set(cv2.CAP_PROP_FRAME_HEIGHT, float(self.height))
-        if self.fps is not None:
-            capture.set(cv2.CAP_PROP_FPS, self.fps)
+        try:
+            if self.width is not None:
+                capture.set(cv2.CAP_PROP_FRAME_WIDTH, float(self.width))
+            if self.height is not None:
+                capture.set(cv2.CAP_PROP_FRAME_HEIGHT, float(self.height))
+            if self.fps is not None:
+                capture.set(cv2.CAP_PROP_FPS, self.fps)
+        except Exception:
+            capture.release()
+            raise
 
         self._capture = capture
 
@@ -175,6 +182,17 @@ def list_cameras(
         _camera_info_from_device(device, probe)
         for device in sorted(by_id_glob("/dev/video*"))
     ]
+
+
+def validate_camera_device_selector(device: str) -> str:
+    """Accept only explicit V4L2 video selectors."""
+
+    if not _V4L2_DEVICE_PATTERN.fullmatch(device):
+        raise ValueError(
+            "camera_device must be an explicit V4L2 video selector under "
+            "/dev/videoN, /dev/v4l/by-id/, or /dev/v4l/by-path/"
+        )
+    return device
 
 
 def _camera_info_from_device(

@@ -82,11 +82,14 @@ class FakeCamera:
         self.kwargs = kwargs
         self.opened = False
         self.closed = False
+        self.close_error: RuntimeError | None = None
 
     def open(self) -> None:
         self.opened = True
 
     def close(self) -> None:
+        if self.close_error is not None:
+            raise self.close_error
         self.closed = True
 
 
@@ -249,3 +252,191 @@ def test_capture_command_closes_resources_when_run_store_fails(
 
     assert camera.closed is True
     assert observer.closed is True
+
+
+@pytest.mark.parametrize(
+    "camera_device",
+    [
+        "/dev/ttyACM0",
+        "/tmp/random-device",
+        "relative/path",
+    ],
+)
+def test_capture_command_rejects_non_v4l2_selector_before_factory_calls(
+    tmp_path: Path,
+    camera_device: str,
+) -> None:
+    config_path = tmp_path / "capture.yaml"
+    config_path.write_text(
+        f"""\
+run_id: pilot-template
+camera_id: alice-face-webcam
+camera_device: {camera_device}
+requested_width: 640
+requested_height: 480
+requested_fps: 10
+duration_seconds: 1
+sample_count: 1
+sample_interval_ms: 0
+retain_frames: false
+""",
+        encoding="utf-8",
+    )
+    model_path = tmp_path / "face_landmarker.task"
+    model_path.write_bytes(b"model")
+
+    def forbidden_factory(**_kwargs: object) -> object:
+        raise AssertionError("factory must not be called")
+
+    with pytest.raises(ValueError, match="camera_device"):
+        main(
+            [
+                "capture",
+                str(config_path),
+                str(tmp_path / "run"),
+                "--model-path",
+                str(model_path),
+            ],
+            stdout=io.StringIO(),
+            camera_factory=forbidden_factory,
+            observer_factory=forbidden_factory,
+        )
+
+
+def test_capture_command_closes_camera_when_observer_factory_fails(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "capture.yaml"
+    model_path = tmp_path / "face_landmarker.task"
+    _write_capture_config(config_path)
+    model_path.write_bytes(b"model")
+    camera = FakeCamera()
+
+    def fail_observer_factory(**_kwargs: object) -> object:
+        raise RuntimeError("observer init failed")
+
+    with pytest.raises(RuntimeError, match="observer init failed"):
+        main(
+            [
+                "capture",
+                str(config_path),
+                str(tmp_path / "run"),
+                "--model-path",
+                str(model_path),
+            ],
+            stdout=io.StringIO(),
+            camera_factory=lambda **_kwargs: camera,
+            observer_factory=fail_observer_factory,
+        )
+
+    assert camera.closed is True
+
+
+def test_capture_command_closes_observer_even_when_camera_close_fails(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "capture.yaml"
+    model_path = tmp_path / "face_landmarker.task"
+    _write_capture_config(config_path)
+    model_path.write_bytes(b"model")
+    camera = FakeCamera()
+    camera.close_error = RuntimeError("camera close failed")
+    observer = FakeObserver()
+
+    with pytest.raises(RuntimeError, match="camera close failed"):
+        main(
+            [
+                "capture",
+                str(config_path),
+                str(tmp_path / "run"),
+                "--model-path",
+                str(model_path),
+            ],
+            stdout=io.StringIO(),
+            camera_factory=lambda **_kwargs: camera,
+            observer_factory=lambda **_kwargs: observer,
+            capture_runner=lambda *_args: SimpleNamespace(
+                run_id="passive-001",
+                status="completed",
+            ),
+        )
+
+    assert observer.closed is True
+
+
+def test_preview_command_rejects_non_v4l2_selector_before_factory_calls(
+    tmp_path: Path,
+) -> None:
+    model_path = tmp_path / "face_landmarker.task"
+    model_path.write_bytes(b"model")
+
+    def forbidden_factory(**_kwargs: object) -> object:
+        raise AssertionError("factory must not be called")
+
+    with pytest.raises(ValueError, match="camera_device"):
+        main(
+            [
+                "preview",
+                "/dev/ttyACM0",
+                "--model-path",
+                str(model_path),
+            ],
+            stdout=io.StringIO(),
+            camera_factory=forbidden_factory,
+            observer_factory=forbidden_factory,
+        )
+
+
+def test_preview_command_wires_explicit_selector_and_model_path(tmp_path: Path) -> None:
+    model_path = tmp_path / "face_landmarker.task"
+    model_path.write_bytes(b"model")
+    cameras: list[FakeCamera] = []
+    detectors: list[FakeObserver] = []
+    preview_calls: list[tuple[object, object, str]] = []
+
+    def camera_factory(**kwargs: object) -> FakeCamera:
+        camera = FakeCamera(**kwargs)
+        cameras.append(camera)
+        return camera
+
+    def observer_factory(**kwargs: object) -> FakeObserver:
+        observer = FakeObserver(**kwargs)
+        detectors.append(observer)
+        return observer
+
+    def preview_runner(camera: object, detector: object, *, window_title: str) -> None:
+        preview_calls.append((camera, detector, window_title))
+
+    exit_code = main(
+        [
+            "preview",
+            "/dev/v4l/by-id/usb-Alice-video-index0",
+            "--model-path",
+            str(model_path),
+            "--width",
+            "640",
+            "--height",
+            "480",
+            "--fps",
+            "10",
+            "--window-title",
+            "Alice Preview",
+        ],
+        stdout=io.StringIO(),
+        camera_factory=camera_factory,
+        observer_factory=observer_factory,
+        preview_runner=preview_runner,
+    )
+
+    assert exit_code == 0
+    assert cameras[0].kwargs == {
+        "camera_id": "usb-Alice-video-index0",
+        "device": "/dev/v4l/by-id/usb-Alice-video-index0",
+        "width": 640,
+        "height": 480,
+        "fps": 10.0,
+    }
+    assert detectors[0].kwargs == {
+        "model_path": model_path,
+    }
+    assert preview_calls == [(cameras[0], detectors[0], "Alice Preview")]

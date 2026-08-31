@@ -25,6 +25,7 @@ class FakeCapture:
         self._read_result = read_result
         self.settings: list[tuple[int, float]] = []
         self.released = False
+        self.raise_on_setting: set[int] = set()
 
     def isOpened(self) -> bool:
         return self._opened
@@ -36,6 +37,8 @@ class FakeCapture:
         self.released = True
 
     def set(self, prop_id: int, value: float) -> bool:
+        if prop_id in self.raise_on_setting:
+            raise RuntimeError(f"set failed for {prop_id}")
         self.settings.append((prop_id, value))
         return True
 
@@ -69,6 +72,22 @@ def test_camera_open_raises_when_capture_cannot_open() -> None:
 
     with pytest.raises(RuntimeError, match="open camera"):
         camera.open()
+
+
+def test_camera_open_releases_capture_when_setting_raises() -> None:
+    capture = FakeCapture()
+    capture.raise_on_setting.add(3)
+    camera = OpenCVCamera(
+        camera_id="alice-face-webcam",
+        device="/dev/v4l/by-id/usb-Alice-video-index0",
+        width=640,
+        capture_factory=lambda _device: capture,
+    )
+
+    with pytest.raises(RuntimeError, match="set failed"):
+        camera.open()
+
+    assert capture.released is True
 
 
 def test_camera_read_requires_open() -> None:

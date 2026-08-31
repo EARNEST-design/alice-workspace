@@ -16,8 +16,10 @@ from alice.contracts.blendshapes import (
     ObservationValidity,
 )
 from alice.perception.camera import CapturedFrame
+from alice.perception.preview import PreviewDetection
 
 RgbImage = NDArray[np.uint8]
+DetectorFactory = Callable[[Path], "BlendshapeDetector"]
 
 
 class BlendshapeDetector(Protocol):
@@ -105,20 +107,34 @@ class MediaPipeTaskDetector(BlendshapeDetector):
     def detect_scores(
         self, rgb: RgbImage
     ) -> tuple[float | None, list[tuple[str, float]]]:
+        preview = self.detect_preview(rgb)
+        return preview.face_confidence, list(preview.scores)
+
+    def detect_preview(self, rgb: RgbImage) -> PreviewDetection:
         result = self.landmarker.detect(self.image_factory(rgb))
         face_blendshapes = cast(
             list[list[Any]],
             getattr(result, "face_blendshapes", []),
         )
-        if not face_blendshapes:
-            return None, []
-
-        categories = face_blendshapes[0]
-        scores = [
-            (str(category.category_name), float(category.score))
-            for category in categories
-        ]
-        return _extract_face_confidence(result), scores
+        face_landmarks = cast(list[list[Any]], getattr(result, "face_landmarks", []))
+        scores: tuple[tuple[str, float], ...] = ()
+        if face_blendshapes:
+            categories = face_blendshapes[0]
+            scores = tuple(
+                (str(category.category_name), float(category.score))
+                for category in categories
+            )
+        landmarks: tuple[tuple[float, float], ...] = ()
+        if face_landmarks:
+            landmarks = tuple(
+                (float(landmark.x), float(landmark.y))
+                for landmark in face_landmarks[0]
+            )
+        return PreviewDetection(
+            face_confidence=_extract_face_confidence(result),
+            scores=scores,
+            landmarks=landmarks,
+        )
 
     def close(self) -> None:
         self.landmarker.close()
@@ -133,11 +149,24 @@ class MediaPipeBlendshapeAdapter:
         camera_id: str,
         model_path: Path,
         detector: BlendshapeDetector | None = None,
+        detector_factory: DetectorFactory | None = None,
+        model_hasher: Callable[[Path], str] = _hash_model,
     ) -> None:
         self.camera_id = camera_id
         self.model_path = model_path
-        self.detector = detector or MediaPipeTaskDetector.from_model_path(model_path)
-        self._model_sha256 = _hash_model(model_path)
+        owns_detector = detector is None
+        created_detector = detector or (
+            detector_factory or MediaPipeTaskDetector.from_model_path
+        )(model_path)
+        try:
+            model_sha256 = model_hasher(model_path)
+        except Exception:
+            if owns_detector:
+                _close_detector(created_detector)
+            raise
+        self.detector = created_detector
+        self._owns_detector = owns_detector
+        self._model_sha256 = model_sha256
 
     def observe(self, frame: CapturedFrame, run_id: str) -> BlendshapeObservation:
         rgb = np.ascontiguousarray(frame.bgr[..., ::-1])
@@ -184,5 +213,11 @@ class MediaPipeBlendshapeAdapter:
     def close(self) -> None:
         """Release the underlying MediaPipe task when this adapter owns it."""
 
-        if isinstance(self.detector, MediaPipeTaskDetector):
-            self.detector.close()
+        if self._owns_detector:
+            _close_detector(self.detector)
+
+
+def _close_detector(detector: BlendshapeDetector) -> None:
+    close = getattr(detector, "close", None)
+    if callable(close):
+        close()

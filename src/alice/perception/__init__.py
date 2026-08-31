@@ -14,6 +14,7 @@ from alice.perception.mediapipe_adapter import (
     MediaPipeBlendshapeAdapter,
     MediaPipeTaskDetector,
 )
+from alice.perception.preview import PreviewDetection, run_preview
 
 __all__ = [
     "BlendshapeDetector",
@@ -24,6 +25,8 @@ __all__ = [
     "MediaPipeBlendshapeAdapter",
     "MediaPipeTaskDetector",
     "OpenCVCamera",
+    "PreviewDetection",
     "parse_v4l2_capabilities",
     "probe_camera_capabilities",
+    "run_preview",
 ]

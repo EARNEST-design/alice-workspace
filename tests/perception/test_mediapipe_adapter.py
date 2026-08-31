@@ -4,6 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from alice.contracts import ObservationValidity
 from alice.perception.camera import CapturedFrame
@@ -37,9 +38,13 @@ class UnknownConfidenceDetector:
 class FakeLandmarker:
     def __init__(self, result: object) -> None:
         self.result = result
+        self.closed = False
 
     def detect(self, _image: object) -> object:
         return self.result
+
+    def close(self) -> None:
+        self.closed = True
 
 
 class FakeImageFactory:
@@ -145,3 +150,22 @@ def test_task_detector_reads_fixture_result_shape() -> None:
     assert confidence == 0.88
     assert scores == [("jawOpen", 0.2), ("eyeBlinkLeft", 0.1)]
     assert image_factory.rgb is not None
+
+
+def test_adapter_closes_owned_detector_when_model_hashing_fails(tmp_path: Path) -> None:
+    model = tmp_path / "face.task"
+    model.write_bytes(b"fixture-model")
+    landmarker = FakeLandmarker(result=SimpleNamespace(face_blendshapes=[]))
+    detector = MediaPipeTaskDetector(landmarker=landmarker)
+
+    with pytest.raises(RuntimeError, match="hash failed"):
+        MediaPipeBlendshapeAdapter(
+            camera_id="alice-face-webcam",
+            model_path=model,
+            detector_factory=lambda _model_path: detector,
+            model_hasher=lambda _model_path: (_ for _ in ()).throw(
+                RuntimeError("hash failed")
+            ),
+        )
+
+    assert landmarker.closed is True
