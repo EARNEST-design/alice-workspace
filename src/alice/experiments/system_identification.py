@@ -32,6 +32,7 @@ from alice.experiments.manifest import (
     ArtifactRecord,
     FailureCategory,
     FailureRecord,
+    HardwareIdentificationProvenance,
     IdentificationObserverProvenance,
     IdentificationRunMetadata,
     NegotiatedCameraSettings,
@@ -292,6 +293,8 @@ def _run_identification_core(
     sleeper: Callable[[float], object],
     retained_manifest: HardwareManifest | None = None,
     retained_manifest_sha256: str | None = None,
+    retained_config_sha256: str | None = None,
+    hardware_provenance: HardwareIdentificationProvenance | None = None,
 ) -> ArtifactManifest:
     """Run the deterministic sequence for a trusted composition root.
 
@@ -452,6 +455,10 @@ def _run_identification_core(
                     )
 
     files = _artifact_payloads(config=config, log=log, status=status)
+    if hardware_provenance is not None:
+        files["hardware-provenance.json"] = _json_bytes(
+            hardware_provenance.model_dump(mode="json"), indent=2
+        )
     artifacts = {
         name: _record_for_bytes(name, payload) for name, payload in files.items()
     }
@@ -495,7 +502,8 @@ def _run_identification_core(
                 config.hardware_manifest_canonical_sha256
             ),
             calibration_sha256=config.calibration_sha256,
-            config_sha256=_config_sha256(config),
+            config_sha256=retained_config_sha256 or _config_sha256(config),
+            hardware_provenance=hardware_provenance,
         ),
     )
     files["manifest.json"] = _json_bytes(manifest.model_dump(mode="json"), indent=2)

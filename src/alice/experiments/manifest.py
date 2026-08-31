@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import (
     AwareDatetime,
@@ -123,6 +123,113 @@ class IdentificationObserverProvenance(BaseModel):
     camera_settings: NegotiatedCameraSettings
 
 
+class HardwareApprovalProvenance(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    approval_id: NonEmptyString
+    run_id: NonEmptyString
+    config_sha256: Sha256Hex
+    manifest_sha256: Sha256Hex
+    electrical_evidence_sha256: Sha256Hex
+    approved_at: AwareDatetime
+    approved_monotonic_ns: Annotated[int, Field(ge=0)]
+    source: NonEmptyString
+    operator_acknowledgment: NonEmptyString
+
+
+class PowerChallengeProvenance(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    challenge_id: NonEmptyString
+    run_id: NonEmptyString
+    config_sha256: Sha256Hex
+    manifest_sha256: Sha256Hex
+    electrical_evidence_sha256: Sha256Hex
+    issued_at: AwareDatetime
+    issued_monotonic_ns: Annotated[int, Field(ge=0)]
+    expires_monotonic_ns: Annotated[int, Field(gt=0)]
+    challenge_sha256: Sha256Hex
+
+
+class PowerConfirmationProvenance(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    run_id: NonEmptyString
+    challenge_id: NonEmptyString
+    config_sha256: Sha256Hex
+    manifest_sha256: Sha256Hex
+    electrical_evidence_sha256: Sha256Hex
+    challenge_sha256: Sha256Hex
+    confirmed_at: AwareDatetime
+    confirmed_monotonic_ns: Annotated[int, Field(ge=0)]
+    source: NonEmptyString
+    operator_acknowledgment: NonEmptyString
+
+
+class ElectricalSafetyProvenance(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    evidence_id: NonEmptyString
+    evidence_sha256: Sha256Hex
+    source: NonEmptyString
+    source_document_sha256: Sha256Hex
+    reviewed_at: AwareDatetime
+    reviewer: NonEmptyString
+    supply_voltage_v: Annotated[float, Field(gt=0, allow_inf_nan=False)]
+    current_limit_a: Annotated[float, Field(gt=0, allow_inf_nan=False)]
+    scope: NonEmptyString
+
+
+class UsbIdentityProvenance(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    serial_number: NonEmptyString
+    interface_number: NonEmptyString
+    resolved_tty: NonEmptyString
+    stable_device_path: NonEmptyString
+
+
+class ControllerPreflightPosition(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    actuator_name: NonEmptyString
+    observed_qus: Annotated[int, Field(ge=0)]
+    expected_home_qus: Annotated[int, Field(gt=0)]
+    tolerance_qus: Annotated[int, Field(ge=0)]
+
+
+class ReadOnlyControllerPreflightProvenance(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    controller_error_register: Annotated[int, Field(ge=0, le=0xFFFF)]
+    positions: tuple[ControllerPreflightPosition, ...]
+    observed_monotonic_ns: Annotated[int, Field(ge=0)]
+    issued_set_target: Literal[False]
+
+
+class IndependentWatchdogProvenance(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    implementation: Literal["process-local-os-monotonic-thread/v1"]
+    clock: Literal["time.monotonic"]
+    timeout_ms: Annotated[int, Field(gt=0)]
+    actions: tuple[Literal["revoke-permits", "close-adapter"], ...]
+    survives_process_death: Literal[False]
+
+
+class HardwareIdentificationProvenance(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    raw_config_sha256: Sha256Hex
+    hardware_approval: HardwareApprovalProvenance
+    power_challenge: PowerChallengeProvenance
+    power_confirmation: PowerConfirmationProvenance
+    electrical_safety: ElectricalSafetyProvenance
+    usb_identity: UsbIdentityProvenance
+    read_only_preflight: ReadOnlyControllerPreflightProvenance
+    independent_watchdog: IndependentWatchdogProvenance
+
+
 class IdentificationRunMetadata(BaseModel):
     """Typed safety and provenance snapshot for an actuator-identification run."""
 
@@ -139,6 +246,7 @@ class IdentificationRunMetadata(BaseModel):
     hardware_manifest_canonical_sha256: Sha256Hex
     calibration_sha256: Sha256Hex
     config_sha256: Sha256Hex
+    hardware_provenance: HardwareIdentificationProvenance | None = None
 
 
 class FailureRecord(BaseModel):

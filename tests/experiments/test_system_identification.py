@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import inspect
 import json
 from datetime import UTC, datetime, timedelta
@@ -454,6 +455,117 @@ def test_exact_sequence_waits_for_status_and_settling_and_correlates_artifacts(
         manifest
     ).hardware_manifest_sha256
     assert stored_manifest["camera_settings"]["width"]["value"] == 640
+
+
+def test_private_core_records_raw_config_and_checksummed_hardware_provenance(
+    tmp_path: Path, manifest: HardwareManifest
+) -> None:
+    clock = FakeClock()
+    supervisor = armed_supervisor(manifest, clock)
+    observer = RecordingObserver(clock)
+    adapter = MockActuatorAdapter(
+        manifest=manifest,
+        clock=clock,
+        permit_verifier=supervisor.actuation_permit_verifier,
+    )
+    raw_config_sha256 = "e" * 64
+    provenance = system_identification.HardwareIdentificationProvenance.model_validate(
+        {
+            "raw_config_sha256": raw_config_sha256,
+            "hardware_approval": {
+                "approval_id": "approval",
+                "run_id": "mock-identification-001",
+                "config_sha256": raw_config_sha256,
+                "manifest_sha256": "f" * 64,
+                "electrical_evidence_sha256": "d" * 64,
+                "approved_at": "2026-08-31T00:00:00Z",
+                "approved_monotonic_ns": 1,
+                "source": "operator",
+                "operator_acknowledgment": "reviewed",
+            },
+            "power_challenge": {
+                "challenge_id": "challenge",
+                "run_id": "mock-identification-001",
+                "config_sha256": raw_config_sha256,
+                "manifest_sha256": "f" * 64,
+                "electrical_evidence_sha256": "d" * 64,
+                "issued_at": "2026-08-31T00:00:01Z",
+                "issued_monotonic_ns": 2,
+                "expires_monotonic_ns": 100,
+                "challenge_sha256": "c" * 64,
+            },
+            "power_confirmation": {
+                "run_id": "mock-identification-001",
+                "challenge_id": "challenge",
+                "config_sha256": raw_config_sha256,
+                "manifest_sha256": "f" * 64,
+                "electrical_evidence_sha256": "d" * 64,
+                "challenge_sha256": "c" * 64,
+                "confirmed_at": "2026-08-31T00:00:02Z",
+                "confirmed_monotonic_ns": 3,
+                "source": "operator",
+                "operator_acknowledgment": "power enabled",
+            },
+            "electrical_safety": {
+                "evidence_id": "electrical",
+                "evidence_sha256": "d" * 64,
+                "source": "review.pdf",
+                "source_document_sha256": "b" * 64,
+                "reviewed_at": "2026-08-31T00:00:00Z",
+                "reviewer": "reviewer",
+                "supply_voltage_v": 6.0,
+                "current_limit_a": 5.0,
+                "scope": "test fixture",
+            },
+            "usb_identity": {
+                "serial_number": "00037376",
+                "interface_number": "00",
+                "resolved_tty": "/dev/ttyACM0",
+                "stable_device_path": "/dev/serial/by-id/controller-if00",
+            },
+            "read_only_preflight": {
+                "controller_error_register": 0,
+                "positions": [
+                    {
+                        "actuator_name": "mouth_open",
+                        "observed_qus": 5059,
+                        "expected_home_qus": 5059,
+                        "tolerance_qus": 12,
+                    }
+                ],
+                "observed_monotonic_ns": 4,
+                "issued_set_target": False,
+            },
+            "independent_watchdog": {
+                "implementation": "process-local-os-monotonic-thread/v1",
+                "clock": "time.monotonic",
+                "timeout_ms": 2500,
+                "actions": ["revoke-permits", "close-adapter"],
+                "survives_process_death": False,
+            },
+        }
+    )
+    run_dir = tmp_path / "hardware-provenance-run"
+
+    result = system_identification._run_identification_core(
+        config=config(manifest),
+        observer=observer,
+        supervisor=supervisor,
+        adapter=adapter,
+        output_dir=run_dir,
+        clock=clock,
+        sleeper=clock.sleep,
+        retained_config_sha256=raw_config_sha256,
+        hardware_provenance=provenance,
+    )
+
+    assert result.identification_metadata is not None
+    assert result.identification_metadata.config_sha256 == raw_config_sha256
+    assert result.identification_metadata.hardware_provenance == provenance
+    record = result.artifacts["hardware-provenance.json"]
+    assert record.sha256 == hashlib.sha256(
+        (run_dir / "hardware-provenance.json").read_bytes()
+    ).hexdigest()
 
 
 @pytest.mark.parametrize("failure", ["camera", "variance", "timeout"])

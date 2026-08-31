@@ -9,7 +9,9 @@ import secrets
 import subprocess
 import threading
 import time
+import weakref
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Literal
@@ -29,13 +31,22 @@ from alice.experiments.artifact_store import publish_generation, sha256_path
 from alice.experiments.manifest import (
     ArtifactManifest,
     ArtifactRecord,
+    ControllerPreflightPosition,
+    ElectricalSafetyProvenance,
     FailureCategory,
     FailureRecord,
+    HardwareApprovalProvenance,
+    HardwareIdentificationProvenance,
     IdentificationObserverProvenance,
     IdentificationRunMetadata,
+    IndependentWatchdogProvenance,
     NegotiatedCameraSettings,
+    PowerChallengeProvenance,
+    PowerConfirmationProvenance,
+    ReadOnlyControllerPreflightProvenance,
     RunKind,
     RunStatus,
+    UsbIdentityProvenance,
 )
 from alice.experiments.system_identification import (
     IdentificationConfig,
@@ -43,7 +54,7 @@ from alice.experiments.system_identification import (
     _run_identification_core,
 )
 from alice.hardware.adapter import ActuatorAuthorization, AdapterIdentity
-from alice.hardware.maestro_adapter import MaestroAdapter
+from alice.hardware.maestro_adapter import MaestroAdapter, MaestroPreflightSnapshot
 from alice.hardware.manifest import HardwareManifest
 from alice.safety.supervisor import (
     OperatorApproval,
@@ -85,6 +96,22 @@ class HardwareIdentificationConfig(IdentificationConfig):
         if self.independent_watchdog_ms >= self.step_timeout_ms:
             raise ValueError("independent watchdog must precede the step timeout")
         return self
+
+
+class _HardwareExecutionConfig(IdentificationConfig):
+    """Non-secret immutable configuration serialized into run artifacts."""
+
+    adapter: Literal["maestro"]  # type: ignore[assignment]
+    stable_device_path: NonEmptyString
+    expected_controller_serial: NonEmptyString
+    expected_usb_interface: Literal["00"]
+    approval_id: NonEmptyString
+    electrical_evidence_sha256: Sha256Hex
+    electrical_review_max_age_days: Annotated[int, Field(gt=0)]
+    home_tolerance_qus: Annotated[int, Field(ge=0)]
+    independent_watchdog_ms: Annotated[int, Field(gt=0)]
+    power_enable_challenge_ttl_ms: Annotated[int, Field(gt=0)]
+    safety_limits: SafetyLimits
 
 
 class ElectricalSafetyEvidence(BaseModel):
@@ -249,8 +276,8 @@ class IndependentHardwareWatchdog:
                 pass
 
 
-class PreparedHardwareRun:
-    """Opaque, single-use ownership of a read-only-preflighted serial session."""
+class _PreparedState:
+    """Module-private ownership of a read-only-preflighted serial session."""
 
     __slots__ = (
         "_adapter",
@@ -260,15 +287,16 @@ class PreparedHardwareRun:
         "_electrical_evidence",
         "_electrical_evidence_bytes",
         "_electrical_source_bytes",
-        "_lock",
+        "_execution_config",
         "_manifest",
         "_manifest_bytes",
         "_preflight",
-        "_prepare_timer",
+        "_read_only_snapshot",
+        "_usb_identity",
         "_started_at",
-        "_state",
         "_supervisor",
         "challenge",
+        "timer",
     )
 
     def __init__(
@@ -277,6 +305,7 @@ class PreparedHardwareRun:
         challenge: PowerEnableChallenge,
         config: HardwareIdentificationConfig,
         config_bytes: bytes,
+        execution_config: _HardwareExecutionConfig,
         manifest: HardwareManifest,
         manifest_bytes: bytes,
         electrical_evidence: ElectricalSafetyEvidence,
@@ -284,12 +313,15 @@ class PreparedHardwareRun:
         electrical_source_bytes: bytes,
         approval: HardwareApproval,
         preflight: PreflightEvidence,
+        read_only_snapshot: MaestroPreflightSnapshot,
+        usb_identity: LinuxUsbIdentity,
         supervisor: SafetySupervisor,
         adapter: MaestroAdapter,
     ) -> None:
         self.challenge = challenge
         self._config = config
         self._config_bytes = config_bytes
+        self._execution_config = execution_config
         self._manifest = manifest
         self._manifest_bytes = manifest_bytes
         self._electrical_evidence = electrical_evidence
@@ -297,55 +329,72 @@ class PreparedHardwareRun:
         self._electrical_source_bytes = electrical_source_bytes
         self._approval = approval
         self._preflight = preflight
+        self._read_only_snapshot = read_only_snapshot
+        self._usb_identity = usb_identity
         self._supervisor = supervisor
         self._adapter = adapter
         self._started_at = datetime.now(UTC)
-        self._lock = threading.Lock()
-        self._state = "prepared"
-        timeout_seconds = max(
-            0.0,
-            (challenge.expires_monotonic_ns - time.monotonic_ns()) / 1_000_000_000,
-        )
-        self._prepare_timer = threading.Timer(timeout_seconds, self._expire)
-        self._prepare_timer.daemon = True
-        self._prepare_timer.start()
+        self.timer: threading.Timer | None = None
 
-    def _consume(self) -> None:
-        with self._lock:
-            if self._state != "prepared":
-                raise ValueError("prepared hardware run is already consumed")
-            self._state = "consumed"
-            self._prepare_timer.cancel()
 
-    def cancel(self) -> None:
-        self._consume()
-        self._cancel_resources()
+@dataclass(frozen=True, slots=True, weakref_slot=True)
+class PreparedHardwareHandle:
+    """Display-only challenge and opaque same-process issuance capability."""
 
-    def cancel_if_open(self) -> None:
-        with self._lock:
-            if self._state != "prepared":
-                return
-            self._state = "consumed"
-            self._prepare_timer.cancel()
-        self._cancel_resources()
+    challenge: PowerEnableChallenge
+    issuance_token: SecretStr
 
-    def _cancel_resources(self) -> None:
-        try:
-            self._supervisor.revoke_external_authority(
-                "prepared hardware run cancelled before power enable"
-            )
-        finally:
-            self._adapter.close()
 
-    def _expire(self) -> None:
-        with self._lock:
-            if self._state != "prepared":
-                return
-            self._state = "consumed"
-        try:
-            self._cancel_resources()
-        except Exception:
-            pass
+_registry_lock = threading.Lock()
+_prepared_registry: dict[str, _PreparedState] = {}
+
+
+def _close_state(state: _PreparedState, detail: str) -> None:
+    try:
+        state._supervisor.revoke_external_authority(detail)
+    except Exception:
+        pass
+    try:
+        state._adapter.close()
+    except Exception:
+        pass
+
+
+def _remove_state(token: str) -> _PreparedState | None:
+    with _registry_lock:
+        state = _prepared_registry.pop(token, None)
+    if state is not None and state.timer is not None:
+        state.timer.cancel()
+    return state
+
+
+def _expire_or_abandon(token: str) -> None:
+    state = _remove_state(token)
+    if state is not None:
+        _close_state(state, "prepared hardware handle expired or was abandoned")
+
+
+def _challenge_digest(challenge: PowerEnableChallenge) -> str:
+    payload = challenge.model_dump(mode="json", exclude={"challenge_sha256"})
+    return _sha256_bytes(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    )
+
+
+def _consume_handle(handle: PreparedHardwareHandle) -> _PreparedState:
+    token = handle.issuance_token.get_secret_value()
+    state = _remove_state(token)
+    if state is None:
+        raise ValueError("prepared hardware handle is unknown or consumed")
+    challenge_ok = (
+        handle.challenge == state.challenge
+        and _challenge_digest(handle.challenge) == handle.challenge.challenge_sha256
+        and _challenge_digest(state.challenge) == state.challenge.challenge_sha256
+    )
+    if not challenge_ok:
+        _close_state(state, "prepared hardware challenge integrity failed")
+        raise ValueError("prepared hardware challenge was mutated or forged")
+    return state
 
 
 def _sha256_bytes(payload: bytes) -> str:
@@ -365,6 +414,18 @@ def load_hardware_identification_config(
     payload = Path(path).read_bytes()
     return HardwareIdentificationConfig.model_validate(
         _yaml_mapping(payload, "hardware identification config")
+    )
+
+
+def _execution_config(
+    config: HardwareIdentificationConfig,
+) -> _HardwareExecutionConfig:
+    allowed = set(_HardwareExecutionConfig.model_fields)
+    values = config.model_dump(
+        mode="python", exclude={"enable_token", "electrical_evidence_path"}
+    )
+    return _HardwareExecutionConfig.model_validate(
+        {name: value for name, value in values.items() if name in allowed}
     )
 
 
@@ -440,29 +501,19 @@ def _challenge(
     issued_at = datetime.now(UTC)
     issued_ns = time.monotonic_ns()
     expires_ns = issued_ns + config.power_enable_challenge_ttl_ms * 1_000_000
-    values = {
-        "challenge_id": secrets.token_urlsafe(32),
-        "run_id": config.run_id,
-        "config_sha256": config_hash,
-        "manifest_sha256": manifest_hash,
-        "electrical_evidence_sha256": evidence_hash,
-        "issued_at": issued_at.isoformat(),
-        "issued_monotonic_ns": issued_ns,
-        "expires_monotonic_ns": expires_ns,
-    }
-    digest = _sha256_bytes(
-        json.dumps(values, sort_keys=True, separators=(",", ":")).encode()
-    )
-    return PowerEnableChallenge(
-        challenge_id=str(values["challenge_id"]),
-        run_id=str(values["run_id"]),
-        config_sha256=str(values["config_sha256"]),
-        manifest_sha256=str(values["manifest_sha256"]),
-        electrical_evidence_sha256=str(values["electrical_evidence_sha256"]),
+    provisional = PowerEnableChallenge(
+        challenge_id=secrets.token_urlsafe(32),
+        run_id=config.run_id,
+        config_sha256=config_hash,
+        manifest_sha256=manifest_hash,
+        electrical_evidence_sha256=evidence_hash,
         issued_at=issued_at,
         issued_monotonic_ns=issued_ns,
         expires_monotonic_ns=expires_ns,
-        challenge_sha256=digest,
+        challenge_sha256="0" * 64,
+    )
+    return provisional.model_copy(
+        update={"challenge_sha256": _challenge_digest(provisional)}
     )
 
 
@@ -473,7 +524,7 @@ def prepare_hardware_identification(
     approval: HardwareApproval | None,
     attestation: HardwarePreflightAttestation,
     enable_hardware: bool,
-) -> PreparedHardwareRun:
+) -> PreparedHardwareHandle:
     """Perform power-off gates and read-only device preflight, then pause."""
 
     # Each mutable input is read exactly once; all later work uses these bytes/objects.
@@ -613,15 +664,17 @@ def prepare_hardware_identification(
         result = supervisor.preflight(preflight)
         if not result.accepted or result.state is not RunState.PREFLIGHT:
             raise RuntimeError("device-reading preflight rejected")
-        return PreparedHardwareRun(
-            challenge=_challenge(
-                config,
-                config_hash=config_hash,
-                manifest_hash=manifest_hash,
-                evidence_hash=evidence_hash,
-            ),
+        challenge = _challenge(
+            config,
+            config_hash=config_hash,
+            manifest_hash=manifest_hash,
+            evidence_hash=evidence_hash,
+        )
+        state = _PreparedState(
+            challenge=challenge,
             config=config,
             config_bytes=config_bytes,
+            execution_config=_execution_config(config),
             manifest=manifest,
             manifest_bytes=manifest_bytes,
             electrical_evidence=evidence,
@@ -629,9 +682,32 @@ def prepare_hardware_identification(
             electrical_source_bytes=electrical_source_bytes,
             approval=approval,
             preflight=preflight,
+            read_only_snapshot=snapshot,
+            usb_identity=identity,
             supervisor=supervisor,
             adapter=adapter,
         )
+        issuance_token = secrets.token_urlsafe(48)
+        with _registry_lock:
+            while issuance_token in _prepared_registry:
+                issuance_token = secrets.token_urlsafe(48)
+            _prepared_registry[issuance_token] = state
+        timeout_seconds = max(
+            0.0,
+            (challenge.expires_monotonic_ns - time.monotonic_ns()) / 1_000_000_000,
+        )
+        timer = threading.Timer(
+            timeout_seconds, _expire_or_abandon, args=(issuance_token,)
+        )
+        timer.daemon = True
+        state.timer = timer
+        timer.start()
+        handle = PreparedHardwareHandle(
+            challenge=challenge,
+            issuance_token=SecretStr(issuance_token),
+        )
+        weakref.finalize(handle, _expire_or_abandon, issuance_token)
+        return handle
     except BaseException:
         try:
             supervisor.revoke_external_authority("hardware preparation failed")
@@ -736,14 +812,80 @@ def _git_revision() -> str | None:
     return value or None
 
 
+def _hardware_provenance(
+    state: _PreparedState,
+    confirmation: PowerEnableConfirmation,
+) -> HardwareIdentificationProvenance:
+    config = state._config
+    evidence = state._electrical_evidence
+    snapshot = state._read_only_snapshot
+    approval_values = state._approval.model_dump(
+        mode="python", exclude={"enable_token", "confirmation_text"}
+    )
+    return HardwareIdentificationProvenance(
+        raw_config_sha256=state.challenge.config_sha256,
+        hardware_approval=HardwareApprovalProvenance.model_validate(
+            approval_values
+        ),
+        power_challenge=PowerChallengeProvenance.model_validate(
+            state.challenge.model_dump(mode="python")
+        ),
+        power_confirmation=PowerConfirmationProvenance.model_validate(
+            confirmation.model_dump(mode="python")
+        ),
+        electrical_safety=ElectricalSafetyProvenance(
+            evidence_id=evidence.evidence_id,
+            evidence_sha256=state.challenge.electrical_evidence_sha256,
+            source=evidence.source,
+            source_document_sha256=evidence.source_document_sha256,
+            reviewed_at=evidence.reviewed_at,
+            reviewer=evidence.reviewer,
+            supply_voltage_v=evidence.supply_voltage_v,
+            current_limit_a=evidence.current_limit_a,
+            scope=evidence.scope,
+        ),
+        usb_identity=UsbIdentityProvenance(
+            serial_number=state._usb_identity.serial_number,
+            interface_number=state._usb_identity.interface_number,
+            resolved_tty=state._usb_identity.resolved_tty,
+            stable_device_path=config.stable_device_path,
+        ),
+        read_only_preflight=ReadOnlyControllerPreflightProvenance(
+            controller_error_register=snapshot.controller_error_register,
+            positions=tuple(
+                ControllerPreflightPosition(
+                    actuator_name=name,
+                    observed_qus=observed,
+                    expected_home_qus=state._manifest.actuator(name).home_qus,
+                    tolerance_qus=config.home_tolerance_qus,
+                )
+                for name, observed in sorted(snapshot.positions_qus.items())
+            ),
+            observed_monotonic_ns=snapshot.observed_monotonic_ns,
+            issued_set_target=False,
+        ),
+        independent_watchdog=IndependentWatchdogProvenance(
+            implementation="process-local-os-monotonic-thread/v1",
+            clock="time.monotonic",
+            timeout_ms=config.independent_watchdog_ms,
+            actions=("revoke-permits", "close-adapter"),
+            survives_process_death=False,
+        ),
+    )
+
+
 def _publish_unexpected_failure(
-    prepared: PreparedHardwareRun,
+    prepared: _PreparedState,
     *,
     confirmation: PowerEnableConfirmation,
     output_dir: Path,
     error: BaseException,
 ) -> None:
-    config = prepared._config
+    config = prepared._execution_config
+    provenance = _hardware_provenance(prepared, confirmation)
+    provenance_payload = json.dumps(
+        provenance.model_dump(mode="json"), sort_keys=True, indent=2
+    ).encode()
     failure_payload = json.dumps(
         {
             "schema_version": "hardware-failure/v1",
@@ -755,11 +897,7 @@ def _publish_unexpected_failure(
                 prepared.challenge.electrical_evidence_sha256
             ),
             "challenge_sha256": prepared.challenge.challenge_sha256,
-            "approval": prepared._approval.model_dump(mode="json"),
-            "power_confirmation": confirmation.model_dump(mode="json"),
-            "electrical_evidence": prepared._electrical_evidence.model_dump(
-                mode="json"
-            ),
+            "hardware_provenance_sha256": _sha256_bytes(provenance_payload),
         },
         sort_keys=True,
         indent=2,
@@ -767,7 +905,10 @@ def _publish_unexpected_failure(
     artifacts = {
         "hardware-failure.json": _artifact_record(
             "hardware-failure.json", failure_payload
-        )
+        ),
+        "hardware-provenance.json": _artifact_record(
+            "hardware-provenance.json", provenance_payload
+        ),
     }
     lock_path = Path("uv.lock")
     manifest = ArtifactManifest(
@@ -806,10 +947,12 @@ def _publish_unexpected_failure(
             hardware_manifest_canonical_sha256=prepared._manifest.canonical_sha256,
             calibration_sha256=prepared._manifest.calibration_sha256,
             config_sha256=prepared.challenge.config_sha256,
+            hardware_provenance=provenance,
         ),
     )
     files = {
         "hardware-failure.json": failure_payload,
+        "hardware-provenance.json": provenance_payload,
         "manifest.json": json.dumps(
             manifest.model_dump(mode="json"), sort_keys=True, indent=2
         ).encode(),
@@ -819,17 +962,17 @@ def _publish_unexpected_failure(
 
 def execute_prepared_hardware_identification(
     *,
-    prepared: PreparedHardwareRun,
+    prepared: PreparedHardwareHandle,
     observer: IdentificationObserver,
     output_dir: Path,
     confirmation: PowerEnableConfirmation,
 ) -> ArtifactManifest:
     """Consume a prepared session only after a new, bound power-on confirmation."""
 
-    prepared._consume()
-    config = prepared._config
-    supervisor = prepared._supervisor
-    adapter = prepared._adapter
+    state = _consume_handle(prepared)
+    config = state._execution_config
+    supervisor = state._supervisor
+    adapter = state._adapter
     watchdog = IndependentHardwareWatchdog(
         timeout_seconds=config.independent_watchdog_ms / 1_000,
         revoke=lambda: supervisor.revoke_external_authority(
@@ -839,14 +982,14 @@ def execute_prepared_hardware_identification(
     )
     try:
         _validate_power_confirmation(
-            prepared.challenge,
+            state.challenge,
             confirmation,
             now_wall=datetime.now(UTC),
             now_ns=time.monotonic_ns(),
         )
         armed = supervisor.arm(
             OperatorApproval(
-                approval_id=prepared._approval.approval_id,
+                approval_id=state._approval.approval_id,
                 run_id=config.run_id,
                 confirmed_monotonic_ns=confirmation.confirmed_monotonic_ns,
             )
@@ -862,8 +1005,10 @@ def execute_prepared_hardware_identification(
             output_dir=output_dir,
             clock=time.monotonic_ns,
             sleeper=time.sleep,
-            retained_manifest=prepared._manifest,
-            retained_manifest_sha256=prepared.challenge.manifest_sha256,
+            retained_manifest=state._manifest,
+            retained_manifest_sha256=state.challenge.manifest_sha256,
+            retained_config_sha256=state.challenge.config_sha256,
+            hardware_provenance=_hardware_provenance(state, confirmation),
         )
     except BaseException as error:
         try:
@@ -874,7 +1019,7 @@ def execute_prepared_hardware_identification(
             pass
         try:
             _publish_unexpected_failure(
-                prepared,
+                state,
                 confirmation=confirmation,
                 output_dir=output_dir,
                 error=error,
@@ -893,5 +1038,8 @@ def execute_prepared_hardware_identification(
             pass
 
 
-def cancel_prepared_hardware_identification(prepared: PreparedHardwareRun) -> None:
-    prepared.cancel()
+def cancel_prepared_hardware_identification(
+    prepared: PreparedHardwareHandle,
+) -> None:
+    state = _consume_handle(prepared)
+    _close_state(state, "prepared hardware run cancelled before power enable")

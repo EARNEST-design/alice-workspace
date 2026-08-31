@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import gc
 import hashlib
 import inspect
 import json
 import time
+from dataclasses import fields, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 import yaml
+from pydantic import SecretStr, ValidationError
 
 import alice.experiments.hardware_identification as module
 from alice.experiments.hardware_identification import (
@@ -18,6 +21,7 @@ from alice.experiments.hardware_identification import (
     HardwarePreflightAttestation,
     LinuxUsbIdentity,
     PowerEnableConfirmation,
+    PreparedHardwareHandle,
     cancel_prepared_hardware_identification,
     execute_prepared_hardware_identification,
     load_hardware_identification_config,
@@ -163,7 +167,10 @@ def prepared(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         enable_hardware=True,
     )
     yield result, config_path, config
-    result.cancel_if_open()
+    try:
+        cancel_prepared_hardware_identification(result)
+    except ValueError:
+        pass
 
 
 def test_public_lifecycle_has_two_stages_and_no_combined_runner() -> None:
@@ -183,6 +190,59 @@ def test_public_lifecycle_has_two_stages_and_no_combined_runner() -> None:
             "sleeper",
             "resolver",
         } & parameters.keys()
+    assert [item.name for item in fields(PreparedHardwareHandle)] == [
+        "challenge",
+        "issuance_token",
+    ]
+
+
+def test_forged_or_wrong_process_handle_is_rejected_without_io(tmp_path: Path) -> None:
+    challenge = module.PowerEnableChallenge(
+        challenge_id="forged",
+        run_id="forged-run",
+        config_sha256="a" * 64,
+        manifest_sha256="b" * 64,
+        electrical_evidence_sha256="c" * 64,
+        issued_at=datetime.now(UTC),
+        issued_monotonic_ns=time.monotonic_ns(),
+        expires_monotonic_ns=time.monotonic_ns() + 1_000_000_000,
+        challenge_sha256="d" * 64,
+    )
+    forged = PreparedHardwareHandle(
+        challenge=challenge,
+        issuance_token=SecretStr("token-from-another-process"),
+    )
+    with pytest.raises(ValueError, match="unknown"):
+        execute_prepared_hardware_identification(
+            prepared=forged,
+            observer=object(),
+            output_dir=tmp_path / "unused",
+            confirmation=_power_confirmation(challenge),
+        )
+    with pytest.raises(ValueError, match="unknown"):
+        cancel_prepared_hardware_identification(forged)
+
+
+def test_challenge_is_frozen_and_mutated_copy_burns_prepared_authority(
+    prepared, tmp_path: Path
+) -> None:
+    result, _, _ = prepared
+    with pytest.raises(ValidationError):
+        result.challenge.run_id = "mutated"  # type: ignore[misc]
+    copied = replace(
+        result,
+        challenge=result.challenge.model_copy(update={"run_id": "mutated"}),
+    )
+    with pytest.raises(ValueError, match="challenge"):
+        execute_prepared_hardware_identification(
+            prepared=copied,
+            observer=object(),
+            output_dir=tmp_path / "unused",
+            confirmation=_power_confirmation(copied.challenge),
+        )
+    assert RecordingMaestro.instances[-1].closed is True
+    with pytest.raises(ValueError, match="unknown|consumed"):
+        cancel_prepared_hardware_identification(result)
 
 
 def test_prepare_returns_zero_motion_challenge(prepared) -> None:
@@ -219,10 +279,12 @@ def test_execution_requires_new_confirmation_and_is_single_use(
 ) -> None:
     result, _, _ = prepared
     called = False
+    captured: dict[str, object] = {}
 
-    def fake_core(**_: object) -> object:
+    def fake_core(**kwargs: object) -> object:
         nonlocal called
         called = True
+        captured.update(kwargs)
         return object()
 
     monkeypatch.setattr(module, "_run_identification_core", fake_core)
@@ -233,6 +295,20 @@ def test_execution_requires_new_confirmation_and_is_single_use(
         confirmation=_power_confirmation(result.challenge),
     )
     assert called is True
+    stored_config = captured["config"].model_dump(mode="json")
+    assert "enable_token" not in stored_config
+    assert "run-secret-not-in-repository" not in json.dumps(stored_config)
+    assert captured["retained_config_sha256"] == result.challenge.config_sha256
+    provenance = captured["hardware_provenance"]
+    assert provenance.raw_config_sha256 == result.challenge.config_sha256
+    assert provenance.usb_identity.interface_number == "00"
+    assert provenance.read_only_preflight.issued_set_target is False
+    assert provenance.independent_watchdog.survives_process_death is False
+    serialized_provenance = provenance.model_dump_json()
+    assert "run-secret-not-in-repository" not in serialized_provenance
+    assert "enable_token" not in serialized_provenance
+    assert "confirmation_text" not in serialized_provenance
+    assert result.issuance_token.get_secret_value() not in serialized_provenance
     with pytest.raises(ValueError, match="consumed"):
         execute_prepared_hardware_identification(
             prepared=result,
@@ -358,7 +434,13 @@ def test_keyboard_interrupt_publishes_sanitized_failure(
     assert manifest["status"] == "aborted"
     assert manifest["failure"]["error_type"] == "KeyboardInterrupt"
     assert "secret detail" not in json.dumps(manifest)
-    assert manifest["config"]["enable_token"] == "**********"
+    assert "enable_token" not in manifest["config"]
+    for artifact in output.iterdir():
+        content = artifact.read_text()
+        assert "run-secret-not-in-repository" not in content
+        assert "enable_token" not in content
+        assert "confirmation_text" not in content
+        assert result.issuance_token.get_secret_value() not in content
     assert RecordingMaestro.instances[-1].closed is True
 
 
@@ -543,3 +625,36 @@ def test_abandoned_prepared_challenge_expires_and_closes(
     assert RecordingMaestro.instances[-1].closed is True
     with pytest.raises(ValueError, match="consumed"):
         cancel_prepared_hardware_identification(result)
+
+
+def test_dropped_handle_finalizer_closes_private_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_path, _, _ = _make_files(tmp_path)
+    config = load_hardware_identification_config(config_path)
+    RecordingMaestro.constructed.clear()
+    RecordingMaestro.instances.clear()
+    monkeypatch.setattr(module, "MaestroAdapter", RecordingMaestro)
+    monkeypatch.setattr(
+        module,
+        "_resolve_linux_usb_identity",
+        lambda _: LinuxUsbIdentity(
+            serial_number="00037376",
+            interface_number="00",
+            resolved_tty="/dev/ttyACM0",
+        ),
+    )
+    attestation = _attestation(config)
+    handle = prepare_hardware_identification(
+        config_path=config_path,
+        manifest_path=MANIFEST_PATH,
+        approval=_approval(config_path, config),
+        attestation=attestation,
+        enable_hardware=True,
+    )
+    del handle
+    gc.collect()
+    deadline = time.monotonic() + 1.0
+    while not RecordingMaestro.instances[-1].closed and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert RecordingMaestro.instances[-1].closed is True
