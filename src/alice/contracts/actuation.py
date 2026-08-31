@@ -63,7 +63,13 @@ class ActuatorStatusState(StrEnum):
 
 
 class ActuatorStatus(BaseModel):
-    """Status returned by an actuator adapter for one pose request."""
+    """Status returned by an actuator adapter for one pose request.
+
+    ``APPLIED`` reports a completed application, ``REJECTED`` means nothing was
+    forwarded, and ``FAULT`` may preserve the subset known to have been applied
+    before an error.  ``applied_targets`` describes known physical state, never
+    merely attempted writes.
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -74,7 +80,10 @@ class ActuatorStatus(BaseModel):
     calibration_sha256: Sha256Hex
     reported_monotonic_ns: MonotonicNanoseconds
     state: ActuatorStatusState
-    applied_targets: tuple[ActuatorTarget, ...] = ()
+    applied_targets: tuple[ActuatorTarget, ...] = Field(
+        default=(),
+        description="Targets known to have been physically applied.",
+    )
     fault_code: NonEmptyString | None = None
     detail: NonEmptyString | None = None
 
@@ -88,11 +97,13 @@ class ActuatorStatus(BaseModel):
                 raise ValueError("an applied status requires applied_targets")
             if self.fault_code is not None:
                 raise ValueError("an applied status cannot carry a fault_code")
-        else:
+        elif self.state is ActuatorStatusState.REJECTED:
             if self.applied_targets:
-                raise ValueError(
-                    "a rejected or fault status cannot carry applied_targets"
-                )
+                raise ValueError("a rejected status cannot carry applied_targets")
             if self.fault_code is None:
                 raise ValueError("a rejected or fault status requires a fault_code")
+        elif self.fault_code is None:
+            # FAULT deliberately permits partial targets to preserve physical-state
+            # evidence after a short write or controller failure.
+            raise ValueError("a rejected or fault status requires a fault_code")
         return self

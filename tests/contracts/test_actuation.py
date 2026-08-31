@@ -92,16 +92,41 @@ def test_applied_status_requires_at_least_one_applied_target() -> None:
         make_status(applied_targets=())
 
 
-@pytest.mark.parametrize(
-    "state", [ActuatorStatusState.REJECTED, ActuatorStatusState.FAULT]
-)
-def test_non_applied_status_rejects_applied_targets(
-    state: ActuatorStatusState,
-) -> None:
-    """A failed status must not ambiguously claim that targets were applied."""
+def test_rejected_status_rejects_applied_targets() -> None:
+    """A pre-forwarding rejection cannot truthfully report applied targets."""
 
     with pytest.raises(ValidationError, match="cannot carry applied_targets"):
-        make_status(state=state, fault_code="adapter-failure")
+        make_status(state=ActuatorStatusState.REJECTED, fault_code="not-forwarded")
+
+
+def test_fault_status_preserves_partially_applied_targets() -> None:
+    """A forwarding fault must retain evidence of any known physical application."""
+
+    status = make_status(
+        state=ActuatorStatusState.FAULT,
+        fault_code="partial-write",
+        applied_targets=(
+            {"actuator_name": "mouth_open", "normalized_position": 0.1},
+        ),
+    )
+
+    assert status.applied_targets == (
+        ActuatorTarget(actuator_name="mouth_open", normalized_position=0.1),
+    )
+
+
+def test_fault_status_rejects_duplicate_applied_target_names() -> None:
+    """Partial-state evidence remains unambiguous by semantic actuator name."""
+
+    with pytest.raises(ValidationError, match="unique actuator_name"):
+        make_status(
+            state=ActuatorStatusState.FAULT,
+            fault_code="partial-write",
+            applied_targets=(
+                {"actuator_name": "mouth_open", "normalized_position": 0.1},
+                {"actuator_name": "mouth_open", "normalized_position": 0.2},
+            ),
+        )
 
 
 def test_applied_status_rejects_fault_code() -> None:
