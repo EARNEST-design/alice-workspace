@@ -286,6 +286,7 @@ class ShutdownFinalizationManifest(BaseModel):
     generated_monotonic_ns: Annotated[int, Field(ge=0)]
     challenge_id: NonEmptyString
     config_sha256: Sha256Hex
+    execution_config_sha256: Sha256Hex
     manifest_sha256: Sha256Hex
     output_identity_sha256: Sha256Hex
     aborted_run_manifest: ArtifactRecord
@@ -309,6 +310,27 @@ def _shutdown_finalization(
     original_manifest = output_dir / "manifest.json"
     if not original_manifest.is_file():
         raise FileNotFoundError("aborted run manifest is unavailable")
+    aborted = ArtifactManifest.model_validate_json(original_manifest.read_bytes())
+    metadata = aborted.identification_metadata
+    provenance = metadata.hardware_provenance if metadata is not None else None
+    if (
+        aborted.status is not RunStatus.ABORTED
+        or aborted.run_kind is not RunKind.ACTUATOR_IDENTIFICATION
+        or metadata is None
+        or not metadata.adapter_identity.hardware_capable
+        or provenance is None
+    ):
+        raise ValueError("shutdown finalization requires an aborted hardware run")
+    challenge = provenance.power_challenge
+    expected = {
+        "run_id": aborted.run_id,
+        "challenge_id": challenge.challenge_id,
+        "config_sha256": provenance.approved_raw_config_sha256,
+        "manifest_sha256": metadata.hardware_manifest_sha256,
+        "output_identity_sha256": challenge.output_identity_sha256,
+    }
+    if any(evidence.get(key) != value for key, value in expected.items()):
+        raise ValueError("shutdown evidence does not match aborted hardware provenance")
     evidence_payload = json.dumps(evidence, sort_keys=True, indent=2).encode()
     generation_id = f"shutdown-{secrets.token_hex(16)}"
     manifest = ShutdownFinalizationManifest(
@@ -320,6 +342,7 @@ def _shutdown_finalization(
         generated_monotonic_ns=time.monotonic_ns(),
         challenge_id=str(evidence["challenge_id"]),
         config_sha256=str(evidence["config_sha256"]),
+        execution_config_sha256=provenance.execution_config_sha256,
         manifest_sha256=str(evidence["manifest_sha256"]),
         output_identity_sha256=str(evidence["output_identity_sha256"]),
         aborted_run_manifest=ArtifactRecord(
@@ -350,6 +373,7 @@ def record_failed_hardware_power_removal(
     evidence = {
         "schema_version": "aborted-hardware-shutdown/v1",
         "power_removal_unconfirmed": False,
+        "servo_power_removed": True,
         **confirmation.model_dump(mode="json"),
     }
     return _shutdown_finalization(
@@ -379,6 +403,7 @@ def record_failed_hardware_power_removal_unconfirmed(
             "recorded_at": datetime.now(UTC).isoformat(),
             "recorded_monotonic_ns": time.monotonic_ns(),
             "power_removal_unconfirmed": True,
+            "servo_power_removed": False,
         },
     )
 
@@ -403,16 +428,31 @@ def verify_shutdown_finalization(
     aborted_manifest = aborted_output_dir / manifest.aborted_run_manifest.path
     if (
         sha256_path(aborted_manifest) != manifest.aborted_run_manifest.sha256
-        or aborted_manifest.stat().st_size
-        != manifest.aborted_run_manifest.size_bytes
+        or aborted_manifest.stat().st_size != manifest.aborted_run_manifest.size_bytes
     ):
         raise ValueError("aborted run manifest checksum or size mismatch")
-    aborted_document = json.loads(aborted_manifest.read_bytes())
+    aborted = ArtifactManifest.model_validate_json(aborted_manifest.read_bytes())
+    metadata = aborted.identification_metadata
+    provenance = metadata.hardware_provenance if metadata is not None else None
     if (
-        aborted_document.get("status") != RunStatus.ABORTED.value
-        or aborted_document.get("run_id") != manifest.run_id
+        aborted.status is not RunStatus.ABORTED
+        or aborted.run_kind is not RunKind.ACTUATOR_IDENTIFICATION
+        or metadata is None
+        or not metadata.adapter_identity.hardware_capable
+        or provenance is None
     ):
-        raise ValueError("linked run manifest is not the exact aborted run identity")
+        raise ValueError("linked manifest is not an aborted hardware run")
+    challenge = provenance.power_challenge
+    semantic_bindings = {
+        "run_id": aborted.run_id,
+        "challenge_id": challenge.challenge_id,
+        "config_sha256": provenance.approved_raw_config_sha256,
+        "execution_config_sha256": provenance.execution_config_sha256,
+        "manifest_sha256": metadata.hardware_manifest_sha256,
+        "output_identity_sha256": challenge.output_identity_sha256,
+    }
+    if any(getattr(manifest, key) != value for key, value in semantic_bindings.items()):
+        raise ValueError("shutdown finalization does not match hardware provenance")
     evidence = json.loads(evidence_path.read_bytes())
     for field in (
         "run_id",
@@ -423,6 +463,9 @@ def verify_shutdown_finalization(
     ):
         if evidence.get(field) != getattr(manifest, field):
             raise ValueError(f"shutdown evidence linkage mismatch: {field}")
+    expected_removed = manifest.outcome == "power_removed_confirmed"
+    if evidence.get("servo_power_removed") is not expected_removed:
+        raise ValueError("shutdown outcome does not match servo_power_removed evidence")
     return manifest
 
 

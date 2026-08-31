@@ -28,11 +28,14 @@ from alice.experiments.hardware_identification import (
     PowerRemovalConfirmation,
     PreparedHardwareHandle,
     abandon_pending_hardware_identification,
+    bind_prepared_hardware_output,
     cancel_prepared_hardware_identification,
     execute_prepared_hardware_identification,
     finalize_hardware_identification,
     load_hardware_identification_config,
     prepare_hardware_identification,
+    record_failed_hardware_power_removal,
+    verify_shutdown_finalization,
 )
 from alice.hardware.adapter import AdapterIdentity, AdapterMode
 from alice.hardware.maestro_adapter import MaestroPreflightSnapshot
@@ -464,6 +467,7 @@ def _power_confirmation(challenge) -> PowerEnableConfirmation:
         config_sha256=challenge.config_sha256,
         manifest_sha256=challenge.manifest_sha256,
         electrical_evidence_sha256=challenge.electrical_evidence_sha256,
+        output_identity_sha256=challenge.output_identity_sha256,
         challenge_sha256=challenge.challenge_sha256,
         confirmed_at=datetime.now(UTC),
         confirmed_monotonic_ns=time.monotonic_ns(),
@@ -979,6 +983,64 @@ def test_keyboard_interrupt_publishes_sanitized_failure(
         assert "confirmation_text" not in content
         assert result.issuance_token.get_secret_value() not in content
     assert RecordingMaestro.instances[-1].closed is True
+
+
+def test_failed_cli_style_shutdown_finalization_semantically_binds_abort(
+    prepared, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    initial, _, _ = prepared
+    output = tmp_path / "failed-bound"
+    bound = bind_prepared_hardware_output(prepared=initial, output_dir=output)
+    monkeypatch.setattr(
+        module,
+        "_run_identification_core",
+        lambda **_: (_ for _ in ()).throw(RuntimeError("failure")),
+    )
+    with pytest.raises(RuntimeError, match="failure"):
+        execute_prepared_hardware_identification(
+            prepared=bound,
+            output_dir=output,
+            confirmation=_power_confirmation(bound.challenge),
+        )
+    challenge = bound.challenge
+    assert challenge.output_identity_sha256 is not None
+    generation = record_failed_hardware_power_removal(
+        output_dir=output,
+        confirmation=module.FailedRunPowerRemovalConfirmation(
+            run_id=challenge.run_id,
+            challenge_id=challenge.challenge_id,
+            config_sha256=challenge.config_sha256,
+            manifest_sha256=challenge.manifest_sha256,
+            output_identity_sha256=challenge.output_identity_sha256,
+            confirmed_at=datetime.now(UTC),
+            confirmed_monotonic_ns=time.monotonic_ns(),
+            source="trusted CLI test",
+            operator_acknowledgment="I CONFIRM MASTER SERVO POWER IS OFF",
+        ),
+    )
+    assert (
+        verify_shutdown_finalization(generation, aborted_output_dir=output).outcome
+        == "power_removed_confirmed"
+    )
+
+    finalization_path = generation / "shutdown-finalization.json"
+    original = json.loads(finalization_path.read_text())
+    mutations = {
+        "challenge_id": "different",
+        "config_sha256": "1" * 64,
+        "manifest_sha256": "2" * 64,
+        "output_identity_sha256": "3" * 64,
+        "outcome": "power_removal_unconfirmed",
+    }
+    for field, value in mutations.items():
+        changed = {**original, field: value}
+        finalization_path.write_text(json.dumps(changed))
+        with pytest.raises(ValueError, match="provenance|outcome"):
+            verify_shutdown_finalization(generation, aborted_output_dir=output)
+    finalization_path.write_text(json.dumps(original))
+    (generation / "shutdown-evidence.json").unlink()
+    with pytest.raises(FileNotFoundError):
+        verify_shutdown_finalization(generation, aborted_output_dir=output)
 
 
 def test_repository_config_retains_unresolved_electrical_placeholders() -> None:
