@@ -85,6 +85,9 @@ def validate_category_schema(
 ) -> None:
     """Validate that an observation exposes the exact expected category names."""
 
+    if len(expected_names) != len(set(expected_names)):
+        raise ValueError("expected_names must not contain duplicate category names")
+
     observed_names = {score.name for score in observation.scores}
     expected_name_set = set(expected_names)
 

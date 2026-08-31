@@ -56,3 +56,10 @@ def test_category_schema_is_order_independent_but_name_exact() -> None:
     validate_category_schema(observation, ("eyeBlinkLeft",))
     with pytest.raises(ValueError, match="missing=.*jawOpen"):
         validate_category_schema(observation, ("eyeBlinkLeft", "jawOpen"))
+
+
+def test_category_schema_rejects_duplicate_expected_names() -> None:
+    observation = valid_observation()
+
+    with pytest.raises(ValueError, match="duplicate"):
+        validate_category_schema(observation, ("eyeBlinkLeft", "eyeBlinkLeft"))
