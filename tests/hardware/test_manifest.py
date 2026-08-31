@@ -184,6 +184,22 @@ def test_calibration_hash_binds_controller_serial_identity() -> None:
     assert changed.calibration_sha256 != manifest.calibration_sha256
 
 
+def test_canonical_hash_binds_global_preflight_requirements() -> None:
+    manifest = load_manifest(MANIFEST_PATH)
+    requirement = manifest.preflight_requirements[0]
+    changed = manifest.model_copy(
+        update={
+            "preflight_requirements": (
+                requirement.model_copy(update={"description": "changed safety fact"}),
+                *manifest.preflight_requirements[1:],
+            )
+        }
+    )
+
+    assert changed.calibration_sha256 == manifest.calibration_sha256
+    assert changed.canonical_sha256 != manifest.canonical_sha256
+
+
 @pytest.mark.parametrize("field", ["firmware_speed", "firmware_acceleration"])
 def test_calibration_hash_binds_firmware_motion_limit(field: str) -> None:
     """Changing controller-side slew limits must invalidate bound commands."""

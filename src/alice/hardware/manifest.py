@@ -132,6 +132,17 @@ class HardwareManifest(BaseModel):
         return self
 
     @property
+    def canonical_sha256(self) -> Sha256Hex:
+        """Hash the complete validated manifest, including global safety evidence."""
+
+        payload = json.dumps(
+            self.model_dump(mode="json"),
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        return hashlib.sha256(payload).hexdigest()
+
+    @property
     def calibration_sha256(self) -> Sha256Hex:
         """Hash all fields which define semantic target-to-channel calibration."""
 

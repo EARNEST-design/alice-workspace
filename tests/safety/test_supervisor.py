@@ -251,6 +251,22 @@ def test_complete_run_at_controller_home_is_terminal_without_clearing_history(
     assert supervisor.pending_request is None
 
 
+def test_cancel_armed_revokes_approval_and_returns_disarmed_without_motion(
+    manifest: HardwareManifest, clock: FakeClock
+) -> None:
+    supervisor = make_supervisor(manifest, clock)
+    arm(supervisor, manifest, clock)
+
+    cancelled = supervisor.cancel_armed("pre-run composition rejected")
+
+    assert cancelled.accepted is True
+    assert cancelled.state is RunState.DISARMED
+    assert supervisor.state is RunState.DISARMED
+    assert supervisor.operator_approval is None
+    assert supervisor.pending_request is None
+    assert all(value == 0.0 for value in supervisor.committed_targets.values())
+
+
 def test_only_one_request_can_be_in_flight_and_unapplied_target_is_not_committed(
     manifest: HardwareManifest, clock: FakeClock
 ) -> None:

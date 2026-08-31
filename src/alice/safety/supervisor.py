@@ -422,6 +422,20 @@ class SafetySupervisor:
         self._state = RunState.DISARMED
         return TransitionResult(accepted=True, state=self._state)
 
+    def cancel_armed(self, reason: str) -> TransitionResult:
+        """Cancel pre-run authority without issuing or implying any motion."""
+
+        if self._state is not RunState.ARMED:
+            return self._invalid_transition("cancel_armed", RunState.ARMED)
+        if not reason.strip():
+            fault = self._make_fault(
+                "cancellation-reason-missing",
+                "pre-run cancellation requires a recorded reason",
+            )
+            return TransitionResult(accepted=False, state=self._state, fault=fault)
+        self._reset_disarmed()
+        return TransitionResult(accepted=True, state=self._state)
+
     def complete_abort(self) -> TransitionResult:
         if self._state is not RunState.ABORTING:
             return self._invalid_transition("complete_abort", RunState.ABORTING)

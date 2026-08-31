@@ -37,11 +37,8 @@ from alice.experiments.manifest import (
     RunKind,
     RunStatus,
 )
-from alice.hardware.adapter import (
-    ActuatorAdapter,
-    AdapterIdentity,
-    AdapterMode,
-)
+from alice.hardware.manifest import load_manifest
+from alice.hardware.mock_adapter import MockActuatorAdapter, MockAdapterScript
 from alice.safety.supervisor import (
     AbortReason,
     AuthorizationDecision,
@@ -135,6 +132,7 @@ class IdentificationConfig(BaseModel):
     calibration_sha256: Sha256Hex
     hardware_manifest_path: NonEmptyString
     hardware_manifest_sha256: Sha256Hex
+    hardware_manifest_canonical_sha256: Sha256Hex
     actuator_names: tuple[NonEmptyString, ...]
     offsets: tuple[Annotated[float, Field(allow_inf_nan=False)], ...]
     samples_per_step: int = Field(ge=2)
@@ -156,6 +154,7 @@ class IdentificationConfig(BaseModel):
     provenance: Mapping[NonEmptyString, NonEmptyString]
     retention: Literal["derived_observations_only"]
     observer: IdentificationObserverProvenance
+    mock_behavior: MockAdapterScript = Field(default_factory=MockAdapterScript)
 
     @model_validator(mode="after")
     def validate_experiment_shape(self) -> IdentificationConfig:
@@ -257,12 +256,17 @@ def run_identification(
     config: IdentificationConfig,
     observer: IdentificationObserver,
     supervisor: SafetySupervisor,
-    adapter: ActuatorAdapter,
     output_dir: Path,
     clock: Callable[[], int],
     sleeper: Callable[[float], object],
 ) -> ArtifactManifest:
-    """Run the conservative mock sequence and atomically publish its evidence."""
+    """Run the conservative mock sequence and atomically publish its evidence.
+
+    The monotonic ``clock`` is the root of request validity and recovery timing.
+    If it itself fails, safe reconciliation timestamps cannot be constructed, so
+    that exception propagates without a false terminal-state or artifact claim.
+    Other injected runtime boundaries are converted to controlled abort evidence.
+    """
 
     _validate_new_output(output_dir)
     started_at = datetime.now(UTC)
@@ -272,14 +276,19 @@ def run_identification(
     aborted_reason: str | None = None
     current_step_id = "run-start"
     baseline: VisualHomeBaseline | None = None
-    runtime_identity = adapter.identity
     runtime_observer = observer.provenance
     composition_problem = _composition_problem(
         config=config,
         supervisor=supervisor,
-        identity=runtime_identity,
         observer=runtime_observer,
     )
+    adapter = MockActuatorAdapter(
+        manifest=supervisor.manifest,
+        clock=clock,
+        permit_verifier=supervisor.actuation_permit_verifier,
+        script=config.mock_behavior,
+    )
+    runtime_identity = adapter.identity
     if composition_problem is not None:
         status = RunStatus.ABORTED
         code, detail, composition_category = composition_problem
@@ -296,6 +305,14 @@ def run_identification(
                 occurred_monotonic_ns=clock(),
             ),
         )
+        if supervisor.state is RunState.ARMED:
+            cancellation = supervisor.cancel_armed(detail)
+            log.transition(
+                step_id=current_step_id,
+                operation="cancel-armed",
+                result=cancellation,
+                monotonic_ns=clock(),
+            )
     else:
         start_result = supervisor.start()
         log.transition(
@@ -428,6 +445,9 @@ def run_identification(
             approval=supervisor.operator_approval,
             hardware_manifest_path=config.hardware_manifest_path,
             hardware_manifest_sha256=config.hardware_manifest_sha256,
+            hardware_manifest_canonical_sha256=(
+                config.hardware_manifest_canonical_sha256
+            ),
             calibration_sha256=config.calibration_sha256,
             config_sha256=_config_sha256(config),
         ),
@@ -441,19 +461,8 @@ def _composition_problem(
     *,
     config: IdentificationConfig,
     supervisor: SafetySupervisor,
-    identity: AdapterIdentity,
     observer: IdentificationObserverProvenance,
 ) -> tuple[str, str, FailureCategory] | None:
-    if (
-        identity.backend != "mock"
-        or identity.mode is not AdapterMode.SIMULATION
-        or identity.hardware_capable
-    ):
-        return (
-            "adapter-identity-mismatch",
-            "mock configuration requires non-hardware mock runtime identity",
-            FailureCategory.ADAPTER_IDENTITY_MISMATCH,
-        )
     if observer != config.observer:
         return (
             "observer-identity-mismatch",
@@ -480,6 +489,29 @@ def _composition_problem(
         return (
             "manifest-file-hash-mismatch",
             "hardware manifest checksum differs",
+            FailureCategory.SAFETY_ERROR,
+        )
+    try:
+        configured_manifest = load_manifest(manifest_path)
+    except (OSError, ValueError) as exc:
+        return (
+            "manifest-file-invalid",
+            f"configured hardware manifest failed validation: {type(exc).__name__}",
+            FailureCategory.SAFETY_ERROR,
+        )
+    if (
+        configured_manifest.canonical_sha256
+        != config.hardware_manifest_canonical_sha256
+    ):
+        return (
+            "manifest-canonical-hash-mismatch",
+            "configured canonical manifest checksum differs",
+            FailureCategory.SAFETY_ERROR,
+        )
+    if supervisor.manifest.canonical_sha256 != configured_manifest.canonical_sha256:
+        return (
+            "supervisor-manifest-mismatch",
+            "supervisor is not bound to the complete configured manifest",
             FailureCategory.SAFETY_ERROR,
         )
     return None
@@ -525,7 +557,7 @@ def _execute_step(
     baseline: VisualHomeBaseline | None,
     observer: IdentificationObserver,
     supervisor: SafetySupervisor,
-    adapter: ActuatorAdapter,
+    adapter: MockActuatorAdapter,
     clock: Callable[[], int],
     sleeper: Callable[[float], object],
     log: _RunLog,
@@ -792,7 +824,14 @@ def _guarded_sleep(
     sleeper: Callable[[float], object],
     log: _RunLog,
 ) -> None:
-    sleeper(seconds)
+    try:
+        sleeper(seconds)
+    except Exception as exc:
+        raise _ControlledAbort(
+            "sleeper-error",
+            type(exc).__name__,
+            category=FailureCategory.TIMEOUT,
+        ) from exc
     _guard_running(
         step_id=step_id,
         operation=operation,
@@ -910,7 +949,7 @@ def _abort_and_recover(
     observer: IdentificationObserver,
     baseline: VisualHomeBaseline | None,
     supervisor: SafetySupervisor,
-    adapter: ActuatorAdapter,
+    adapter: MockActuatorAdapter,
     clock: Callable[[], int],
     sleeper: Callable[[float], object],
     log: _RunLog,
@@ -1030,7 +1069,19 @@ def _abort_and_recover(
                 )
                 return True
             if remaining_ns > 0:
-                sleeper(remaining_ns / 1_000_000_000)
+                try:
+                    sleeper(remaining_ns / 1_000_000_000)
+                except Exception as exc:
+                    unavailable = supervisor.recovery_unavailable(
+                        f"recovery sleeper failed: {type(exc).__name__}"
+                    )
+                    log.transition(
+                        step_id=f"{step_id}-recovery-sleeper-error",
+                        operation="recovery-unavailable",
+                        result=unavailable,
+                        monotonic_ns=clock(),
+                    )
+                    return False
             recovery_operations += 1
             result = supervisor.retry_recovery(clock())
             log.transition(
@@ -1097,11 +1148,25 @@ def _verify_recovery_home(
 ) -> None:
     """Record independent visual Home evidence after controller-confirmed recovery."""
 
-    sleeper(config.controller_settle_ms / 1_000)
+    if not _recovery_visual_sleep(
+        config.controller_settle_ms / 1_000,
+        step_id=step_id,
+        sleeper=sleeper,
+        clock=clock,
+        log=log,
+    ):
+        return
     if clock() >= deadline_ns:
         _log_recovery_visual_deadline(step_id=step_id, clock=clock, log=log)
         return
-    sleeper(config.visual_settle_ms / 1_000)
+    if not _recovery_visual_sleep(
+        config.visual_settle_ms / 1_000,
+        step_id=step_id,
+        sleeper=sleeper,
+        clock=clock,
+        log=log,
+    ):
+        return
     if clock() >= deadline_ns:
         _log_recovery_visual_deadline(step_id=step_id, clock=clock, log=log)
         return
@@ -1109,7 +1174,14 @@ def _verify_recovery_home(
     try:
         for sample_index in range(config.samples_per_step):
             if sample_index:
-                sleeper(config.sample_interval_ms / 1_000)
+                if not _recovery_visual_sleep(
+                    config.sample_interval_ms / 1_000,
+                    step_id=step_id,
+                    sleeper=sleeper,
+                    clock=clock,
+                    log=log,
+                ):
+                    return
                 if clock() >= deadline_ns:
                     raise _ControlledAbort(
                         "recovery-home-deadline-exceeded",
@@ -1219,6 +1291,40 @@ def _log_recovery_visual_deadline(
             "state": RunState.FAULTED.value,
         },
     )
+
+
+def _recovery_visual_sleep(
+    seconds: float,
+    *,
+    step_id: str,
+    sleeper: Callable[[float], object],
+    clock: Callable[[], int],
+    log: _RunLog,
+) -> bool:
+    try:
+        sleeper(seconds)
+    except Exception as exc:
+        log.fault(
+            step_id=step_id,
+            fault=SafetyFault(
+                code="recovery-sleeper-error",
+                detail=type(exc).__name__,
+                occurred_monotonic_ns=clock(),
+            ),
+        )
+        log.append(
+            "transitions.jsonl",
+            {
+                "run_id": log.run_id,
+                "step_id": step_id,
+                "operation": "home-verified",
+                "monotonic_ns": clock(),
+                "accepted": False,
+                "state": RunState.FAULTED.value,
+            },
+        )
+        return False
+    return True
 
 
 def _controller_settling_decision(

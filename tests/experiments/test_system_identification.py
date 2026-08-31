@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -181,6 +182,19 @@ class SlowObserver(RecordingObserver):
         return super().observe(run_id=run_id, step_id=step_id)
 
 
+class FailingOnceSleeper:
+    def __init__(self, clock: FakeClock, fail_on_call: int) -> None:
+        self.clock = clock
+        self.fail_on_call = fail_on_call
+        self.calls = 0
+
+    def __call__(self, seconds: float) -> None:
+        self.calls += 1
+        if self.calls == self.fail_on_call:
+            raise RuntimeError("private sleeper detail")
+        self.clock.sleep(seconds)
+
+
 class WrongIdentityObserver(RecordingObserver):
     @property
     def provenance(self) -> IdentificationObserverProvenance:
@@ -233,6 +247,7 @@ def config(manifest: HardwareManifest, **updates: Any) -> IdentificationConfig:
         "hardware_manifest_sha256": __import__("hashlib").sha256(
             manifest_path.read_bytes()
         ).hexdigest(),
+        "hardware_manifest_canonical_sha256": manifest.canonical_sha256,
         "actuator_names": ("mouth_open",),
         "offsets": (0.1, -0.1),
         "samples_per_step": 3,
@@ -366,12 +381,11 @@ def test_exact_sequence_waits_for_status_and_settling_and_correlates_artifacts(
 ) -> None:
     clock = FakeClock()
     supervisor = armed_supervisor(manifest, clock)
-    actuator = adapter(manifest, supervisor, clock)
     observer = RecordingObserver(clock)
     run_dir = tmp_path / "run"
 
     result = run_identification(
-        config(manifest), observer, supervisor, actuator, run_dir, clock, clock.sleep
+        config(manifest), observer, supervisor, run_dir, clock, clock.sleep
     )
 
     assert result.status is RunStatus.COMPLETED
@@ -401,10 +415,7 @@ def test_exact_sequence_waits_for_status_and_settling_and_correlates_artifacts(
             status_time[item["step_id"]] + 50_000_000
         )
     assert len(observer.calls) == 5 * 3
-    assert all(
-        type(wrapper).__name__.endswith("Decision")
-        for wrapper in actuator.applied_wrappers
-    )
+    assert all(item["authorization_kind"] == "normal" for item in commands)
     assert supervisor.state is RunState.DISARMED
     assert supervisor.committed_targets["mouth_open"] == 0.0
     assert result.artifacts["commands.jsonl"].sha256
@@ -444,7 +455,6 @@ def test_observation_failures_abort_before_next_normal_movement_and_recover_home
 ) -> None:
     clock = FakeClock()
     supervisor = armed_supervisor(manifest, clock)
-    actuator = adapter(manifest, supervisor, clock)
     observer = RecordingObserver(
         clock,
         fail_at_call=4 if failure == "camera" else None,
@@ -457,7 +467,7 @@ def test_observation_failures_abort_before_next_normal_movement_and_recover_home
     run_dir = tmp_path / failure
 
     result = run_identification(
-        cfg, observer, supervisor, actuator, run_dir, clock, clock.sleep
+        cfg, observer, supervisor, run_dir, clock, clock.sleep
     )
 
     assert result.status is RunStatus.ABORTED
@@ -472,8 +482,7 @@ def test_observation_failures_abort_before_next_normal_movement_and_recover_home
     assert supervisor.state is RunState.FAULTED
     assert supervisor.safe_state_verified is True
     assert all(
-        type(wrapper).__name__ in {"AuthorizationDecision", "RecoveryAuthorization"}
-        for wrapper in actuator.applied_wrappers
+        item["authorization_kind"] in {"normal", "recovery"} for item in commands
     )
     assert jsonl(run_dir, "faults.jsonl")
 
@@ -483,19 +492,12 @@ def test_controller_fault_is_recorded_before_abort_and_no_next_normal_command(
 ) -> None:
     clock = FakeClock()
     supervisor = armed_supervisor(manifest, clock)
-    actuator = FaultingAdapter(
-        fault_on_call=2,
-        manifest=manifest,
-        clock=clock,
-        permit_verifier=supervisor.actuation_permit_verifier,
-    )
     run_dir = tmp_path / "fault"
 
     result = run_identification(
-        config(manifest),
+        config(manifest, mock_behavior={"fault_on_calls": [2]}),
         RecordingObserver(clock),
         supervisor,
-        actuator,
         run_dir,
         clock,
         clock.sleep,
@@ -545,7 +547,6 @@ def test_observer_exception_aborts_and_sanitizes_failure(
         config(manifest),
         RaisingObserver(clock),
         supervisor,
-        adapter(manifest, supervisor, clock),
         run_dir,
         clock,
         clock.sleep,
@@ -563,18 +564,15 @@ def test_unknown_adapter_application_is_not_inferred_as_home(
 ) -> None:
     clock = FakeClock()
     supervisor = armed_supervisor(manifest, clock)
-    actuator = UnknownApplicationAdapter(
-        manifest=manifest,
-        clock=clock,
-        permit_verifier=supervisor.actuation_permit_verifier,
-    )
     run_dir = tmp_path / "unknown-application"
 
     result = run_identification(
-        config(manifest),
+        config(
+            manifest,
+            mock_behavior={"raise_after_authorization_calls": [2]},
+        ),
         RecordingObserver(clock),
         supervisor,
-        actuator,
         run_dir,
         clock,
         clock.sleep,
@@ -600,18 +598,15 @@ def test_runner_derives_controller_settling_instead_of_trusting_adapter_flag(
 ) -> None:
     clock = FakeClock()
     supervisor = armed_supervisor(manifest, clock)
-    actuator = LyingSettlingAdapter(
-        manifest=manifest,
-        clock=clock,
-        permit_verifier=supervisor.actuation_permit_verifier,
-    )
     run_dir = tmp_path / "lying-settling"
 
     result = run_identification(
-        config(manifest),
+        config(
+            manifest,
+            mock_behavior={"controller_output_offset_qus_by_call": {1: 1}},
+        ),
         RecordingObserver(clock),
         supervisor,
-        actuator,
         run_dir,
         clock,
         clock.sleep,
@@ -624,32 +619,31 @@ def test_runner_derives_controller_settling_instead_of_trusting_adapter_flag(
     assert decision["target_reached"] is False
 
 
-def test_hardware_capable_runtime_adapter_is_rejected_before_start_or_apply(
+def test_public_runner_has_no_adapter_injection_path(
     tmp_path: Path, manifest: HardwareManifest
 ) -> None:
+    assert "adapter" not in inspect.signature(run_identification).parameters
     clock = FakeClock()
     supervisor = armed_supervisor(manifest, clock)
-    actuator = HardwareCapableFake(
+    deceptive = HardwareCapableFake(
         manifest=manifest,
         clock=clock,
         permit_verifier=supervisor.actuation_permit_verifier,
     )
 
-    result = run_identification(
-        config(manifest),
-        RecordingObserver(clock),
-        supervisor,
-        actuator,
-        tmp_path / "identity-rejected",
-        clock,
-        clock.sleep,
-    )
+    with pytest.raises(TypeError, match="adapter"):
+        run_identification(
+            config=config(manifest),
+            observer=RecordingObserver(clock),
+            supervisor=supervisor,
+            adapter=deceptive,  # type: ignore[call-arg]
+            output_dir=tmp_path / "must-not-run",
+            clock=clock,
+            sleeper=clock.sleep,
+        )
 
-    assert result.status is RunStatus.ABORTED
-    assert result.failure is not None
-    assert result.failure.category == "adapter_identity_mismatch"
     assert supervisor.state is RunState.ARMED
-    assert actuator.applied_wrappers == []
+    assert deceptive.applied_wrappers == []
 
 
 def test_runtime_observer_identity_is_rejected_before_start_or_apply(
@@ -657,13 +651,10 @@ def test_runtime_observer_identity_is_rejected_before_start_or_apply(
 ) -> None:
     clock = FakeClock()
     supervisor = armed_supervisor(manifest, clock)
-    actuator = adapter(manifest, supervisor, clock)
-
     result = run_identification(
         config(manifest),
         WrongIdentityObserver(clock),
         supervisor,
-        actuator,
         tmp_path / "observer-identity-rejected",
         clock,
         clock.sleep,
@@ -672,8 +663,38 @@ def test_runtime_observer_identity_is_rejected_before_start_or_apply(
     assert result.status is RunStatus.ABORTED
     assert result.failure is not None
     assert result.failure.category == "camera_loss"
-    assert supervisor.state is RunState.ARMED
-    assert actuator.applied_wrappers == []
+    assert supervisor.state is RunState.DISARMED
+
+
+def test_supervisor_manifest_global_preflight_difference_cancels_armed_run(
+    tmp_path: Path, manifest: HardwareManifest
+) -> None:
+    requirement = manifest.preflight_requirements[0]
+    changed = manifest.model_copy(
+        update={
+            "preflight_requirements": (
+                requirement.model_copy(update={"description": "changed"}),
+                *manifest.preflight_requirements[1:],
+            )
+        }
+    )
+    assert changed.calibration_sha256 == manifest.calibration_sha256
+    clock = FakeClock()
+    supervisor = armed_supervisor(changed, clock)
+
+    result = run_identification(
+        config(manifest),
+        RecordingObserver(clock),
+        supervisor,
+        tmp_path / "full-manifest-mismatch",
+        clock,
+        clock.sleep,
+    )
+
+    assert result.status is RunStatus.ABORTED
+    assert supervisor.state is RunState.DISARMED
+    assert result.failure is not None
+    assert result.failure.category == "safety_error"
 
 
 def test_watchdog_runs_after_observer_and_prevents_next_movement(
@@ -687,7 +708,6 @@ def test_watchdog_runs_after_observer_and_prevents_next_movement(
         config(manifest, step_timeout_ms=20_000),
         SlowObserver(clock),
         supervisor,
-        adapter(manifest, supervisor, clock),
         run_dir,
         clock,
         clock.sleep,
@@ -706,6 +726,31 @@ def test_watchdog_runs_after_observer_and_prevents_next_movement(
     )
 
 
+def test_sleeper_failure_after_first_motion_aborts_recovers_and_publishes(
+    tmp_path: Path, manifest: HardwareManifest
+) -> None:
+    clock = FakeClock()
+    supervisor = armed_supervisor(manifest, clock)
+    run_dir = tmp_path / "sleeper-failure"
+    failing_sleeper = FailingOnceSleeper(clock, fail_on_call=2)
+
+    result = run_identification(
+        config(manifest),
+        RecordingObserver(clock),
+        supervisor,
+        run_dir,
+        clock,
+        failing_sleeper,
+    )
+
+    assert result.status is RunStatus.ABORTED
+    assert result.failure is not None
+    assert result.failure.category == "timeout"
+    assert supervisor.state is RunState.FAULTED
+    assert (run_dir / "manifest.json").is_file()
+    assert "private sleeper detail" not in (run_dir / "manifest.json").read_text()
+
+
 def test_stable_nonbaseline_home_aborts_before_next_movement(
     tmp_path: Path, manifest: HardwareManifest
 ) -> None:
@@ -721,7 +766,6 @@ def test_stable_nonbaseline_home_aborts_before_next_movement(
         config(manifest),
         observer,
         supervisor,
-        adapter(manifest, supervisor, clock),
         run_dir,
         clock,
         clock.sleep,
@@ -743,14 +787,12 @@ def test_start_abort_uses_recovery_driver_and_exits_terminal(
 ) -> None:
     clock = FakeClock()
     supervisor = armed_supervisor(manifest, clock)
-    actuator = adapter(manifest, supervisor, clock)
     clock.sleep(60.0)
 
     result = run_identification(
         config(manifest),
         RecordingObserver(clock),
         supervisor,
-        actuator,
         tmp_path / "start-abort",
         clock,
         clock.sleep,
@@ -759,8 +801,8 @@ def test_start_abort_uses_recovery_driver_and_exits_terminal(
     assert result.status is RunStatus.ABORTED
     assert supervisor.state is RunState.FAULTED
     assert any(
-        type(item).__name__ == "RecoveryAuthorization"
-        for item in actuator.applied_wrappers
+        item["authorization_kind"] == "recovery"
+        for item in jsonl(tmp_path / "start-abort", "commands.jsonl")
     )
 
 
@@ -769,19 +811,17 @@ def test_recovery_deadline_exhaustion_fails_closed(
 ) -> None:
     clock = FakeClock()
     supervisor = armed_supervisor(manifest, clock)
-    actuator = FaultingAdapter(
-        fault_on_call=2,
-        manifest=manifest,
-        clock=clock,
-        permit_verifier=supervisor.actuation_permit_verifier,
-    )
     run_dir = tmp_path / "recovery-exhausted"
 
     result = run_identification(
-        config(manifest, recovery_timeout_ms=1, maximum_recovery_attempts=1),
+        config(
+            manifest,
+            recovery_timeout_ms=1,
+            maximum_recovery_attempts=1,
+            mock_behavior={"fault_on_calls": [2]},
+        ),
         RecordingObserver(clock),
         supervisor,
-        actuator,
         run_dir,
         clock,
         clock.sleep,
@@ -816,20 +856,17 @@ def test_run_requires_armed_supervisor_and_does_not_move(
         ),
         clock=clock,
     )
-    actuator = adapter(manifest, supervisor, clock)
-
     result = run_identification(
         config(manifest),
         RecordingObserver(clock),
         supervisor,
-        actuator,
         tmp_path / "disarmed",
         clock,
         clock.sleep,
     )
 
     assert result.status is RunStatus.ABORTED
-    assert actuator.applied_wrappers == []
+    assert jsonl(tmp_path / "disarmed", "commands.jsonl") == []
 
 
 def test_output_directory_is_immutable(
@@ -846,7 +883,6 @@ def test_output_directory_is_immutable(
             config(manifest),
             RecordingObserver(clock),
             supervisor,
-            adapter(manifest, supervisor, clock),
             run_dir,
             clock,
             clock.sleep,

@@ -135,6 +135,7 @@ class IdentificationRunMetadata(BaseModel):
     approval: OperatorApproval | None
     hardware_manifest_path: NonEmptyString
     hardware_manifest_sha256: Sha256Hex
+    hardware_manifest_canonical_sha256: Sha256Hex
     calibration_sha256: Sha256Hex
     config_sha256: Sha256Hex
 
