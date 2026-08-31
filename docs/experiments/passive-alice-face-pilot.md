@@ -192,6 +192,41 @@ This is still a provisional Phase 1 judgment because the thresholds themselves w
 
 No robot motion was commanded. Unknowns remain unchanged: distance, angle, lighting state, focus mode, and exposure mode were not measured or locked during this Phase 1 work.
 
+## Stabilized-control rerun — 2026-09-01 HKT
+
+A later rerun used the same C525 stable selector with camera controls read back
+and locked before capture: continuous autofocus `0`, absolute focus `60`,
+manual exposure mode `1`, absolute exposure `249`, dynamic framerate `0`,
+automatic white balance `0`, white-balance temperature `3420`, gain `25`, and
+50 Hz power-line compensation. OpenCV independently reported `640x480` at
+10 fps, focus `60`, and exposure `249` in every capture manifest. The operator
+accepted sharpness, exposure, full-face framing, overlay tracking, and
+participant exclusion in the live preview. The frozen setup revision was
+`f857c115047a9862a00afbbca5870c1d9593b953`. Raw frames remained disabled.
+
+| Kind | Run ID | Valid observations | Detection rate | Outcome |
+| --- | --- | ---: | ---: | --- |
+| Warm-up | `passive-alice-face-stabilized-warmup-20260901` | 1200/1200 | 1.0000 | pass |
+| Repeat 1 | `passive-alice-face-stabilized-repeat-1-20260901` | 400/1200 | 0.3333 | fail |
+| Repeat 2 | `passive-alice-face-stabilized-repeat-2-20260901` | 0/1200 | 0.0000 | fail |
+
+Repeat 1 produced valid detections through `2026-08-31T19:39:23.951195Z` and
+then continuously reported `no face detected` from
+`2026-08-31T19:39:24.051206Z` onward. Repeat 2 remained `no_face` for its full
+duration. The camera continued delivering frames and all negotiated and V4L2
+control values remained unchanged. The valid portion of Repeat 1 passed every
+per-category variance and drift threshold; its only failed check was detection
+rate. Repeat 2 had no valid category set, so the immutable repeatability
+publisher correctly rejected a category-schema comparison rather than
+inventing comparable metrics.
+
+This evidence localizes the current failure to loss of detector-visible face
+content after the first 40 seconds of Repeat 1. It does not establish whether
+the physical cause was framing, occlusion, illumination, or another scene
+change because no raw imagery was retained. Phase 1 therefore remains failed
+until the reopened live overlay is visually checked, the cause is corrected,
+and fresh locked repeats pass.
+
 ## Follow-Up Requirements
 
 - Keep the same stable by-id C525 capture selector unless new reviewed evidence shows a better mapping.
@@ -199,3 +234,6 @@ No robot motion was commanded. Unknowns remain unchanged: distance, angle, light
 - Record the exact lighting state and lock focus/exposure if possible, or at minimum record the exact auto/manual state before the run.
 - Preserve the same preview confirmation procedure for participant exclusion and full-face framing before any future rerun.
 - If a future rerun is intended as acceptance evidence, review and approve the threshold-setting method separately instead of deriving it from the same exploratory family of runs.
+- Add a non-biometric scene-health signal (for example aggregate luminance and
+  a detector-visible-face transition event) so future no-face failures can be
+  diagnosed without retaining images.
