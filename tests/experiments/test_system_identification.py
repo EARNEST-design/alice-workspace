@@ -1,0 +1,528 @@
+from __future__ import annotations
+
+import json
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Any
+
+import pytest
+import yaml
+
+from alice.contracts.actuation import ActuatorStatus, ActuatorStatusState
+from alice.contracts.blendshapes import (
+    BlendshapeObservation,
+    BlendshapeScore,
+    ObservationValidity,
+)
+from alice.experiments.manifest import RunStatus
+from alice.experiments.system_identification import (
+    IdentificationConfig,
+    IdentificationStep,
+    run_identification,
+)
+from alice.hardware.manifest import HardwareManifest, load_manifest
+from alice.hardware.mock_adapter import MockActuatorAdapter
+from alice.safety.supervisor import (
+    OperatorApproval,
+    PreflightEvidence,
+    RunState,
+    SafetyLimits,
+    SafetySupervisor,
+)
+
+
+class FakeClock:
+    def __init__(self) -> None:
+        self.now_ns = 1_000_000_000
+
+    def __call__(self) -> int:
+        return self.now_ns
+
+    def sleep(self, seconds: float) -> None:
+        assert seconds >= 0.0
+        self.now_ns += round(seconds * 1_000_000_000)
+
+
+class RecordingObserver:
+    def __init__(
+        self,
+        clock: FakeClock,
+        *,
+        fail_at_call: int | None = None,
+        values: list[float] | None = None,
+    ) -> None:
+        self.clock = clock
+        self.fail_at_call = fail_at_call
+        self.values = values or [0.2]
+        self.calls: list[tuple[str, str, int]] = []
+
+    def observe(self, *, run_id: str, step_id: str) -> BlendshapeObservation:
+        call_number = len(self.calls) + 1
+        self.calls.append((run_id, step_id, self.clock()))
+        if call_number == self.fail_at_call:
+            return observation(
+                run_id=run_id,
+                monotonic_ns=self.clock(),
+                validity=ObservationValidity.NO_FACE,
+            )
+        value = self.values[(call_number - 1) % len(self.values)]
+        return observation(run_id=run_id, monotonic_ns=self.clock(), value=value)
+
+
+class RaisingObserver(RecordingObserver):
+    def observe(self, *, run_id: str, step_id: str) -> BlendshapeObservation:
+        if len(self.calls) == 3:
+            raise RuntimeError("raw camera details must not enter artifacts")
+        return super().observe(run_id=run_id, step_id=step_id)
+
+
+class RecordingAdapter(MockActuatorAdapter):
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.applied_wrappers: list[object] = []
+
+    def apply(self, authorization: Any) -> ActuatorStatus:
+        self.applied_wrappers.append(authorization)
+        return super().apply(authorization)
+
+
+class FaultingAdapter(RecordingAdapter):
+    def __init__(self, *, fault_on_call: int, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.fault_on_call = fault_on_call
+
+    def apply(self, authorization: Any) -> ActuatorStatus:
+        status = super().apply(authorization)
+        if len(self.applied_wrappers) != self.fault_on_call:
+            return status
+        return status.model_copy(
+            update={
+                "state": ActuatorStatusState.FAULT,
+                "fault_code": "mock-controller-fault",
+                "detail": "injected deterministic fault",
+            }
+        )
+
+
+class UnknownApplicationAdapter(RecordingAdapter):
+    def apply(self, authorization: Any) -> ActuatorStatus:
+        if len(self.applied_wrappers) == 1:
+            self.applied_wrappers.append(authorization)
+            raise TimeoutError("application state unknown")
+        return super().apply(authorization)
+
+
+@pytest.fixture
+def manifest() -> HardwareManifest:
+    return load_manifest(Path("hardware/alice-face-v1.yaml"))
+
+
+def observation(
+    *,
+    run_id: str,
+    monotonic_ns: int,
+    value: float = 0.2,
+    validity: ObservationValidity = ObservationValidity.VALID,
+) -> BlendshapeObservation:
+    captured = datetime(2026, 8, 31, tzinfo=UTC) + timedelta(
+        microseconds=monotonic_ns // 1_000
+    )
+    valid = validity is ObservationValidity.VALID
+    return BlendshapeObservation(
+        schema_version="blendshape-observation/v1",
+        captured_at=captured,
+        observed_at=captured,
+        monotonic_ns=monotonic_ns,
+        camera_id="mock-camera",
+        run_id=run_id,
+        detector="mock-detector",
+        detector_model_sha256="a" * 64,
+        image_width=640,
+        image_height=480,
+        face_confidence=1.0 if valid else None,
+        validity=validity,
+        invalid_reason=None if valid else "no face",
+        scores=(BlendshapeScore(name="jawOpen", score=value),) if valid else (),
+    )
+
+
+def config(manifest: HardwareManifest, **updates: Any) -> IdentificationConfig:
+    values: dict[str, Any] = {
+        "schema_version": "identification-config/v1",
+        "run_id": "mock-identification-001",
+        "adapter": "mock",
+        "hardware_id": manifest.hardware_id,
+        "calibration_sha256": manifest.calibration_sha256,
+        "actuator_names": ("mouth_open",),
+        "offsets": (0.1, -0.1),
+        "samples_per_step": 3,
+        "command_interval_ms": 250,
+        "controller_settle_ms": 20,
+        "visual_settle_ms": 30,
+        "sample_interval_ms": 10,
+        "step_timeout_ms": 2_000,
+        "command_ttl_ms": 100,
+        "maximum_visual_variance": 0.01,
+        "random_seeds": (),
+        "provenance": {
+            "kind": "deterministic-mock",
+            "source": "tests/experiments/test_system_identification.py",
+        },
+        "retention": "derived_observations_only",
+    }
+    values.update(updates)
+    return IdentificationConfig.model_validate(values)
+
+
+def armed_supervisor(
+    manifest: HardwareManifest, clock: FakeClock
+) -> SafetySupervisor:
+    supervisor = SafetySupervisor(
+        manifest=manifest,
+        limits=SafetyLimits(
+            max_step=0.2,
+            max_rate_per_second=1.0,
+            max_acceleration_per_second_squared=10.0,
+            watchdog_timeout_ns=5_000_000_000,
+            approval_max_age_ns=60_000_000_000,
+            preflight_max_age_ns=60_000_000_000,
+            command_max_age_ns=100_000_000,
+            recovery_command_ttl_ns=1_000_000_000,
+        ),
+        clock=clock,
+    )
+    evidence = PreflightEvidence(
+        run_id="mock-identification-001",
+        hardware_id=manifest.hardware_id,
+        calibration_sha256=manifest.calibration_sha256,
+        controller_serial=manifest.controller.serial_number,
+        requirement_results={
+            requirement.requirement_id: True
+            for requirement in manifest.preflight_requirements
+        },
+        competing_process_detected=False,
+        controller_error_codes=(),
+        home_verified=True,
+        observed_monotonic_ns=clock(),
+    )
+    assert supervisor.preflight(evidence).accepted
+    assert supervisor.arm(
+        OperatorApproval(
+            approval_id="mock-approval",
+            run_id="mock-identification-001",
+            confirmed_monotonic_ns=clock(),
+        )
+    ).accepted
+    return supervisor
+
+
+def adapter(
+    manifest: HardwareManifest,
+    supervisor: SafetySupervisor,
+    clock: FakeClock,
+) -> RecordingAdapter:
+    return RecordingAdapter(
+        manifest=manifest,
+        clock=clock,
+        permit_verifier=supervisor.actuation_permit_verifier,
+    )
+
+
+def jsonl(run_dir: Path, name: str) -> list[dict[str, Any]]:
+    return [json.loads(line) for line in (run_dir / name).read_text().splitlines()]
+
+
+def test_identification_step_is_typed_and_mock_config_rejects_maestro(
+    manifest: HardwareManifest,
+) -> None:
+    step = IdentificationStep(
+        step_id="step-001",
+        actuator_name="mouth_open",
+        normalized_position=0.1,
+        phase="positive",
+    )
+    assert step.normalized_position == 0.1
+    with pytest.raises(ValueError, match="mock"):
+        config(manifest, adapter="maestro")
+
+
+def test_packaged_mock_config_covers_manifest_and_binds_calibration(
+    manifest: HardwareManifest,
+) -> None:
+    document = yaml.safe_load(
+        Path("config/experiments/actuator-identification-mock.yaml").read_text()
+    )
+    loaded = IdentificationConfig.model_validate(document)
+
+    assert loaded.hardware_id == manifest.hardware_id
+    assert loaded.calibration_sha256 == manifest.calibration_sha256
+    assert loaded.actuator_names == tuple(item.name for item in manifest.actuators)
+
+
+def test_exact_sequence_waits_for_status_and_settling_and_correlates_artifacts(
+    tmp_path: Path, manifest: HardwareManifest
+) -> None:
+    clock = FakeClock()
+    supervisor = armed_supervisor(manifest, clock)
+    actuator = adapter(manifest, supervisor, clock)
+    observer = RecordingObserver(clock)
+    run_dir = tmp_path / "run"
+
+    result = run_identification(
+        config(manifest), observer, supervisor, actuator, run_dir, clock, clock.sleep
+    )
+
+    assert result.status is RunStatus.COMPLETED
+    commands = jsonl(run_dir, "commands.jsonl")
+    assert [record["normalized_position"] for record in commands] == [
+        0.0,
+        0.1,
+        0.0,
+        -0.1,
+        0.0,
+    ]
+    assert [record["phase"] for record in commands] == [
+        "home",
+        "positive",
+        "home",
+        "negative",
+        "home",
+    ]
+    statuses = jsonl(run_dir, "statuses.jsonl")
+    observations = jsonl(run_dir, "observations.jsonl")
+    assert {item["step_id"] for item in commands} == {
+        item["step_id"] for item in statuses
+    } == {item["step_id"] for item in observations}
+    status_time = {item["step_id"]: item["monotonic_ns"] for item in statuses}
+    for item in observations:
+        assert item["observation"]["monotonic_ns"] >= (
+            status_time[item["step_id"]] + 50_000_000
+        )
+    assert len(observer.calls) == 5 * 3
+    assert all(
+        type(wrapper).__name__.endswith("Decision")
+        for wrapper in actuator.applied_wrappers
+    )
+    assert supervisor.state is RunState.RUNNING
+    assert supervisor.committed_targets["mouth_open"] == 0.0
+    assert result.artifacts["commands.jsonl"].sha256
+    assert result.artifacts["statuses.jsonl"].sha256
+    assert result.artifacts["transitions.jsonl"].sha256
+    assert result.artifacts["faults.jsonl"].sha256
+    assert (
+        json.loads((run_dir / "metrics.json").read_text())["state"]
+        == "pending_analysis"
+    )
+    assert "pending" in (run_dir / "conclusion.md").read_text().lower()
+
+
+@pytest.mark.parametrize("failure", ["camera", "variance", "timeout"])
+def test_observation_failures_abort_before_next_normal_movement_and_recover_home(
+    tmp_path: Path, manifest: HardwareManifest, failure: str
+) -> None:
+    clock = FakeClock()
+    supervisor = armed_supervisor(manifest, clock)
+    actuator = adapter(manifest, supervisor, clock)
+    observer = RecordingObserver(
+        clock,
+        fail_at_call=4 if failure == "camera" else None,
+        values=[0.0, 1.0, 0.0] if failure == "variance" else None,
+    )
+    cfg = config(
+        manifest,
+        step_timeout_ms=40 if failure == "timeout" else 2_000,
+    )
+    run_dir = tmp_path / failure
+
+    result = run_identification(
+        cfg, observer, supervisor, actuator, run_dir, clock, clock.sleep
+    )
+
+    assert result.status is RunStatus.ABORTED
+    commands = jsonl(run_dir, "commands.jsonl")
+    normal = [item for item in commands if item["authorization_kind"] == "normal"]
+    recovery = [item for item in commands if item["authorization_kind"] == "recovery"]
+    expected_normal_count = 1 if failure in {"variance", "timeout"} else 2
+    assert len(normal) == expected_normal_count
+    assert recovery[-1]["normalized_position"] == 0.0
+    assert supervisor.state is RunState.FAULTED
+    assert supervisor.safe_state_verified is True
+    assert all(
+        type(wrapper).__name__ in {"AuthorizationDecision", "RecoveryAuthorization"}
+        for wrapper in actuator.applied_wrappers
+    )
+    assert jsonl(run_dir, "faults.jsonl")
+
+
+def test_controller_fault_is_recorded_before_abort_and_no_next_normal_command(
+    tmp_path: Path, manifest: HardwareManifest
+) -> None:
+    clock = FakeClock()
+    supervisor = armed_supervisor(manifest, clock)
+    actuator = FaultingAdapter(
+        fault_on_call=2,
+        manifest=manifest,
+        clock=clock,
+        permit_verifier=supervisor.actuation_permit_verifier,
+    )
+    run_dir = tmp_path / "fault"
+
+    result = run_identification(
+        config(manifest),
+        RecordingObserver(clock),
+        supervisor,
+        actuator,
+        run_dir,
+        clock,
+        clock.sleep,
+    )
+
+    assert result.status is RunStatus.ABORTED
+    normal = [
+        item
+        for item in jsonl(run_dir, "commands.jsonl")
+        if item["authorization_kind"] == "normal"
+    ]
+    assert [item["normalized_position"] for item in normal] == [0.0, 0.1]
+    assert any(
+        item["fault"]["code"] == "controller-error"
+        for item in jsonl(run_dir, "faults.jsonl")
+    )
+    recovery_steps = {
+        item["step_id"]
+        for item in jsonl(run_dir, "commands.jsonl")
+        if item["authorization_kind"] == "recovery"
+    }
+    assert recovery_steps
+    assert recovery_steps <= {
+        item["step_id"] for item in jsonl(run_dir, "observations.jsonl")
+    }
+    assert recovery_steps <= {
+        item["step_id"]
+        for item in jsonl(run_dir, "transitions.jsonl")
+        if item["operation"] == "home-verified"
+    }
+    assert any(
+        item["operation"] == "retry-recovery"
+        for item in jsonl(run_dir, "transitions.jsonl")
+    )
+    assert supervisor.state is RunState.FAULTED
+    assert supervisor.safe_state_verified is True
+
+
+def test_observer_exception_aborts_and_sanitizes_failure(
+    tmp_path: Path, manifest: HardwareManifest
+) -> None:
+    clock = FakeClock()
+    supervisor = armed_supervisor(manifest, clock)
+    run_dir = tmp_path / "observer-error"
+
+    result = run_identification(
+        config(manifest),
+        RaisingObserver(clock),
+        supervisor,
+        adapter(manifest, supervisor, clock),
+        run_dir,
+        clock,
+        clock.sleep,
+    )
+
+    assert result.status is RunStatus.ABORTED
+    manifest_text = (run_dir / "manifest.json").read_text()
+    assert "raw camera details" not in manifest_text
+    assert result.failure is not None
+    assert result.failure.error_type == "ObserverError"
+
+
+def test_unknown_adapter_application_is_not_inferred_as_home(
+    tmp_path: Path, manifest: HardwareManifest
+) -> None:
+    clock = FakeClock()
+    supervisor = armed_supervisor(manifest, clock)
+    actuator = UnknownApplicationAdapter(
+        manifest=manifest,
+        clock=clock,
+        permit_verifier=supervisor.actuation_permit_verifier,
+    )
+    run_dir = tmp_path / "unknown-application"
+
+    result = run_identification(
+        config(manifest),
+        RecordingObserver(clock),
+        supervisor,
+        actuator,
+        run_dir,
+        clock,
+        clock.sleep,
+    )
+
+    assert result.status is RunStatus.ABORTED
+    assert supervisor.state is RunState.FAULTED
+    assert supervisor.safe_state_verified is False
+    assert all(
+        item["authorization_kind"] == "normal"
+        for item in jsonl(run_dir, "commands.jsonl")
+    )
+    transitions = jsonl(run_dir, "transitions.jsonl")
+    assert any(item["operation"] == "recovery-unavailable" for item in transitions)
+    assert not any(
+        item["operation"] == "home-verified" and "recovery" in item["step_id"]
+        for item in transitions
+    )
+
+
+def test_run_requires_armed_supervisor_and_does_not_move(
+    tmp_path: Path, manifest: HardwareManifest
+) -> None:
+    clock = FakeClock()
+    supervisor = SafetySupervisor(
+        manifest=manifest,
+        limits=SafetyLimits(
+            max_step=0.2,
+            max_rate_per_second=1.0,
+            max_acceleration_per_second_squared=10.0,
+            watchdog_timeout_ns=5_000_000_000,
+            approval_max_age_ns=60_000_000_000,
+            preflight_max_age_ns=60_000_000_000,
+            command_max_age_ns=100_000_000,
+            recovery_command_ttl_ns=1_000_000_000,
+        ),
+        clock=clock,
+    )
+    actuator = adapter(manifest, supervisor, clock)
+
+    result = run_identification(
+        config(manifest),
+        RecordingObserver(clock),
+        supervisor,
+        actuator,
+        tmp_path / "disarmed",
+        clock,
+        clock.sleep,
+    )
+
+    assert result.status is RunStatus.ABORTED
+    assert actuator.applied_wrappers == []
+
+
+def test_output_directory_is_immutable(
+    tmp_path: Path, manifest: HardwareManifest
+) -> None:
+    run_dir = tmp_path / "existing"
+    run_dir.mkdir()
+    (run_dir / "evidence.txt").write_text("keep")
+    clock = FakeClock()
+    supervisor = armed_supervisor(manifest, clock)
+
+    with pytest.raises(FileExistsError):
+        run_identification(
+            config(manifest),
+            RecordingObserver(clock),
+            supervisor,
+            adapter(manifest, supervisor, clock),
+            run_dir,
+            clock,
+            clock.sleep,
+        )
+
+    assert (run_dir / "evidence.txt").read_text() == "keep"
