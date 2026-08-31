@@ -8,6 +8,45 @@ duration_seconds: 120
 sample_count: 1200
 sample_interval_ms: 100
 retain_frames: false
+acceptance_thresholds:
+  minimum_detection_rate: 0.995
+  categories:
+    browOuterUpLeft:
+      maximum_standard_deviation: 0.052
+      maximum_percentile_range: 0.047
+      maximum_warmup_drift: 0.002
+    browInnerUp:
+      maximum_standard_deviation: 0.036
+      maximum_percentile_range: 0.077
+      maximum_warmup_drift: 0.006
+    browOuterUpRight:
+      maximum_standard_deviation: 0.041
+      maximum_percentile_range: 0.078
+      maximum_warmup_drift: 0.008
+    eyeLookDownLeft:
+      maximum_standard_deviation: 0.046
+      maximum_percentile_range: 0.131
+      maximum_warmup_drift: 0.064
+    eyeLookDownRight:
+      maximum_standard_deviation: 0.047
+      maximum_percentile_range: 0.147
+      maximum_warmup_drift: 0.032
+    mouthSmileLeft:
+      maximum_standard_deviation: 0.058
+      maximum_percentile_range: 0.151
+      maximum_warmup_drift: 0.024
+    mouthSmileRight:
+      maximum_standard_deviation: 0.038
+      maximum_percentile_range: 0.126
+      maximum_warmup_drift: 0.024
+    eyeWideRight:
+      maximum_standard_deviation: 0.059
+      maximum_percentile_range: 0.167
+      maximum_warmup_drift: 0.070
+    mouthPucker:
+      maximum_standard_deviation: 0.044
+      maximum_percentile_range: 0.111
+      maximum_warmup_drift: 0.015
 operator_metadata:
   usb_identity: "Logitech HD Webcam C525, serial 79C73260"
   stable_capture_selector: "/dev/v4l/by-id/usb-046d_HD_Webcam_C525_79C73260-video-index0"
@@ -21,8 +60,16 @@ operator_metadata:
   lighting: "unknown"
   focus: "unknown"
   exposure: "unknown"
-  full_face_framing: "must be confirmed in alice-camera preview before replacement capture"
-  participant_exclusion: "must be confirmed before replacement capture"
+  preview_confirmation_utc: "2026-08-31T10:42:22Z"
+  preview_confirmation_local: "2026-08-31T18:42:22+0800 HKT"
+  full_face_framing: "Confirmed in alice-camera preview on the C525 selector at 2026-08-31T10:42:22Z"
+  participant_exclusion: "Confirmed in alice-camera preview at 2026-08-31T10:42:22Z; no participant was visible"
+  preview_tracking: "Confirmed in alice-camera preview at 2026-08-31T10:42:22Z; overlay tracked Alice correctly"
+  preview_window_state: "The preview window was closed before replacement capture"
+  obs_status: "OBS Studio was closed before the confirmation preview and replacement capture"
   stationary_setup: "Alice should remain stationary during capture"
-  preview_gate: "Use the preview command on the C525 selector only; confirm full-face framing and no participant in frame before replacement capture; press q to exit preview"
+  preview_gate: "Satisfied on 2026-08-31 after alice-camera preview on the exact C525 selector"
   raw_frame_retention: "Disabled; no raw frames or video may be saved"
+  threshold_reference_runs: "Derived only from archived exploratory runs passive-alice-face-warmup-20260831, passive-alice-face-repeat-1-20260831, and passive-alice-face-repeat-2-20260831"
+  threshold_formula: "Dominant categories are those with exploratory mean >= 0.30 in all three archived runs. minimum_detection_rate is fixed at 0.995. Per-category maximum standard deviation, percentile range, and warm-up drift thresholds are the archived worst-case values rounded up to 0.001. Repeat mean-delta thresholds are documented in docs and are not part of the per-run analyzer schema."
+  repeat_mean_delta_thresholds: "browOuterUpLeft<=0.017; browInnerUp<=0.024; browOuterUpRight<=0.010; eyeLookDownLeft<=0.001; eyeLookDownRight<=0.004; mouthSmileLeft<=0.046; mouthSmileRight<=0.052; eyeWideRight<=0.001; mouthPucker<=0.012"

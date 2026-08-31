@@ -2,7 +2,7 @@
 
 Date: 2026-08-31
 
-Outcome: exploratory and inconclusive
+Outcome: provisional thresholds declared; replacement capture pending
 
 ## Camera Inventory
 
@@ -27,22 +27,74 @@ Known placement facts on 2026-08-31:
 - Full-face framing was not confirmed before the original three runs.
 - Participant exclusion was not independently verified before the original three runs.
 
+## Preview Confirmation
+
+- At `2026-08-31T10:42:22Z` (`2026-08-31T18:42:22+0800 HKT`), after running `alice-camera preview` on `/dev/v4l/by-id/usb-046d_HD_Webcam_C525_79C73260-video-index0`, the user confirmed:
+  - Alice's full face was visible in frame.
+  - No participant was visible in frame.
+  - The preview overlay tracked Alice correctly.
+- OBS Studio was closed before the confirmation preview and will remain closed for replacement capture.
+- The preview window was closed after confirmation and before replacement capture.
+
 ## Preview Gate
 
-Before any replacement capture, run:
+The preview gate has been satisfied. For provenance, the command used was:
 
 ```bash
 uv run alice-camera preview /dev/v4l/by-id/usb-046d_HD_Webcam_C525_79C73260-video-index0 --model-path artifacts/passive-alice-face-pilot/model/face_landmarker.task --width 640 --height 480 --fps 10 --window-title "Alice Phase 1 Preview"
 ```
 
-The operator must confirm all of the following before starting a new capture:
+The confirmed preview conditions were:
 
-- OBS Studio is closed.
-- The preview uses the C525 Alice-facing selector, not the C920 selector.
-- Alice's full face is visible in frame.
-- No participant is visible in frame.
+- OBS Studio was closed.
+- The preview used the C525 Alice-facing selector, not the C920 selector.
+- Alice's full face was visible in frame.
+- No participant was visible in frame.
+- The overlay tracked Alice correctly.
+- The preview was exited with `q` and closed before replacement capture.
 
-Exit the preview with `q`.
+## Provisional Threshold Declaration
+
+These thresholds are frozen before replacement capture and are derived only from the archived exploratory runs `passive-alice-face-warmup-20260831`, `passive-alice-face-repeat-1-20260831`, and `passive-alice-face-repeat-2-20260831`.
+
+Threshold formula:
+
+- Dominant categories are the categories whose mean score was at least `0.30` in all three archived exploratory runs.
+- `minimum_detection_rate` is fixed at `0.995`, which allows up to six invalid observations in a 1200-frame run while still requiring near-perfect face detection.
+- For each dominant category, `maximum_standard_deviation`, `maximum_percentile_range`, and `maximum_warmup_drift` equal the archived worst-case value rounded up to `0.001`.
+- Cross-run repeat agreement is evaluated separately from the per-run analyzer: for each dominant category, the provisional `maximum_abs_mean_delta` between fresh Repeat 1 and Repeat 2 equals the archived exploratory `|repeat-1 mean - repeat-2 mean|`, rounded up to `0.001`.
+
+Per-run analyzer thresholds stored in the config:
+
+| Category | Max Std Dev | Max 5-95 Range | Max Warm-up Drift |
+| --- | ---: | ---: | ---: |
+| `browOuterUpLeft` | `0.052` | `0.047` | `0.002` |
+| `browInnerUp` | `0.036` | `0.077` | `0.006` |
+| `browOuterUpRight` | `0.041` | `0.078` | `0.008` |
+| `eyeLookDownLeft` | `0.046` | `0.131` | `0.064` |
+| `eyeLookDownRight` | `0.047` | `0.147` | `0.032` |
+| `mouthSmileLeft` | `0.058` | `0.151` | `0.024` |
+| `mouthSmileRight` | `0.038` | `0.126` | `0.024` |
+| `eyeWideRight` | `0.059` | `0.167` | `0.070` |
+| `mouthPucker` | `0.044` | `0.111` | `0.015` |
+
+Global per-run threshold:
+
+- `minimum_detection_rate >= 0.995`
+
+Cross-run provisional repeat thresholds for the fresh acceptance repeats:
+
+| Category | Max Abs Mean Delta (`repeat-1` vs `repeat-2`) |
+| --- | ---: |
+| `browOuterUpLeft` | `0.017` |
+| `browInnerUp` | `0.024` |
+| `browOuterUpRight` | `0.010` |
+| `eyeLookDownLeft` | `0.001` |
+| `eyeLookDownRight` | `0.004` |
+| `mouthSmileLeft` | `0.046` |
+| `mouthSmileRight` | `0.052` |
+| `eyeWideRight` | `0.001` |
+| `mouthPucker` | `0.012` |
 
 ## Archived Exploratory Runs
 
@@ -74,13 +126,13 @@ The largest repeat-to-repeat mean shifts were:
 - `mouthSmileLeft`: `0.4729` to `0.4278` (`abs delta 0.0451`)
 - `browInnerUp`: `0.8946` to `0.8714` (`abs delta 0.0232`)
 
-## Conclusion
+## Pre-Capture Status
 
-These archived runs are exploratory and inconclusive.
+The archived runs remain exploratory and inconclusive.
 
 The procedural gap is now explicit: the original three runs were captured before a pre-capture confirmation of full-face framing and participant exclusion. That alone disqualifies them from Phase 1 acceptance evidence. They still remain useful as exploratory observations, and their analyzer outcome also stays `inconclusive` because no acceptance thresholds were predeclared.
 
-No robot motion was commanded. The remaining blocker is operator confirmation in the preview gate, not actuator behavior.
+That blocker is now cleared. Replacement capture can proceed under the frozen threshold set above. No robot motion was commanded.
 
 ## Confirmatory Rerun Requirements
 
