@@ -1,0 +1,22 @@
+run_id: "passive-alice-face-pilot-template"
+camera_id: "usb-046d_HD_Webcam_C525_79C73260-video-index0"
+camera_device: "/dev/v4l/by-id/usb-046d_HD_Webcam_C525_79C73260-video-index0"
+requested_width: 640
+requested_height: 480
+requested_fps: 10
+duration_seconds: 120
+sample_count: 1200
+sample_interval_ms: 100
+retain_frames: false
+operator_metadata:
+  usb_identity: "Logitech HD Webcam C525; udev reported vendor 046d, product 0826, serial 79C73260, with /dev/video0 mapped from the chosen by-id index0 link"
+  supported_mode: "alice-camera list could not probe capabilities on this host because v4l2-ctl is unavailable; run requests 640x480 at 10 fps"
+  camera_placement: "User reported the webcam is pointed at Alice's face"
+  distance: "unknown"
+  angle: "unknown"
+  lighting: "unknown"
+  focus: "unknown"
+  exposure: "unknown"
+  participant_exclusion: "User reported the webcam points at Alice's face; participant presence in frame was not independently verified"
+  stationary_setup: "Alice is to remain stationary; setup is unchanged between repeat captures"
+  raw_frame_retention: "Disabled; no raw frames or video may be saved"
