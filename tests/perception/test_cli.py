@@ -104,8 +104,11 @@ class FakeObserver:
     def __init__(self, **kwargs: object) -> None:
         self.kwargs = kwargs
         self.closed = False
+        self.close_error: RuntimeError | None = None
 
     def close(self) -> None:
+        if self.close_error is not None:
+            raise self.close_error
         self.closed = True
 
 
@@ -505,3 +508,102 @@ def test_preview_command_closes_camera_when_detector_factory_fails_on_default_ru
         )
 
     assert camera.closed is True
+
+
+def test_preview_command_closes_cli_owned_resources_after_custom_runner_returns(
+    tmp_path: Path,
+) -> None:
+    model_path = tmp_path / "face_landmarker.task"
+    model_path.write_bytes(b"model")
+    camera = FakeCamera()
+    detector = FakeObserver(model_path=model_path)
+    preview_calls: list[tuple[object, object, str]] = []
+
+    def preview_runner(
+        camera_arg: object,
+        detector_arg: object,
+        *,
+        window_title: str,
+    ) -> None:
+        preview_calls.append((camera_arg, detector_arg, window_title))
+
+    exit_code = main(
+        [
+            "preview",
+            ALICE_PHASE_1_PREVIEW_DEVICE,
+            "--model-path",
+            str(model_path),
+            "--window-title",
+            "Alice Preview",
+        ],
+        stdout=io.StringIO(),
+        camera_factory=lambda **_kwargs: camera,
+        preview_detector_factory=lambda **_kwargs: detector,
+        preview_runner=preview_runner,
+    )
+
+    assert exit_code == 0
+    assert preview_calls == [(camera, detector, "Alice Preview")]
+    assert camera.closed is True
+    assert detector.closed is True
+
+
+def test_preview_command_preserves_runner_exception_and_closes_both_resources(
+    tmp_path: Path,
+) -> None:
+    model_path = tmp_path / "face_landmarker.task"
+    model_path.write_bytes(b"model")
+    camera = FakeCamera()
+    detector = FakeObserver(model_path=model_path)
+
+    def preview_runner(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("preview failed")
+
+    with pytest.raises(RuntimeError, match="preview failed"):
+        main(
+            [
+                "preview",
+                ALICE_PHASE_1_PREVIEW_DEVICE,
+                "--model-path",
+                str(model_path),
+            ],
+            stdout=io.StringIO(),
+            camera_factory=lambda **_kwargs: camera,
+            preview_detector_factory=lambda **_kwargs: detector,
+            preview_runner=preview_runner,
+        )
+
+    assert camera.closed is True
+    assert detector.closed is True
+
+
+def test_preview_command_closes_detector_when_camera_close_fails(
+    tmp_path: Path,
+) -> None:
+    model_path = tmp_path / "face_landmarker.task"
+    model_path.write_bytes(b"model")
+    camera = FakeCamera()
+    camera.close_error = RuntimeError("camera close failed")
+    detector = FakeObserver(model_path=model_path)
+
+    def preview_runner(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("preview failed")
+
+    with pytest.raises(RuntimeError, match="preview failed") as error_info:
+        main(
+            [
+                "preview",
+                ALICE_PHASE_1_PREVIEW_DEVICE,
+                "--model-path",
+                str(model_path),
+            ],
+            stdout=io.StringIO(),
+            camera_factory=lambda **_kwargs: camera,
+            preview_detector_factory=lambda **_kwargs: detector,
+            preview_runner=preview_runner,
+        )
+
+    assert detector.closed is True
+    assert "cleanup failed: camera close failed" in getattr(
+        error_info.value, "__notes__", []
+    )

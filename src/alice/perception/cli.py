@@ -134,25 +134,32 @@ def main(
         if preview_factory is None:
             preview_factory = _default_preview_detector_factory
 
-        preview_camera = camera_factory(
-            camera_id=Path(camera_device).name,
-            device=camera_device,
-            width=args.width,
-            height=args.height,
-            fps=args.fps,
-        )
+        preview_camera: Any | None = None
+        preview_detector: Any | None = None
+        preview_error: BaseException | None = None
         try:
+            preview_camera = camera_factory(
+                camera_id=Path(camera_device).name,
+                device=camera_device,
+                width=args.width,
+                height=args.height,
+                fps=args.fps,
+            )
             preview_detector = preview_factory(model_path=args.model_path)
+            preview_runner(
+                preview_camera,
+                preview_detector,
+                window_title=args.window_title,
+            )
         except BaseException as error:
-            close_error = _close_owned_resources(preview_camera)
+            preview_error = error
+        close_error = _close_owned_resources(preview_camera, preview_detector)
+        if preview_error is not None:
             if close_error is not None:
-                error.add_note(f"cleanup failed: {close_error}")
-            raise error
-        preview_runner(
-            preview_camera,
-            preview_detector,
-            window_title=args.window_title,
-        )
+                preview_error.add_note(f"cleanup failed: {close_error}")
+            raise preview_error
+        if close_error is not None:
+            raise close_error
         return 0
     if args.command == "capture":
         config = _load_capture_config(args.config_path, run_id=args.run_id)
