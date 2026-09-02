@@ -47,7 +47,7 @@ observer:
     height: {availability: available, value: 480, set_succeeded: true}
     fps: {availability: available, value: 10, set_succeeded: true}
     focus: {availability: available, value: 60, set_succeeded: null}
-    exposure: {availability: available, value: 249, set_succeeded: null}
+    exposure: {availability: available, value: 100, set_succeeded: null}
 safety_limits:
   max_step: 0.05
   max_rate_per_second: 0.10
