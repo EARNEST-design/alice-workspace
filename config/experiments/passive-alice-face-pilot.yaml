@@ -58,8 +58,8 @@ setup:
   alice_full_face_confirmed: true
   participant_exclusion_confirmed: true
   confirmation:
-    confirmed_at: "2026-08-31T19:35:16Z"
-    source: "Operator replied 'yes perfect' after reviewing the live alice-camera overlay on the exact C525 selector"
+    confirmed_at: "2026-09-02T03:48:23Z"
+    source: "Operator confirmed Alice is visible and the overlay tracks her in the live alice-camera preview on the exact C525 selector"
   lighting:
     state: "confirmed"
     detail: "Current ambient lighting was visually accepted in preview; room illuminance was not instrumented and must not change between runs"
