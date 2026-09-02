@@ -1,0 +1,9 @@
+schema_version: electrical-safety-evidence/v1
+evidence_id: alice-servo-supply-6v-1a-20260902
+source: hardware/electrical/alice-servo-supply-6v-1a.md
+source_document_sha256: 0f5e8a5ef3d407a809b4f8ec35de7e30246183ceb5d6fd5041e12c2b0fb0a121
+reviewed_at: "2026-09-02T07:35:00Z"
+reviewer: "operator-confirmed; Codex scope review"
+supply_voltage_v: 6.0
+current_limit_a: 1.0
+scope: "Alice face servo rail; initial single actuator mouth_open identification at normalized offsets +/-0.05 only"
