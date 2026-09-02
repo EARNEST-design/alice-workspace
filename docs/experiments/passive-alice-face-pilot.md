@@ -227,6 +227,44 @@ change because no raw imagery was retained. Phase 1 therefore remains failed
 until the reopened live overlay is visually checked, the cause is corrected,
 and fresh locked repeats pass.
 
+## C920 comparison — 2026-09-02 HKT
+
+After correcting a visibly flickering light, the newer C920 was repositioned
+toward Alice and compared at `1280x720`, 10 fps. Its locked V4L2 controls were
+continuous autofocus `0`, absolute focus `50`, manual exposure mode `1`,
+absolute exposure `100`, dynamic framerate `0`, automatic white balance `0`,
+white-balance temperature `3277`, gain `0`, and 50 Hz power-line compensation.
+The operator reported a visibly sharper image but similar landmark-dot jitter.
+
+An initial warm-up requested 30 fps but negotiated 10 fps and is excluded from
+the exact-configuration comparison. The corrected configuration and all exact
+runs used commit `bf1800283b4834208e9a4bf407b88b3d13a32852`; their manifests
+reported `1280x720`, 10 fps, focus `50`, and exposure `100`.
+
+| Kind | Valid observations | Per-run outcome | Failed per-run checks |
+| --- | ---: | --- | --- |
+| Warm-up | 1200/1200 | fail | `browInnerUp.warmup_drift`: 0.006238 > 0.006 |
+| Repeat 1 | 1200/1200 | fail | `browInnerUp.warmup_drift`: 0.009843 > 0.006; `browOuterUpRight.warmup_drift`: 0.008808 > 0.008 |
+| Repeat 2 | 1200/1200 | pass | none |
+
+The same frozen cross-run thresholds were used for a direct comparison:
+
+| Blendshape | C525 delta | C920 delta | Threshold | Result |
+| --- | ---: | ---: | ---: | --- |
+| `eyeLookDownLeft` | 0.009788 | 0.003368 | 0.001 | C920 improved, both fail |
+| `eyeWideRight` | 0.001779 | 0.002889 | 0.001 | C525 improved, both fail |
+| `mouthPucker` | 0.001263 | 0.001365 | 0.012 | both pass |
+| `mouthSmileLeft` | 0.005874 | 0.000580 | 0.046 | C920 improved, both pass |
+| `mouthSmileRight` | 0.004610 | 0.000534 | 0.052 | C920 improved, both pass |
+
+The C920 therefore improves image sharpness and several mouth scores, but does
+not make the frozen eye dimensions repeatable and introduces additional brow
+drift failures. A camera replacement alone is not sufficient. The corrected
+C525 setup remains the stronger general baseline because all three of its
+per-run stability checks passed. Eye-actuator identification must preserve
+uncertainty and repeated Home baselines rather than treating visually stable
+landmark dots as exact measurements.
+
 ## Follow-Up Requirements
 
 - Keep the same stable by-id C525 capture selector unless new reviewed evidence shows a better mapping.
