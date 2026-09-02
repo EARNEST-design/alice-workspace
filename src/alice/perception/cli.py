@@ -27,8 +27,14 @@ from alice.perception.mediapipe_adapter import (
 )
 from alice.perception.preview import run_preview
 
-PHASE_1_PREVIEW_CAMERA_DEVICE = (
+PHASE_1_C525_CAMERA_DEVICE = (
     "/dev/v4l/by-id/usb-046d_HD_Webcam_C525_79C73260-video-index0"
+)
+PHASE_1_C920_CAMERA_DEVICE = (
+    "/dev/v4l/by-id/usb-046d_HD_Pro_Webcam_C920_BF4BEEAF-video-index0"
+)
+PHASE_1_PREVIEW_CAMERA_DEVICES = frozenset(
+    (PHASE_1_C525_CAMERA_DEVICE, PHASE_1_C920_CAMERA_DEVICE)
 )
 
 
@@ -113,10 +119,10 @@ def _run_cli_preview(
 
 def _validate_phase_1_preview_camera_device(device: str) -> str:
     validated_device = validate_camera_device_selector(device)
-    if validated_device != PHASE_1_PREVIEW_CAMERA_DEVICE:
+    if validated_device not in PHASE_1_PREVIEW_CAMERA_DEVICES:
         raise ValueError(
-            "Phase 1 preview requires "
-            f"{PHASE_1_PREVIEW_CAMERA_DEVICE} as the Alice-facing C525 selector"
+            "Phase 1 preview requires an inventoried stable C525 or C920 "
+            "video-index0 selector"
         )
     return validated_device
 

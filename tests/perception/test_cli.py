@@ -465,7 +465,6 @@ def test_preview_command_rejects_non_v4l2_selector_before_factory_calls(
     [
         "/dev/video0",
         "/dev/v4l/by-id/usb-046d_HD_Webcam_C525_79C73260-video-index1",
-        FUTURE_USER_CAMERA_DEVICE,
     ],
 )
 def test_preview_command_rejects_non_phase_1_preview_selector_before_factory_calls(
@@ -490,6 +489,48 @@ def test_preview_command_rejects_non_phase_1_preview_selector_before_factory_cal
             camera_factory=forbidden_factory,
             observer_factory=forbidden_factory,
         )
+
+
+def test_preview_command_accepts_inventoried_c920_after_alice_reposition(
+    tmp_path: Path,
+) -> None:
+    """Removing C920 allowlisting would prevent the approved camera comparison."""
+    model_path = tmp_path / "face_landmarker.task"
+    model_path.write_bytes(b"model")
+    cameras: list[FakeCamera] = []
+
+    def camera_factory(**kwargs: object) -> FakeCamera:
+        camera = FakeCamera(**kwargs)
+        cameras.append(camera)
+        return camera
+
+    exit_code = main(
+        [
+            "preview",
+            FUTURE_USER_CAMERA_DEVICE,
+            "--model-path",
+            str(model_path),
+            "--width",
+            "1280",
+            "--height",
+            "720",
+            "--fps",
+            "30",
+        ],
+        stdout=io.StringIO(),
+        camera_factory=camera_factory,
+        observer_factory=lambda **kwargs: FakeObserver(**kwargs),
+        preview_runner=lambda *_args, **_kwargs: None,
+    )
+
+    assert exit_code == 0
+    assert cameras[0].kwargs == {
+        "camera_id": "usb-046d_HD_Pro_Webcam_C920_BF4BEEAF-video-index0",
+        "device": FUTURE_USER_CAMERA_DEVICE,
+        "width": 1280,
+        "height": 720,
+        "fps": 30.0,
+    }
 
 
 def test_preview_command_wires_explicit_selector_and_model_path(tmp_path: Path) -> None:
