@@ -6,10 +6,13 @@ The immediate objective is to build a reproducible pipeline joining facial landm
 
 ## Current status
 
-- Workspace scaffolded; no actuator commands have been sent.
+- Phase 2 full-range actuator characterization and initial live mimicry bring-up
+  were completed on 2026-09-02; see
+  `docs/experiments/2026-09-02-mimicry-bringup.md`.
 - Detected controller: Pololu Mini Maestro 12-Channel USB Servo Controller (`1ffb:008a`, serial `00037376`).
 - Expected ports: `/dev/ttyACM0` and `/dev/ttyACM1`; use stable `/dev/serial/by-id/...` paths in configuration.
-- Motor-driver make, channel wiring, limits, and polarity are not yet verified.
+- Semantic channel wiring and conservative software limits are verified in
+  `hardware/alice-face-v1.yaml`; downstream motor-driver make remains unknown.
 - Reference repository and historical Alice research are documented under `docs/discovery/`.
 
 ## Safety gate
