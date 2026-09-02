@@ -3,7 +3,7 @@ camera_id: "usb-046d_HD_Pro_Webcam_C920_BF4BEEAF-video-index0"
 camera_device: "/dev/v4l/by-id/usb-046d_HD_Pro_Webcam_C920_BF4BEEAF-video-index0"
 requested_width: 1280
 requested_height: 720
-requested_fps: 30
+requested_fps: 10
 duration_seconds: 120
 sample_count: 1200
 sample_interval_ms: 100

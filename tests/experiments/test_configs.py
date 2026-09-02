@@ -40,7 +40,7 @@ def test_c920_comparison_config_uses_exact_inventoried_camera_and_locked_mode() 
     assert (config.requested_width, config.requested_height, config.requested_fps) == (
         1280,
         720,
-        30,
+        10,
     )
     assert config.setup.focus.state.value == "confirmed"
     assert config.setup.exposure.state.value == "confirmed"
