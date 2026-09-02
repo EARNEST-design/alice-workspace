@@ -25,3 +25,23 @@ def test_example_config_cannot_be_executed_with_required_placeholders() -> None:
 
     with pytest.raises(ValueError, match="REQUIRED placeholder"):
         PassiveCaptureConfig.model_validate(payload)
+
+
+def test_c920_comparison_config_uses_exact_inventoried_camera_and_locked_mode() -> None:
+    """Falling back to a transient node or C525 would invalidate comparison."""
+    path = Path("config/experiments/passive-alice-face-c920-comparison.yaml")
+    payload = yaml.safe_load(path.read_text(encoding="utf-8"))
+    config = PassiveCaptureConfig.model_validate(payload)
+
+    assert config.camera_id == (
+        "usb-046d_HD_Pro_Webcam_C920_BF4BEEAF-video-index0"
+    )
+    assert config.camera_device == f"/dev/v4l/by-id/{config.camera_id}"
+    assert (config.requested_width, config.requested_height, config.requested_fps) == (
+        1280,
+        720,
+        30,
+    )
+    assert config.setup.focus.state.value == "confirmed"
+    assert config.setup.exposure.state.value == "confirmed"
+    assert config.retain_frames is False
