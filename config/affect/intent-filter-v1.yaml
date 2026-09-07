@@ -1,0 +1,15 @@
+schema_version: intent-filter/v1
+affect_schema_id: affect-vector/v1
+coordinate_scales:
+  - 2.0
+  - 2.0
+  - 2.0
+retained_training_coordinates:
+  - [0.0, 0.0, 0.0]
+supported_max_distance: 0.05
+interpolated_max_distance: 0.2
+default_transition_time_constant_s: 0.5
+support_set_id: foundation-neutral-placeholder-v1
+support_provenance: >-
+  Hand-authored neutral foundation placeholder; not empirical robot, participant,
+  or trained-model data. Replace only with reviewed, versioned training evidence.
