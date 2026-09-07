@@ -88,6 +88,7 @@ def test_stale_intent_preserves_last_valid_target() -> None:
 
     previous = _previous()
     stale = _intent(
+        vector=(0.5, 0.0, 0.0),
         received_monotonic_ns=1_100_000_000,
         expires_monotonic_ns=2_000_000_000,
     )
@@ -98,15 +99,53 @@ def test_stale_intent_preserves_last_valid_target() -> None:
     assert filtered.vector == previous.vector
     assert filtered.intensity == previous.intensity
     assert filtered.accepted_monotonic_ns == previous.accepted_monotonic_ns
-    assert filtered.support_distance is None
+    assert filtered.support_distance == pytest.approx(0.25 / math.sqrt(3.0))
     assert "expired" in filtered.reason
 
 
-def test_schema_incompatible_intent_preserves_last_valid_target() -> None:
+def test_future_received_intent_is_stale_and_preserves_full_prior_state() -> None:
+    """Accepting a not-yet-received update would violate monotonic ordering."""
+
+    previous = _previous()
+    future = _intent(
+        vector=(0.5, 0.0, 0.0),
+        received_monotonic_ns=2_500_000_000,
+        expires_monotonic_ns=4_000_000_000,
+    )
+
+    filtered = _filter().update(future, previous, now_ns=2_000_000_000)
+
+    retained_fields = {
+        "schema_version",
+        "affect_schema_id",
+        "vector",
+        "intensity",
+        "source_id",
+        "source_confidence",
+        "accepted_monotonic_ns",
+    }
+    assert filtered.support_status is SupportStatus.STALE
+    assert filtered.model_dump(include=retained_fields) == previous.model_dump(
+        include=retained_fields
+    )
+    assert filtered.support_distance == pytest.approx(0.25 / math.sqrt(3.0))
+    assert "precedes intent receipt" in filtered.reason
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"affect_schema_id": "affect-vector/v2"},
+        {"vector": (0.1, 0.2)},
+    ],
+)
+def test_schema_incompatible_intent_has_undefined_support_distance(
+    overrides: dict[str, object],
+) -> None:
     """Skipping schema validation could reinterpret coordinate dimensions."""
 
     previous = _previous()
-    incompatible = _intent(affect_schema_id="affect-vector/v2")
+    incompatible = _intent(**overrides)
 
     filtered = _filter().update(incompatible, previous, now_ns=2_000_000_000)
 
@@ -183,15 +222,29 @@ def test_cluster_labels_do_not_change_filtering_or_support() -> None:
 
 
 def test_checked_in_filter_configuration_is_valid_and_provenanced() -> None:
-    """An invalid or unprovenanced support set would make decisions unauditable."""
+    """Placeholder neutral data must not masquerade as demonstrated support."""
 
     document = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8"))
 
     config = IntentFilterConfig.model_validate(document)
+    filtered = IntentFilter(
+        schema=AffectVectorSchema(
+            schema_id="affect-vector/v1",
+            dimensions=("valence", "arousal", "dominance"),
+        ),
+        config=config,
+    ).update(
+        _intent(vector=(0.0, 0.0, 0.0)),
+        _previous(),
+        now_ns=2_000_000_000,
+    )
 
     assert config.affect_schema_id == "affect-vector/v1"
-    assert config.retained_training_coordinates
+    assert config.retained_training_coordinates == ()
     assert config.support_provenance
+    assert filtered.support_status is SupportStatus.FALLBACK
+    assert filtered.support_distance is None
+    assert "no retained support evidence" in filtered.reason
 
 
 @pytest.mark.parametrize(

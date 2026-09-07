@@ -40,9 +40,7 @@ class IntentFilterConfig(BaseModel):
     schema_version: Literal["intent-filter/v1"]
     affect_schema_id: NonEmptyString
     coordinate_scales: tuple[FinitePositiveFloat, ...] = Field(min_length=1)
-    retained_training_coordinates: tuple[
-        tuple[AffectCoordinate, ...], ...
-    ] = Field(min_length=1)
+    retained_training_coordinates: tuple[tuple[AffectCoordinate, ...], ...]
     supported_max_distance: float = Field(ge=0.0, allow_inf_nan=False)
     interpolated_max_distance: float = Field(ge=0.0, allow_inf_nan=False)
     default_transition_time_constant_s: FinitePositiveFloat
@@ -79,7 +77,15 @@ class FilteredIntent(BaseModel):
     source_confidence: UnitIntervalFloat | None = None
     accepted_monotonic_ns: MonotonicNanoseconds
     support_status: SupportStatus
-    support_distance: float | None = Field(default=None, ge=0.0, allow_inf_nan=False)
+    support_distance: float | None = Field(
+        default=None,
+        ge=0.0,
+        allow_inf_nan=False,
+        description=(
+            "Normalized distance from the requested vector to retained support; "
+            "undefined only for incompatible vector geometry or an empty evidence set"
+        ),
+    )
     reason: NonEmptyString
 
 
@@ -122,22 +128,29 @@ class IntentFilter:
                 reason=f"schema-incompatible affect intent: {error}",
             )
 
+        support_distance = self._support_distance(intent.vector)
         if now_ns < intent.received_monotonic_ns:
             return self._retained(
                 previous,
                 status=SupportStatus.STALE,
-                support_distance=None,
+                support_distance=support_distance,
                 reason="monotonic evaluation time precedes intent receipt",
             )
         if intent.is_expired(now_monotonic_ns=now_ns):
             return self._retained(
                 previous,
                 status=SupportStatus.STALE,
-                support_distance=None,
+                support_distance=support_distance,
                 reason="affect intent expired before evaluation",
             )
 
-        support_distance = self._support_distance(intent.vector)
+        if support_distance is None:
+            return self._retained(
+                previous,
+                status=SupportStatus.FALLBACK,
+                support_distance=None,
+                reason="no retained support evidence",
+            )
         support_status, reason = self._classify_support(support_distance)
         if support_status is SupportStatus.FALLBACK:
             return self._retained(
@@ -184,7 +197,9 @@ class IntentFilter:
         if now_ns < previous.accepted_monotonic_ns:
             raise ValueError("now_ns must not precede the last accepted update")
 
-    def _support_distance(self, vector: tuple[float, ...]) -> float:
+    def _support_distance(self, vector: tuple[float, ...]) -> float | None:
+        if not self._config.retained_training_coordinates:
+            return None
         dimension_count = len(self._config.coordinate_scales)
         return min(
             math.sqrt(

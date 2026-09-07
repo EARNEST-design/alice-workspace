@@ -4,12 +4,11 @@ coordinate_scales:
   - 2.0
   - 2.0
   - 2.0
-retained_training_coordinates:
-  - [0.0, 0.0, 0.0]
+retained_training_coordinates: []
 supported_max_distance: 0.05
 interpolated_max_distance: 0.2
 default_transition_time_constant_s: 0.5
-support_set_id: foundation-neutral-placeholder-v1
+support_set_id: no-demonstrated-support-v1
 support_provenance: >-
-  Hand-authored neutral foundation placeholder; not empirical robot, participant,
-  or trained-model data. Replace only with reviewed, versioned training evidence.
+  Empty by design: no reviewed empirical robot, participant, or trained-model
+  support coordinates are retained. Add points only from versioned evidence.
