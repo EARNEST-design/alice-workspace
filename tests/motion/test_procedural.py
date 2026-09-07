@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from alice.contracts.actuation import ActuatorTarget
-from alice.contracts.motion import TargetUpdate
+from alice.contracts.motion import MotionProposal, TargetUpdate
 from alice.motion.anchors import AnchorPlanner, load_procedural_motion_config
 from alice.motion.intent_filter import FilteredIntent, SupportStatus
 from alice.motion.procedural import ProceduralMotionGenerator
@@ -71,6 +71,18 @@ def test_same_seed_replays_identically() -> None:
     )
 
 
+def test_generated_json_round_trips_through_canonical_motion_proposal() -> None:
+    """Adding a subtype-only wire field would violate the canonical v1 contract."""
+
+    planner, generator = _generator()
+    generated = generator.step(_intent(), _state(planner), seed=41, horizon_s=2.0)
+
+    decoded = MotionProposal.model_validate_json(generated.model_dump_json())
+
+    assert type(generated) is MotionProposal
+    assert decoded == generated
+
+
 def test_different_seeds_produce_distinct_slow_variation() -> None:
     """Ignoring the seed would collapse the procedural baseline to one trajectory."""
 
@@ -92,7 +104,7 @@ def test_unsupported_coordinate_returns_exact_anchor_fallback() -> None:
         _intent(SupportStatus.FALLBACK), state, seed=7, horizon_s=1.0
     )
 
-    assert proposal.support_status is SupportStatus.FALLBACK
+    assert proposal.support_status == "fallback"
     assert proposal.horizon == planner.plan_neutral(state, 1.0)
 
 
@@ -106,7 +118,7 @@ def test_checked_in_empty_support_forces_neutral_fallback() -> None:
         _intent(SupportStatus.FALLBACK), state, seed=17, horizon_s=2.0
     )
 
-    assert proposal.support_status.value == "fallback"
+    assert proposal.support_status == "fallback"
     assert proposal.horizon == planner.plan_neutral(state, 2.0)
 
 
@@ -178,3 +190,26 @@ def test_blink_and_gaze_timers_are_coupled_and_respect_refractory_windows() -> N
     assert min(
         right - left for left, right in zip(blink_onsets, blink_onsets[1:])
     ) >= generator.config.blink.refractory_s
+
+    gaze_times = [
+        update.offset_s
+        for update in updates
+        if abs(_position(update, "left_eye_horizontal")) > 1e-12
+    ]
+    gaze_windows: list[tuple[float, float]] = []
+    for instant in gaze_times:
+        if not gaze_windows or instant - gaze_windows[-1][1] > (
+            1.5 / generator.config.effective_cadence_hz
+        ):
+            gaze_windows.append((instant, instant))
+        else:
+            gaze_windows[-1] = (gaze_windows[-1][0], instant)
+
+    assert len(gaze_windows) >= 2
+    assert min(
+        right_start - left_end
+        for (_, left_end), (right_start, _) in zip(
+            gaze_windows,
+            gaze_windows[1:],
+        )
+    ) >= generator.config.gaze.refractory_s

@@ -12,6 +12,12 @@ from alice.contracts.blendshapes import NonEmptyString, Sha256Hex
 MonotonicNanoseconds = Annotated[int, Field(ge=0)]
 OffsetSeconds = Annotated[float, Field(ge=0.0, allow_inf_nan=False)]
 ReplaySeed = Annotated[int, Field(ge=0)]
+MotionSupportStatus = Literal[
+    "supported",
+    "interpolated",
+    "fallback",
+    "stale",
+]
 
 
 class TargetUpdate(BaseModel):
@@ -63,6 +69,7 @@ class MotionProposal(BaseModel):
     model_sha256: Sha256Hex
     calibration_sha256: Sha256Hex
     controller_settings_sha256: Sha256Hex
+    support_status: MotionSupportStatus
     horizon: TargetUpdateHorizon
 
     @model_validator(mode="after")

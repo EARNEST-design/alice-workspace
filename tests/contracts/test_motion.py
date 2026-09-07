@@ -49,6 +49,7 @@ def valid_proposal(**overrides: object) -> dict[str, object]:
         "model_sha256": SHA256_A,
         "calibration_sha256": SHA256_B,
         "controller_settings_sha256": SHA256_C,
+        "support_status": "supported",
         "horizon": horizon(),
     }
     values.update(overrides)
@@ -96,6 +97,29 @@ def test_motion_proposal_preserves_replay_and_binding_identities() -> None:
     assert proposal.model_sha256 == SHA256_A
     assert proposal.calibration_sha256 == SHA256_B
     assert proposal.controller_settings_sha256 == SHA256_C
+
+
+@pytest.mark.parametrize(
+    "support_status",
+    ["supported", "interpolated", "fallback", "stale"],
+)
+def test_motion_proposal_accepts_only_defined_support_statuses(
+    support_status: str,
+) -> None:
+    """Omitting a defined generator outcome would make its proposal invalid."""
+
+    proposal = MotionProposal.model_validate(
+        valid_proposal(support_status=support_status)
+    )
+
+    assert proposal.support_status == support_status
+
+
+def test_motion_proposal_rejects_unknown_support_status() -> None:
+    """An open string field would permit an unhandled generator outcome."""
+
+    with pytest.raises(ValidationError, match="support_status"):
+        MotionProposal.model_validate(valid_proposal(support_status="unknown"))
 
 
 def test_motion_proposal_requires_expiry_after_generation() -> None:

@@ -14,12 +14,6 @@ from alice.motion.anchors import AnchorPlanner, ProceduralMotionConfig
 from alice.motion.intent_filter import FilteredIntent, SupportStatus
 
 
-class ProceduralMotionProposal(MotionProposal):
-    """Motion proposal carrying the support decision that selected its path."""
-
-    support_status: SupportStatus
-
-
 @dataclass(frozen=True)
 class _TimedEvent:
     starts_at_s: float
@@ -65,7 +59,7 @@ class ProceduralMotionGenerator:
         state: TargetUpdate,
         seed: int,
         horizon_s: float,
-    ) -> ProceduralMotionProposal:
+    ) -> MotionProposal:
         """Generate one replayable proposal from filtered intent and accepted state."""
 
         if seed < 0:
@@ -97,7 +91,7 @@ class ProceduralMotionGenerator:
             )
         )
         proposal_digest = hashlib.sha256(identity_material.encode("utf-8")).hexdigest()
-        return ProceduralMotionProposal(
+        return MotionProposal(
             schema_version="motion-proposal/v1",
             proposal_id=f"procedural-{proposal_digest[:24]}",
             run_id=f"procedural-{intent.source_id}",
@@ -109,7 +103,7 @@ class ProceduralMotionGenerator:
             calibration_sha256=self._config.calibration_sha256,
             controller_settings_sha256=self._config.controller_settings_sha256,
             horizon=horizon,
-            support_status=intent.support_status,
+            support_status=intent.support_status.value,
         )
 
     def _add_variation(
