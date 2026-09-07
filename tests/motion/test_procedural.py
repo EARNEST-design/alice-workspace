@@ -1,0 +1,180 @@
+"""Behavioral tests for the seeded procedural living-motion baseline."""
+
+from __future__ import annotations
+
+import math
+from pathlib import Path
+
+import pytest
+
+from alice.contracts.actuation import ActuatorTarget
+from alice.contracts.motion import TargetUpdate
+from alice.motion.anchors import AnchorPlanner, load_procedural_motion_config
+from alice.motion.intent_filter import FilteredIntent, SupportStatus
+from alice.motion.procedural import ProceduralMotionGenerator
+
+ROOT = Path(__file__).parents[2]
+CONFIG_PATH = ROOT / "config" / "models" / "procedural-motion-v1.yaml"
+
+
+def _intent(status: SupportStatus = SupportStatus.SUPPORTED) -> FilteredIntent:
+    return FilteredIntent(
+        schema_version="filtered-intent/v1",
+        affect_schema_id="affect-vector/v1",
+        vector=(0.0, 0.0, 0.0),
+        intensity=0.7,
+        source_id="procedural-test",
+        accepted_monotonic_ns=2_000_000_000,
+        support_status=status,
+        support_distance=0.0 if status is not SupportStatus.FALLBACK else None,
+        reason="deterministic test fixture",
+    )
+
+
+def _state(planner: AnchorPlanner, **overrides: float) -> TargetUpdate:
+    positions = {
+        target.actuator_name: target.normalized_position
+        for target in planner.config.anchor("neutral").targets
+    }
+    positions.update(overrides)
+    return TargetUpdate(
+        offset_s=0.0,
+        targets=tuple(
+            ActuatorTarget(actuator_name=name, normalized_position=value)
+            for name, value in positions.items()
+        ),
+    )
+
+
+def _generator() -> tuple[AnchorPlanner, ProceduralMotionGenerator]:
+    config = load_procedural_motion_config(CONFIG_PATH)
+    planner = AnchorPlanner(config=config)
+    return planner, ProceduralMotionGenerator(config=config, anchor_planner=planner)
+
+
+def _position(update: TargetUpdate, actuator_name: str) -> float:
+    return next(
+        target.normalized_position
+        for target in update.targets
+        if target.actuator_name == actuator_name
+    )
+
+
+def test_same_seed_replays_identically() -> None:
+    """Using ambient or shared RNG state would make replay diverge."""
+
+    planner, generator = _generator()
+    state = _state(planner)
+
+    assert generator.step(_intent(), state, 41, 2.0) == generator.step(
+        _intent(), state, 41, 2.0
+    )
+
+
+def test_different_seeds_produce_distinct_slow_variation() -> None:
+    """Ignoring the seed would collapse the procedural baseline to one trajectory."""
+
+    planner, generator = _generator()
+    state = _state(planner)
+    first = generator.step(_intent(), state, 41, 2.0)
+    second = generator.step(_intent(), state, 42, 2.0)
+
+    assert first.horizon != second.horizon
+
+
+def test_unsupported_coordinate_returns_exact_anchor_fallback() -> None:
+    """Procedural variation on unsupported affect would disguise fallback behavior."""
+
+    planner, generator = _generator()
+    state = _state(planner, mouth_open=0.2)
+
+    proposal = generator.step(
+        _intent(SupportStatus.FALLBACK), state, seed=7, horizon_s=1.0
+    )
+
+    assert proposal.support_status is SupportStatus.FALLBACK
+    assert proposal.horizon == planner.plan_neutral(state, 1.0)
+
+
+def test_checked_in_empty_support_forces_neutral_fallback() -> None:
+    """The checked-in absence of empirical support must remain visible downstream."""
+
+    planner, generator = _generator()
+    state = _state(planner)
+
+    proposal = generator.step(
+        _intent(SupportStatus.FALLBACK), state, seed=17, horizon_s=2.0
+    )
+
+    assert proposal.support_status.value == "fallback"
+    assert proposal.horizon == planner.plan_neutral(state, 2.0)
+
+
+def test_procedural_updates_start_at_state_and_follow_effective_cadence() -> None:
+    """A random first offset would create a horizon boundary jump."""
+
+    planner, generator = _generator()
+    state = _state(planner, head_tilt=0.1)
+
+    proposal = generator.step(_intent(), state, seed=5, horizon_s=1.0)
+
+    assert proposal.horizon.updates[0].targets == state.targets
+    assert [update.offset_s for update in proposal.horizon.updates] == pytest.approx(
+        [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
+    )
+
+
+def test_seeded_drift_is_band_limited_instead_of_per_update_jitter() -> None:
+    """Independent random offsets at each update would exceed the configured slope."""
+
+    planner, generator = _generator()
+    proposal = generator.step(_intent(), _state(planner), seed=11, horizon_s=6.0)
+    values = [
+        _position(update, "head_tilt") for update in proposal.horizon.updates
+    ]
+    period_s = 1.0 / generator.config.effective_cadence_hz
+    slope_bound = (
+        generator.config.drift.amplitude("head_tilt")
+        * 2.0
+        * math.pi
+        * generator.config.drift.max_frequency_hz
+    )
+
+    assert max(abs(right - left) for left, right in zip(values, values[1:])) <= (
+        slope_bound * period_s + 1e-12
+    )
+
+
+def test_blink_and_gaze_timers_are_coupled_and_respect_refractory_windows() -> None:
+    """Independent eye events or repeated closures would create visible twitching."""
+
+    planner, generator = _generator()
+    proposal = generator.step(_intent(), _state(planner), seed=23, horizon_s=20.0)
+    updates = proposal.horizon.updates
+
+    for update in updates:
+        assert _position(update, "lower_eyelids") == pytest.approx(
+            _position(update, "upper_eyelids")
+        )
+        assert _position(update, "left_eye_horizontal") == pytest.approx(
+            _position(update, "right_eye_horizontal")
+        )
+
+    blink_times = [
+        update.offset_s
+        for update in updates
+        if _position(update, "lower_eyelids")
+        <= -0.5 * generator.config.blink.amplitude
+    ]
+    blink_onsets = [
+        instant
+        for index, instant in enumerate(blink_times)
+        if index == 0
+        or instant - blink_times[index - 1]
+        > 1.5 / generator.config.effective_cadence_hz
+    ]
+
+    assert len(blink_onsets) >= 2
+    assert min(
+        right - left for left, right in zip(blink_onsets, blink_onsets[1:])
+    ) >= generator.config.blink.refractory_s

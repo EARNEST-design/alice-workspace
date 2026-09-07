@@ -1,0 +1,75 @@
+schema_version: procedural-motion-config/v1
+model_id: procedural-motion-v1
+affect_schema_id: affect-vector/v1
+affect_dimensions: [valence, arousal, dominance]
+calibration_sha256: 8ad9ad1f59dc70c47515c9a37b4531c5070c22a40ed66fb673d0e72a0d3dadb4
+controller_settings_sha256: e9695abc1888fef19d5ec4f49d396c7f53c8955335e72e241c6c2851d783d133
+effective_cadence_hz: 5.0
+anchor_transition_s: 0.8
+semantic_actuator_names:
+  - neck_rotation
+  - head_tilt
+  - face_pitch
+  - lower_eyelids
+  - upper_eyelids
+  - forehead_frown
+  - mouth_open
+  - right_eye_horizontal
+  - left_mouth_corner
+  - left_eye_horizontal
+  - right_mouth_corner
+anchors:
+  - name: neutral
+    targets:
+      - {actuator_name: neck_rotation, normalized_position: 0.0}
+      - {actuator_name: head_tilt, normalized_position: 0.0}
+      - {actuator_name: face_pitch, normalized_position: 0.0}
+      - {actuator_name: lower_eyelids, normalized_position: 0.0}
+      - {actuator_name: upper_eyelids, normalized_position: 0.0}
+      - {actuator_name: forehead_frown, normalized_position: 0.0}
+      - {actuator_name: mouth_open, normalized_position: 0.0}
+      - {actuator_name: right_eye_horizontal, normalized_position: 0.0}
+      - {actuator_name: left_mouth_corner, normalized_position: 0.0}
+      - {actuator_name: left_eye_horizontal, normalized_position: 0.0}
+      - {actuator_name: right_mouth_corner, normalized_position: 0.0}
+    provenance: hardware/alice-face-v1.yaml operator-reviewed Home values
+  - name: smile_open
+    targets:
+      - {actuator_name: mouth_open, normalized_position: 1.0}
+      - {actuator_name: left_mouth_corner, normalized_position: 1.0}
+      - {actuator_name: right_mouth_corner, normalized_position: -1.0}
+    provenance: hardware/expression-presets.md operator-accepted paired expression
+  - name: frown_closed
+    targets:
+      - {actuator_name: mouth_open, normalized_position: -1.0}
+      - {actuator_name: left_mouth_corner, normalized_position: -1.0}
+      - {actuator_name: right_mouth_corner, normalized_position: 1.0}
+    provenance: hardware/expression-presets.md operator-accepted paired expression
+affect_anchor_mappings: []
+drift:
+  components: 3
+  min_frequency_hz: 0.05
+  max_frequency_hz: 0.25
+  amplitudes:
+    - {actuator_name: neck_rotation, amplitude: 0.025}
+    - {actuator_name: head_tilt, amplitude: 0.03}
+    - {actuator_name: face_pitch, amplitude: 0.02}
+    - {actuator_name: mouth_open, amplitude: 0.012}
+blink:
+  actuator_names: [lower_eyelids, upper_eyelids]
+  amplitude: 0.5
+  close_s: 0.2
+  hold_s: 0.2
+  open_s: 0.4
+  refractory_s: 2.5
+  interval_max_s: 4.5
+gaze:
+  actuator_names: [right_eye_horizontal, left_eye_horizontal]
+  amplitude: 0.16
+  transition_s: 0.6
+  hold_s: 0.8
+  refractory_s: 1.5
+  interval_max_s: 3.5
+provenance: >-
+  Reviewed hardware anchors plus conservative procedural priors. Affect-to-anchor
+  mappings are intentionally empty pending retained empirical support evidence.
