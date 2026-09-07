@@ -29,9 +29,12 @@ adapter retain authority over any later actuation.
   policy, and SHA-256 checksum for every packaged artifact.
 
 Loading validates the complete artifact inventory, checksums, and caller-
-expected identities before constructing any software model component. Loading
-does not import an Alice hardware module, open serial, access a camera, or
-connect to ROS.
+expected identities before constructing any software model component. Every
+declared artifact must be a regular file and every filesystem entry must be
+declared. Hashing, parsing, and model construction use one private immutable
+byte snapshot, so a path changed during loading cannot replace validated
+content. Loading does not import an Alice hardware module, open serial, access
+a camera, or connect to ROS.
 
 ## Data and privacy
 
@@ -39,7 +42,9 @@ The package contains no training examples, raw participant media, biometric
 observations, credentials, camera code, ROS code, or actuator adapter. Its
 training record may identify an external dataset and permitted use so that a
 retained run stays auditable; access and consent remain governed at that data
-source.
+source. The training-record schema permits only bounded scalar settings,
+bounded text references, exact identities, and finite non-negative loss values;
+it has no field capable of carrying examples, media, or biometric arrays.
 
 ## Evaluation
 

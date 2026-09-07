@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+from copy import deepcopy
 from pathlib import Path
+from typing import IO, Any
 
 import pytest
 import serial
@@ -259,28 +262,11 @@ def test_package_contains_only_declared_offline_artifacts(tmp_path: Path) -> Non
 def test_cross_component_identity_mismatch_leaves_no_package(tmp_path: Path) -> None:
     """Inconsistent resolved components must fail before writing partial output."""
 
-    weights, _ = _write_source_weights(tmp_path)
-    face_config = load_face_event_config(FACE_CONFIG).model_copy(
+    components, metadata = _valid_inputs(tmp_path)
+    face_config = components.face_event_config.model_copy(
         update={"affect_schema_id": "affect-vector/other"}
     )
-    components = MotionModelComponents(
-        weights=weights,
-        residual_config=load_residual_state_space_config(MODEL_CONFIG),
-        face_event_config=face_config,
-        head_gesture_config=load_head_gesture_config(HEAD_CONFIG),
-        controller_response_config=load_controller_response_config(CONTROLLER_CONFIG),
-    )
-    metadata = MotionModelMetadata(
-        identities=_identities(),
-        training_record={"schema_version": "residual-training-record/v1"},
-        metrics_reference="metrics://streaming-affect-motion-test/v1",
-        seed_policy=SeedPolicy(
-            schema_version="motion-seed-policy/v1",
-            training_seed=29,
-            runtime_seed_source="serialized-generator-state",
-            deterministic_replay=True,
-        ),
-    )
+    components = components.model_copy(update={"face_event_config": face_config})
 
     with pytest.raises(ValueError, match="affect.*identity mismatch"):
         save_package(tmp_path / "invalid-package", components, metadata)
@@ -292,7 +278,7 @@ def test_training_record_rejects_undeclared_payload_fields(tmp_path: Path) -> No
     """An allowlisted record filename must not conceal credentials or raw data."""
 
     components, metadata = _valid_inputs(tmp_path)
-    unsafe_record = dict(metadata.training_record)
+    unsafe_record = metadata.training_record.model_dump(mode="python")
     unsafe_record["credentials"] = "must-not-be-packaged"
     unsafe_metadata = metadata.model_copy(update={"training_record": unsafe_record})
 
@@ -300,3 +286,295 @@ def test_training_record_rejects_undeclared_payload_fields(tmp_path: Path) -> No
         save_package(tmp_path / "unsafe-package", components, unsafe_metadata)
 
     assert not (tmp_path / "unsafe-package").exists()
+
+
+def test_load_uses_the_same_weight_bytes_that_passed_checksum(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Replacing a path after its hash is read must not replace loaded weights."""
+
+    package = _write_valid_package(tmp_path)
+    expected = {
+        name: tensor.clone()
+        for name, tensor in load_file(package.weights, device="cpu").items()
+    }
+    replacement = tmp_path / "replacement.safetensors"
+    model = ResidualStateSpace(load_residual_state_space_config(MODEL_CONFIG))
+    with torch.no_grad():
+        for parameter in model.parameters():
+            parameter.zero_()
+    save_file(
+        {name: tensor.contiguous() for name, tensor in model.state_dict().items()},
+        replacement,
+    )
+    assert replacement.read_bytes() != package.weights.read_bytes()
+    original_open = Path.open
+    original_os_open = os.open
+    swapped = False
+
+    class SwapAfterFirstRead:
+        def __init__(self, stream: IO[bytes]) -> None:
+            self._stream = stream
+
+        def __enter__(self) -> SwapAfterFirstRead:
+            self._stream.__enter__()
+            return self
+
+        def __exit__(self, *args: object) -> object:
+            return self._stream.__exit__(*args)
+
+        def read(self, size: int = -1) -> bytes:
+            nonlocal swapped
+            data = self._stream.read(size)
+            if data and not swapped:
+                package.weights.write_bytes(replacement.read_bytes())
+                swapped = True
+            return data
+
+    def racing_open(path: Path, *args: Any, **kwargs: Any) -> Any:
+        stream = original_open(path, *args, **kwargs)
+        mode = args[0] if args else kwargs.get("mode", "r")
+        if path == package.weights and mode == "rb" and not swapped:
+            return SwapAfterFirstRead(stream)
+        return stream
+
+    def racing_os_open(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+        nonlocal swapped
+        descriptor = original_os_open(path, flags, *args, **kwargs)
+        if Path(path) == package.weights and not swapped:
+            os.replace(replacement, package.weights)
+            swapped = True
+        return descriptor
+
+    monkeypatch.setattr(Path, "open", racing_open)
+    monkeypatch.setattr(os, "open", racing_os_open)
+
+    loaded = load_package(package.path, _identities())
+
+    assert swapped
+    for name, tensor in expected.items():
+        assert torch.equal(loaded.residual_model.state_dict()[name], tensor)
+
+
+def _fail_if_constructed(*args: object, **kwargs: object) -> None:
+    raise AssertionError("component constructed before package validation")
+
+
+@pytest.mark.parametrize("component_name", ["face", "head"])
+def test_affect_dimensions_are_cross_checked_before_construction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    component_name: str,
+) -> None:
+    """A shared schema ID must not conceal reordered conditioning dimensions."""
+
+    components, metadata = _valid_inputs(tmp_path)
+    if component_name == "face":
+        face_config = components.face_event_config.model_copy(
+            update={
+                "affect_dimensions": tuple(
+                    reversed(components.face_event_config.affect_dimensions)
+                )
+            }
+        )
+        components = components.model_copy(update={"face_event_config": face_config})
+    else:
+        head_config = components.head_gesture_config.model_copy(
+            update={
+                "affect_dimensions": tuple(
+                    reversed(components.head_gesture_config.affect_dimensions)
+                )
+            }
+        )
+        components = components.model_copy(update={"head_gesture_config": head_config})
+    monkeypatch.setattr(package_module, "ResidualStateSpace", _fail_if_constructed)
+
+    with pytest.raises(ValueError, match="affect dimensions"):
+        save_package(
+            tmp_path / f"invalid-{component_name}-dimensions", components, metadata
+        )
+
+
+@pytest.mark.parametrize(
+    "case", ["residual-order", "face-order", "head-membership", "head-order"]
+)
+def test_actuator_references_are_cross_checked_before_construction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+) -> None:
+    """Face/head references must preserve known semantic actuator membership/order."""
+
+    components, metadata = _valid_inputs(tmp_path)
+    if case == "residual-order":
+        residual = components.residual_config.model_copy(
+            update={
+                "actuator_names": (
+                    components.residual_config.actuator_names[1],
+                    components.residual_config.actuator_names[0],
+                    *components.residual_config.actuator_names[2:],
+                )
+            }
+        )
+        components = components.model_copy(update={"residual_config": residual})
+    elif case == "face-order":
+        policy = components.face_event_config.events[0]
+        changed_policy = policy.model_copy(
+            update={"actuator_names": tuple(reversed(policy.actuator_names))}
+        )
+        face_config = components.face_event_config.model_copy(
+            update={
+                "events": (changed_policy, *components.face_event_config.events[1:])
+            }
+        )
+        components = components.model_copy(update={"face_event_config": face_config})
+    elif case == "head-membership":
+        head = components.head_gesture_config
+        unknown = "unlisted_head_axis"
+        semantics = head.semantics.model_copy(update={"yaw_actuator_name": unknown})
+        recovery = (
+            head.recovery_targets[0].model_copy(update={"actuator_name": unknown}),
+            *head.recovery_targets[1:],
+        )
+        gestures = tuple(
+            policy.model_copy(update={"actuator_name": unknown})
+            if policy.kind.value == "shake"
+            else policy
+            for policy in head.gestures
+        )
+        head = head.model_copy(
+            update={
+                "semantics": semantics,
+                "recovery_targets": recovery,
+                "gestures": gestures,
+            }
+        )
+        components = components.model_copy(update={"head_gesture_config": head})
+    else:
+        head = components.head_gesture_config
+        semantics = head.semantics.model_copy(
+            update={
+                "yaw_actuator_name": "head_tilt",
+                "tilt_actuator_name": "neck_rotation",
+            }
+        )
+        recovery = (
+            head.recovery_targets[0].model_copy(update={"actuator_name": "head_tilt"}),
+            head.recovery_targets[1].model_copy(
+                update={"actuator_name": "neck_rotation"}
+            ),
+            *head.recovery_targets[2:],
+        )
+        gestures = tuple(
+            policy.model_copy(
+                update={
+                    "actuator_name": {
+                        "neck_rotation": "head_tilt",
+                        "head_tilt": "neck_rotation",
+                    }.get(policy.actuator_name, policy.actuator_name)
+                }
+            )
+            for policy in head.gestures
+        )
+        head = head.model_copy(
+            update={
+                "semantics": semantics,
+                "recovery_targets": recovery,
+                "gestures": gestures,
+            }
+        )
+        components = components.model_copy(update={"head_gesture_config": head})
+    monkeypatch.setattr(package_module, "ResidualStateSpace", _fail_if_constructed)
+
+    with pytest.raises(ValueError, match="actuator"):
+        save_package(tmp_path / f"invalid-{case}", components, metadata)
+
+
+@pytest.mark.parametrize("component_name", ["face", "head"])
+def test_response_feasibility_is_checked_before_construction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    component_name: str,
+) -> None:
+    """Resolved event/gesture bounds must fit the packaged response model."""
+
+    components, metadata = _valid_inputs(tmp_path)
+    if component_name == "face":
+        policy = components.face_event_config.events[0].model_copy(
+            update={"onset_s": 0.0001}
+        )
+        config = components.face_event_config.model_copy(
+            update={"events": (policy, *components.face_event_config.events[1:])}
+        )
+        components = components.model_copy(update={"face_event_config": config})
+    else:
+        policy = components.head_gesture_config.gestures[0]
+        duration = policy.duration_s.model_copy(update={"minimum": 0.0001})
+        changed_policy = policy.model_copy(update={"duration_s": duration})
+        config = components.head_gesture_config.model_copy(
+            update={
+                "gestures": (
+                    changed_policy,
+                    *components.head_gesture_config.gestures[1:],
+                )
+            }
+        )
+        components = components.model_copy(update={"head_gesture_config": config})
+    monkeypatch.setattr(package_module, "ResidualStateSpace", _fail_if_constructed)
+
+    with pytest.raises(ValueError, match="controller response"):
+        save_package(tmp_path / f"infeasible-{component_name}", components, metadata)
+
+
+@pytest.mark.parametrize(
+    ("section", "field", "unsafe_value"),
+    [
+        (
+            "dataset",
+            "input_data_reference",
+            {"participant_media": [[0.1, 0.2], [0.3, 0.4]]},
+        ),
+        ("training", "learning_rate", float("nan")),
+        ("run", "note", "x" * 10_000),
+        ("loss_weights", "reconstruction", -1.0),
+        ("epoch_losses", "total", float("inf")),
+    ],
+    ids=(
+        "nested-participant-payload",
+        "non-finite-learning-rate",
+        "oversized-note",
+        "negative-loss-weight",
+        "non-finite-epoch-loss",
+    ),
+)
+def test_training_record_values_are_strict_bounded_and_finite(
+    tmp_path: Path,
+    section: str,
+    field: str,
+    unsafe_value: object,
+) -> None:
+    """Typed record fields must not carry blobs or invalid numeric semantics."""
+
+    components, metadata = _valid_inputs(tmp_path)
+    record = deepcopy(metadata.training_record.model_dump(mode="python"))
+    if section == "loss_weights":
+        record["training"]["loss_weights"][field] = unsafe_value
+    elif section == "epoch_losses":
+        record["epochs"][0]["losses"][field] = unsafe_value
+    else:
+        record[section][field] = unsafe_value
+    metadata = metadata.model_copy(update={"training_record": record})
+
+    with pytest.raises(ValueError, match="training record"):
+        save_package(tmp_path / f"unsafe-{section}-{field}", components, metadata)
+
+
+def test_load_rejects_undeclared_fifo(tmp_path: Path) -> None:
+    """A non-regular entry must not evade an inventory that counts only files."""
+
+    package = _write_valid_package(tmp_path)
+    os.mkfifo(package.path / "undeclared.pipe")
+
+    with pytest.raises(ValueError, match="non-regular|undeclared"):
+        load_package(package.path, _identities())

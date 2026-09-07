@@ -4,27 +4,47 @@ from __future__ import annotations
 
 import hashlib
 import json
-import shutil
+import math
+import os
+import stat
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
-from typing import Annotated, Literal, Mapping
+from typing import Annotated, Literal, Mapping, Self
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
-from safetensors.torch import load_file
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictFloat,
+    StrictInt,
+    StringConstraints,
+    ValidationError,
+    model_validator,
+)
+from safetensors.torch import load
 
 from alice.contracts.blendshapes import NonEmptyString, Sha256Hex
-from alice.models.head_scheduler import HeadGestureConfig, HeadGestureScheduler
+from alice.models.head_scheduler import (
+    HeadGestureConfig,
+    HeadGesturePolicy,
+    HeadGestureScheduler,
+)
 from alice.models.residual_state_space import (
     ResidualStateSpace,
     ResidualStateSpaceConfig,
 )
 from alice.motion.controller_response import (
+    ActuatorResponseParameters,
     ControllerResponse,
     ControllerResponseConfig,
 )
-from alice.motion.face_events import FaceEventConfig, FaceEventGenerator
+from alice.motion.face_events import (
+    FaceEventConfig,
+    FaceEventGenerator,
+    FaceEventPolicy,
+)
 
 _WEIGHTS_PATH = "weights/residual.safetensors"
 _TRAINING_RECORD_PATH = "records/training.json"
@@ -38,36 +58,29 @@ _MANIFEST_PATH = "manifest.json"
 _DECLARED_ARTIFACT_PATHS = frozenset(
     {_WEIGHTS_PATH, _TRAINING_RECORD_PATH, *_CONFIG_PATHS.values()}
 )
-_TRAINING_RECORD_FIELDS = frozenset(
-    {"schema_version", "model", "training", "run", "dataset", "artifact", "epochs"}
-)
-_TRAINING_FIELDS = frozenset(
-    {
-        "epochs",
-        "learning_rate",
-        "rollout_steps",
-        "response_rate_per_s",
-        "loss_weights",
-    }
-)
-_LOSS_FIELDS = frozenset(
-    {
-        "reconstruction",
-        "multistep_rollout",
-        "anchor_drift",
-        "boundary_continuity",
-        "realized_velocity",
-        "realized_acceleration",
-        "realized_jerk",
-    }
-)
-_RUN_FIELDS = frozenset({"seed", "device", "disposition", "note"})
-_DATASET_FIELDS = frozenset(
-    {"dataset_id", "split", "split_id", "input_data_reference", "permitted_use"}
-)
-_ARTIFACT_FIELDS = frozenset({"format", "path", "weights_sha256"})
-_EPOCH_FIELDS = frozenset({"epoch", "losses"})
-_EPOCH_LOSS_FIELDS = _LOSS_FIELDS | {"total"}
+_MAX_EPOCHS = 1_000_000
+_MAX_ROLLOUT_STEPS = 1_000_000
+_MAX_RATE = 1_000_000.0
+_MAX_LOSS = 1_000_000_000_000.0
+_HEAD_PEAK_VELOCITY = 15.0 / 8.0
+_HEAD_PEAK_ACCELERATION = 10.0 * math.sqrt(3.0) / 3.0
+
+RecordIdentifier = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, min_length=1, max_length=256),
+]
+RecordText = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, min_length=1, max_length=2048),
+]
+FinitePositiveRate = Annotated[
+    StrictFloat,
+    Field(gt=0.0, le=_MAX_RATE, allow_inf_nan=False),
+]
+FiniteNonNegativeLoss = Annotated[
+    StrictFloat,
+    Field(ge=0.0, le=_MAX_LOSS, allow_inf_nan=False),
+]
 
 
 class PackageIdentities(BaseModel):
@@ -93,6 +106,128 @@ class SeedPolicy(BaseModel):
     deterministic_replay: Literal[True]
 
 
+class ResidualTrainingLossWeights(BaseModel):
+    """Strict non-negative objective weights from the Task 2 trainer."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    reconstruction: FiniteNonNegativeLoss
+    multistep_rollout: FiniteNonNegativeLoss
+    anchor_drift: FiniteNonNegativeLoss
+    boundary_continuity: FiniteNonNegativeLoss
+    realized_velocity: FiniteNonNegativeLoss
+    realized_acceleration: FiniteNonNegativeLoss
+    realized_jerk: FiniteNonNegativeLoss
+
+    @model_validator(mode="after")
+    def validate_nonzero_objective(self) -> Self:
+        if not any(value > 0.0 for value in self.model_dump().values()):
+            raise ValueError("at least one training loss weight must be positive")
+        return self
+
+
+class ResidualTrainingSettings(BaseModel):
+    """Bounded resolved optimizer and rollout settings."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    epochs: Annotated[StrictInt, Field(ge=1, le=_MAX_EPOCHS)]
+    learning_rate: Annotated[StrictFloat, Field(gt=0.0, le=1.0, allow_inf_nan=False)]
+    rollout_steps: Annotated[StrictInt, Field(ge=2, le=_MAX_ROLLOUT_STEPS)]
+    response_rate_per_s: FinitePositiveRate
+    loss_weights: ResidualTrainingLossWeights
+
+
+class ResidualTrainingRun(BaseModel):
+    """Bounded, offline run metadata without arbitrary nested payloads."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    seed: Annotated[StrictInt, Field(ge=0, le=2**63 - 1)]
+    device: Literal["cpu"]
+    disposition: Literal["keep", "discard"]
+    note: RecordText
+
+
+class ResidualDatasetReference(BaseModel):
+    """Identifiers and consent text only; never training examples or media."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    dataset_id: RecordIdentifier
+    split: Literal["train", "validation"]
+    split_id: RecordIdentifier
+    input_data_reference: RecordText
+    permitted_use: RecordText
+
+
+class ResidualArtifactRecord(BaseModel):
+    """Identity of the original safetensors training artifact."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    format: Literal["safetensors"]
+    path: Annotated[
+        str,
+        StringConstraints(strip_whitespace=True, min_length=1, max_length=255),
+    ]
+    weights_sha256: Sha256Hex
+
+    @model_validator(mode="after")
+    def validate_filename(self) -> Self:
+        if Path(self.path).name != self.path:
+            raise ValueError("training artifact path must be a filename")
+        return self
+
+
+class ResidualEpochLosses(BaseModel):
+    """Finite non-negative objective values for one completed epoch."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    reconstruction: FiniteNonNegativeLoss
+    multistep_rollout: FiniteNonNegativeLoss
+    anchor_drift: FiniteNonNegativeLoss
+    boundary_continuity: FiniteNonNegativeLoss
+    realized_velocity: FiniteNonNegativeLoss
+    realized_acceleration: FiniteNonNegativeLoss
+    realized_jerk: FiniteNonNegativeLoss
+    total: FiniteNonNegativeLoss
+
+
+class ResidualEpochRecord(BaseModel):
+    """One strictly numbered epoch and its scalar-only losses."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    epoch: Annotated[StrictInt, Field(ge=1, le=_MAX_EPOCHS)]
+    losses: ResidualEpochLosses
+
+
+class ResidualTrainingRecord(BaseModel):
+    """Strict scalar/reference-only form of `residual-training-record/v1`."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["residual-training-record/v1"]
+    model: ResidualStateSpaceConfig
+    training: ResidualTrainingSettings
+    run: ResidualTrainingRun
+    dataset: ResidualDatasetReference
+    artifact: ResidualArtifactRecord
+    epochs: tuple[ResidualEpochRecord, ...] = Field(max_length=_MAX_EPOCHS)
+
+    @model_validator(mode="after")
+    def validate_epoch_history(self) -> Self:
+        if len(self.epochs) != self.training.epochs:
+            raise ValueError("training record epoch history is incomplete")
+        if tuple(epoch.epoch for epoch in self.epochs) != tuple(
+            range(1, self.training.epochs + 1)
+        ):
+            raise ValueError("training record epoch numbering mismatch")
+        return self
+
+
 class MotionModelComponents(BaseModel):
     """Offline artifacts and fully resolved configs included in one package."""
 
@@ -111,7 +246,7 @@ class MotionModelMetadata(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     identities: PackageIdentities
-    training_record: dict[NonEmptyString, JsonValue]
+    training_record: ResidualTrainingRecord
     metrics_reference: NonEmptyString
     seed_policy: SeedPolicy
 
@@ -157,7 +292,7 @@ class LoadedMotionModel:
     face_event_generator: FaceEventGenerator
     head_gesture_scheduler: HeadGestureScheduler
     controller_response: ControllerResponse
-    training_record: dict[str, JsonValue]
+    training_record: ResidualTrainingRecord
     metrics_reference: str
     seed_policy: SeedPolicy
 
@@ -172,13 +307,12 @@ def save_package(
     package_path = Path(path)
     if package_path.exists():
         raise FileExistsError(f"model package already exists: {package_path}")
-    if not components.weights.is_file():
-        raise ValueError("safetensors weights file does not exist")
-
-    weights = load_file(components.weights, device="cpu")
-    weights_sha256 = _sha256(components.weights)
+    components = _revalidate_components(components)
+    weights_bytes = _read_regular_bytes(components.weights)
+    weights = load(weights_bytes)
+    weights_sha256 = _sha256_bytes(weights_bytes)
     _validate_components(components, metadata.identities)
-    _validate_training_record(
+    training_record = _validate_training_record(
         metadata.training_record,
         residual_config=components.residual_config,
         weights_sha256=weights_sha256,
@@ -195,33 +329,32 @@ def save_package(
     ) as temporary:
         staged = Path(temporary) / package_path.name
         staged.mkdir()
-        artifact_documents: dict[str, dict[str, JsonValue]] = {
-            _CONFIG_PATHS["residual"]: components.residual_config.model_dump(
-                mode="json"
+        artifact_bytes = {
+            _CONFIG_PATHS["residual"]: _encode_json(
+                components.residual_config.model_dump(mode="json")
             ),
-            _CONFIG_PATHS["face_events"]: components.face_event_config.model_dump(
-                mode="json"
+            _CONFIG_PATHS["face_events"]: _encode_json(
+                components.face_event_config.model_dump(mode="json")
             ),
-            _CONFIG_PATHS["head_gestures"]: components.head_gesture_config.model_dump(
-                mode="json"
+            _CONFIG_PATHS["head_gestures"]: _encode_json(
+                components.head_gesture_config.model_dump(mode="json")
             ),
-            _CONFIG_PATHS[
-                "controller_response"
-            ]: components.controller_response_config.model_dump(mode="json"),
-            _TRAINING_RECORD_PATH: metadata.training_record,
+            _CONFIG_PATHS["controller_response"]: _encode_json(
+                components.controller_response_config.model_dump(mode="json")
+            ),
+            _TRAINING_RECORD_PATH: _encode_json(
+                training_record.model_dump(mode="json")
+            ),
+            _WEIGHTS_PATH: weights_bytes,
         }
-        for relative_path, document in artifact_documents.items():
+        for relative_path, payload in artifact_bytes.items():
             destination = staged / relative_path
             destination.parent.mkdir(parents=True, exist_ok=True)
-            _write_json(destination, document)
-
-        packaged_weights = staged / _WEIGHTS_PATH
-        packaged_weights.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(components.weights, packaged_weights)
+            destination.write_bytes(payload)
 
         checksums = {
-            relative_path: _sha256(staged / relative_path)
-            for relative_path in sorted(_DECLARED_ARTIFACT_PATHS)
+            relative_path: _sha256_bytes(artifact_bytes[relative_path])
+            for relative_path in sorted(artifact_bytes)
         }
         manifest = _PackageManifest(
             schema_version="motion-model-package/v1",
@@ -233,7 +366,9 @@ def save_package(
             seed_policy=metadata.seed_policy,
             checksums=checksums,
         )
-        _write_json(staged / _MANIFEST_PATH, manifest.model_dump(mode="json"))
+        (staged / _MANIFEST_PATH).write_bytes(
+            _encode_json(manifest.model_dump(mode="json"))
+        )
         staged.replace(package_path)
 
     return _package_paths(package_path)
@@ -247,22 +382,27 @@ def load_package(
 
     package = _package_paths(Path(path))
     expected = PackageIdentities.model_validate(expected_identities)
-    manifest = _load_manifest(package.manifest)
-    _validate_expected_identities(manifest.identities, expected)
     _validate_package_inventory(package.path)
-    _validate_checksums(package.path, manifest.checksums)
+    manifest = _load_manifest(_read_regular_bytes(package.manifest))
+    _validate_expected_identities(manifest.identities, expected)
+    snapshot = _snapshot_artifacts(package.path, manifest.checksums)
 
     residual_config = ResidualStateSpaceConfig.model_validate(
-        _read_json(package.configs["residual"])
+        _decode_json(snapshot[_CONFIG_PATHS["residual"]], label="residual config")
     )
     face_event_config = FaceEventConfig.model_validate(
-        _read_json(package.configs["face_events"])
+        _decode_json(snapshot[_CONFIG_PATHS["face_events"]], label="face-event config")
     )
     head_gesture_config = HeadGestureConfig.model_validate(
-        _read_json(package.configs["head_gestures"])
+        _decode_json(
+            snapshot[_CONFIG_PATHS["head_gestures"]], label="head-gesture config"
+        )
     )
     controller_config = ControllerResponseConfig.model_validate(
-        _read_json(package.configs["controller_response"])
+        _decode_json(
+            snapshot[_CONFIG_PATHS["controller_response"]],
+            label="controller-response config",
+        )
     )
     components = MotionModelComponents(
         weights=package.weights,
@@ -273,14 +413,13 @@ def load_package(
     )
     _validate_components(components, manifest.identities)
 
-    training_record = _read_json(package.training_record)
-    _validate_training_record(
-        training_record,
+    training_record = _validate_training_record(
+        _decode_json(snapshot[_TRAINING_RECORD_PATH], label="training record"),
         residual_config=residual_config,
         weights_sha256=manifest.checksums[_WEIGHTS_PATH],
         seed_policy=manifest.seed_policy,
     )
-    weights = load_file(package.weights, device="cpu")
+    weights = load(snapshot[_WEIGHTS_PATH])
 
     residual_model = ResidualStateSpace(residual_config)
     residual_model.load_state_dict(weights, strict=True)
@@ -351,6 +490,159 @@ def _validate_components(
             "residual and controller-response actuator identities mismatch"
         )
 
+    affect_dimensions = components.residual_config.affect_dimensions
+    if components.face_event_config.affect_dimensions != affect_dimensions:
+        raise ValueError("face-event and residual affect dimensions mismatch")
+    if components.head_gesture_config.affect_dimensions != affect_dimensions:
+        raise ValueError("head-gesture and residual affect dimensions mismatch")
+
+    head_names = components.head_gesture_config.semantics.actuator_names
+    if head_names != response_actuators[: len(head_names)]:
+        raise ValueError(
+            "head semantic actuator identities/order mismatch controller response"
+        )
+    recovery_names = tuple(
+        target.actuator_name
+        for target in components.head_gesture_config.recovery_targets
+    )
+    if recovery_names != head_names:
+        raise ValueError("head recovery actuator identities/order mismatch")
+    for head_policy in components.head_gesture_config.gestures:
+        expected_name = components.head_gesture_config.semantics.actuator_for(
+            head_policy.kind
+        )
+        if head_policy.actuator_name != expected_name:
+            raise ValueError("head policy actuator reference mismatch")
+
+    face_names = tuple(
+        name
+        for policy in components.face_event_config.events
+        for name in policy.actuator_names
+    )
+    if len(face_names) != len(set(face_names)):
+        raise ValueError("face-event actuator references must be unique")
+    if set(face_names) & set(head_names):
+        raise ValueError("face-event actuator references overlap head axes")
+    if not _is_ordered_subsequence(face_names, response_actuators):
+        raise ValueError(
+            "face-event actuator identities/order mismatch controller response"
+        )
+
+    response_by_name = {
+        parameters.actuator_name: parameters
+        for parameters in components.controller_response_config.actuators
+    }
+    for face_policy in components.face_event_config.events:
+        _validate_face_response(face_policy, response_by_name)
+    for head_policy in components.head_gesture_config.gestures:
+        _validate_head_response(head_policy, response_by_name)
+
+
+def _revalidate_components(components: MotionModelComponents) -> MotionModelComponents:
+    """Re-run nested config validators even for unchecked `model_copy` values."""
+
+    try:
+        return MotionModelComponents(
+            weights=components.weights,
+            residual_config=ResidualStateSpaceConfig.model_validate(
+                components.residual_config.model_dump(mode="python")
+            ),
+            face_event_config=FaceEventConfig.model_validate(
+                components.face_event_config.model_dump(mode="python")
+            ),
+            head_gesture_config=HeadGestureConfig.model_validate(
+                components.head_gesture_config.model_dump(mode="python")
+            ),
+            controller_response_config=ControllerResponseConfig.model_validate(
+                components.controller_response_config.model_dump(mode="python")
+            ),
+        )
+    except ValidationError as error:
+        raise ValueError("resolved component config is invalid") from error
+
+
+def _is_ordered_subsequence(
+    names: tuple[str, ...],
+    ordered_universe: tuple[str, ...],
+) -> bool:
+    positions = {name: index for index, name in enumerate(ordered_universe)}
+    try:
+        indices = tuple(positions[name] for name in names)
+    except KeyError:
+        return False
+    return indices == tuple(sorted(indices))
+
+
+def _validate_face_response(
+    policy: FaceEventPolicy,
+    response_by_name: Mapping[str, ActuatorResponseParameters],
+) -> None:
+    try:
+        minimum_s = max(
+            _face_transition_seconds(
+                policy.amplitude_max,
+                response_by_name[actuator_name],
+            )
+            for actuator_name in policy.actuator_names
+        )
+    except KeyError as error:
+        raise ValueError("face-event actuator reference is unknown") from error
+    if policy.onset_s < minimum_s or policy.release_s < minimum_s:
+        raise ValueError(
+            f"{policy.kind.value} phase is shorter than controller response"
+        )
+
+
+def _validate_head_response(
+    policy: HeadGesturePolicy,
+    response_by_name: Mapping[str, ActuatorResponseParameters],
+) -> None:
+    try:
+        parameters = response_by_name[policy.actuator_name]
+    except KeyError as error:
+        raise ValueError("head policy actuator reference is unknown") from error
+    maximum_amplitude = policy.amplitude.maximum
+    if policy.kind.value in {"nod", "shake"}:
+        available_s = policy.duration_s.minimum / (2 * policy.cycles.maximum)
+        maximum_distance = 2.0 * maximum_amplitude
+    else:
+        available_s = policy.duration_s.minimum
+        maximum_distance = maximum_amplitude
+    if available_s < _head_transition_seconds(maximum_distance, parameters):
+        raise ValueError(
+            f"{policy.kind.value} duration bounds are shorter than controller response"
+        )
+    if policy.recovery_s.minimum < _head_transition_seconds(
+        maximum_amplitude, parameters
+    ):
+        raise ValueError(
+            f"{policy.kind.value} recovery bounds are shorter than controller response"
+        )
+
+
+def _face_transition_seconds(
+    distance: float,
+    parameters: ActuatorResponseParameters,
+) -> float:
+    acceleration = parameters.max_acceleration_per_s2
+    max_speed = parameters.max_velocity_per_s
+    triangular_limit = max_speed**2 / acceleration
+    if distance <= triangular_limit:
+        return 2.0 * math.sqrt(distance / acceleration)
+    return distance / max_speed + max_speed / acceleration
+
+
+def _head_transition_seconds(
+    distance: float,
+    parameters: ActuatorResponseParameters,
+) -> float:
+    return max(
+        _HEAD_PEAK_VELOCITY * distance / parameters.max_velocity_per_s,
+        math.sqrt(
+            _HEAD_PEAK_ACCELERATION * distance / parameters.max_acceleration_per_s2
+        ),
+    )
+
 
 def _validate_expected_identities(
     packaged: PackageIdentities,
@@ -373,102 +665,71 @@ def _require_identity(label: str, actual: str, expected: str) -> None:
 
 
 def _validate_training_record(
-    record: Mapping[str, JsonValue],
+    record: ResidualTrainingRecord | Mapping[str, object],
     *,
     residual_config: ResidualStateSpaceConfig,
     weights_sha256: str,
     seed_policy: SeedPolicy,
-) -> None:
-    _require_record_fields(record, _TRAINING_RECORD_FIELDS, section="root")
-    if record.get("schema_version") != "residual-training-record/v1":
-        raise ValueError("training record schema identity mismatch")
-    if record.get("model") != residual_config.model_dump(mode="json"):
-        raise ValueError("training record model config identity mismatch")
-
-    training = _record_section(record.get("training"), section="training")
-    _require_record_fields(training, _TRAINING_FIELDS, section="training")
-    loss_weights = _record_section(
-        training.get("loss_weights"), section="training.loss_weights"
+) -> ResidualTrainingRecord:
+    source: object = (
+        record.model_dump(mode="python")
+        if isinstance(record, ResidualTrainingRecord)
+        else record
     )
-    _require_record_fields(loss_weights, _LOSS_FIELDS, section="training.loss_weights")
-
-    run = _record_section(record.get("run"), section="run")
-    _require_record_fields(run, _RUN_FIELDS, section="run")
-    if run.get("seed") != seed_policy.training_seed:
-        raise ValueError("training record seed and package seed policy mismatch")
-    if run.get("device") != "cpu":
-        raise ValueError("training record device must be cpu")
-
-    dataset = _record_section(record.get("dataset"), section="dataset")
-    _require_record_fields(dataset, _DATASET_FIELDS, section="dataset")
-
-    artifact = _record_section(record.get("artifact"), section="artifact")
-    _require_record_fields(artifact, _ARTIFACT_FIELDS, section="artifact")
-    if artifact.get("format") != "safetensors":
-        raise ValueError("training record artifact format must be safetensors")
-    if artifact.get("weights_sha256") != weights_sha256:
-        raise ValueError("training record weights checksum mismatch")
-
-    epoch_count = training.get("epochs")
-    epochs = record.get("epochs")
-    if isinstance(epoch_count, bool) or not isinstance(epoch_count, int):
-        raise ValueError("training record epoch count must be an integer")
-    if not isinstance(epochs, list) or len(epochs) != epoch_count:
-        raise ValueError("training record epoch history is incomplete")
-    for expected_epoch, value in enumerate(epochs, start=1):
-        epoch = _record_section(value, section="epoch")
-        _require_record_fields(epoch, _EPOCH_FIELDS, section="epoch")
-        if epoch.get("epoch") != expected_epoch:
-            raise ValueError("training record epoch numbering mismatch")
-        losses = _record_section(epoch.get("losses"), section="epoch.losses")
-        _require_record_fields(losses, _EPOCH_LOSS_FIELDS, section="epoch.losses")
-
-
-def _record_section(value: JsonValue | None, *, section: str) -> dict[str, JsonValue]:
-    if not isinstance(value, dict):
-        raise ValueError(f"training record {section} section is missing")
-    return value
-
-
-def _require_record_fields(
-    value: Mapping[str, JsonValue],
-    expected: frozenset[str],
-    *,
-    section: str,
-) -> None:
-    if set(value) != expected:
-        raise ValueError(
-            f"training record contains missing or undeclared fields in {section}"
-        )
-
-
-def _load_manifest(path: Path) -> _PackageManifest:
     try:
-        return _PackageManifest.model_validate(_read_json(path))
-    except (OSError, json.JSONDecodeError) as error:
+        validated = ResidualTrainingRecord.model_validate(source)
+    except ValidationError as error:
+        raise ValueError(
+            f"training record contains invalid, missing, or undeclared fields: {error}"
+        ) from error
+    if validated.model != residual_config:
+        raise ValueError("training record model config identity mismatch")
+    if validated.run.seed != seed_policy.training_seed:
+        raise ValueError("training record seed and package seed policy mismatch")
+    if validated.artifact.weights_sha256 != weights_sha256:
+        raise ValueError("training record weights checksum mismatch")
+    return validated
+
+
+def _load_manifest(data: bytes) -> _PackageManifest:
+    try:
+        return _PackageManifest.model_validate(_decode_json(data, label="manifest"))
+    except (ValidationError, ValueError) as error:
         raise ValueError("model package manifest is unreadable") from error
 
 
 def _validate_package_inventory(package_path: Path) -> None:
-    if not package_path.is_dir() or package_path.is_symlink():
+    try:
+        root_mode = package_path.lstat().st_mode
+    except OSError as error:
+        raise ValueError("model package path is unreadable") from error
+    if not stat.S_ISDIR(root_mode) or stat.S_ISLNK(root_mode):
         raise ValueError("model package path must be a real directory")
-    if any(path.is_symlink() for path in package_path.rglob("*")):
-        raise ValueError("model package must not contain symbolic links")
-    actual_files = {
-        path.relative_to(package_path).as_posix()
-        for path in package_path.rglob("*")
-        if path.is_file()
-    }
+    actual_files: set[str] = set()
+    for path in package_path.rglob("*"):
+        mode = path.lstat().st_mode
+        if stat.S_ISDIR(mode):
+            continue
+        relative = path.relative_to(package_path).as_posix()
+        if not stat.S_ISREG(mode):
+            raise ValueError(f"model package contains non-regular entry: {relative}")
+        actual_files.add(relative)
     expected_files = {*_DECLARED_ARTIFACT_PATHS, _MANIFEST_PATH}
     if actual_files != expected_files:
         raise ValueError("model package contains undeclared artifacts")
 
 
-def _validate_checksums(package_path: Path, checksums: Mapping[str, str]) -> None:
+def _snapshot_artifacts(
+    package_path: Path,
+    checksums: Mapping[str, str],
+) -> Mapping[str, bytes]:
+    snapshot: dict[str, bytes] = {}
     for relative_path in sorted(_DECLARED_ARTIFACT_PATHS):
-        artifact = package_path / relative_path
-        if _sha256(artifact) != checksums[relative_path]:
+        payload = _read_regular_bytes(package_path / relative_path)
+        if _sha256_bytes(payload) != checksums[relative_path]:
             raise ValueError(f"artifact checksum mismatch: {relative_path}")
+        snapshot[relative_path] = payload
+    return MappingProxyType(snapshot)
 
 
 def _package_paths(path: Path) -> MotionModelPackage:
@@ -483,24 +744,37 @@ def _package_paths(path: Path) -> MotionModelPackage:
     )
 
 
-def _read_json(path: Path) -> dict[str, JsonValue]:
-    with path.open("r", encoding="utf-8") as stream:
-        document = json.load(stream)
+def _decode_json(data: bytes, *, label: str) -> dict[str, object]:
+    try:
+        document = json.loads(data)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError(f"{label} is not valid UTF-8 JSON") from error
     if not isinstance(document, dict):
-        raise ValueError(f"JSON document must contain an object: {path.name}")
+        raise ValueError(f"{label} must contain a JSON object")
     return document
 
 
-def _write_json(path: Path, document: Mapping[str, JsonValue]) -> None:
-    path.write_text(
-        json.dumps(document, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+def _encode_json(document: object) -> bytes:
+    return (json.dumps(document, indent=2, sort_keys=True) + "\n").encode("utf-8")
 
 
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+def _read_regular_bytes(path: Path) -> bytes:
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    flags |= getattr(os, "O_NONBLOCK", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        raise ValueError(f"package artifact is unreadable: {path.name}") from error
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise ValueError(f"package artifact is not a regular file: {path.name}")
+        with os.fdopen(descriptor, "rb") as stream:
+            descriptor = -1
+            return stream.read()
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _sha256_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
