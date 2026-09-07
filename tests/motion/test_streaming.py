@@ -239,7 +239,18 @@ class _StatefulCandidate:
         bit_generator.state = state.numpy_rng_state
         rng = np.random.Generator(bit_generator)
         seed = int(rng.integers(0, 1_000_000))
-        delta = float(rng.uniform(0.001, 0.01))
+        persisted_affect = state.filtered_intent.intensity + sum(
+            (index + 1) * value
+            for index, value in enumerate(state.filtered_intent.vector)
+        )
+        incoming_affect = intent.intensity + sum(
+            (index + 1) * value for index, value in enumerate(intent.vector)
+        )
+        delta = (
+            float(rng.uniform(0.001, 0.005))
+            + 0.001 * persisted_affect
+            + 0.001 * incoming_affect
+        )
 
         start_positions = {
             target.actuator_name: target.normalized_position
@@ -316,7 +327,11 @@ class _StatefulCandidate:
                         event_type="test/stateful-step-v1",
                         started_monotonic_ns=generated_monotonic_ns,
                         ended_monotonic_ns=ends_at_ns,
-                        payload={"ordinal": len(state.event_history)},
+                        payload={
+                            "ordinal": len(state.event_history),
+                            "persisted_intensity": state.filtered_intent.intensity,
+                            "incoming_intensity": intent.intensity,
+                        },
                     ),
                 ),
                 "monotonic_ns": ends_at_ns,
@@ -333,13 +348,16 @@ def test_stateful_candidate_replays_after_prefix_boundary_restore() -> None:
 
     _, config = _runtime()
     initial = _state(config)
+    incoming = _intent().model_copy(
+        update={"vector": (0.2, -0.1, 0.3), "intensity": 0.5}
+    )
     runtime = StreamingMotionGenerator(
         generator=_StatefulCandidate(),
         horizon_s=1.0,
         prefix_duration_s=0.4,
     )
 
-    _, boundary = runtime.replan(_intent(), initial, 0)
+    _, boundary = runtime.replan(incoming, initial, 0)
     restored = load_state(dump_state(boundary))
     direct = runtime.replan(
         _intent(accepted_ns=boundary.monotonic_ns),
@@ -358,7 +376,31 @@ def test_stateful_candidate_replays_after_prefix_boundary_restore() -> None:
     assert boundary.numpy_rng_state != initial.numpy_rng_state
     assert boundary.torch_rng_state != initial.torch_rng_state
     assert boundary.event_history != initial.event_history
+    assert restored.filtered_intent == boundary.filtered_intent == incoming
     assert replayed == direct
+
+
+def test_stateful_candidate_continuation_depends_on_persisted_filtered_intent() -> None:
+    """Ignoring persisted affect would make valid state corruption undetectable."""
+
+    _, config = _runtime()
+    initial = _state(config)
+    state_values = initial.model_dump()
+    state_values["filtered_intent"] = initial.filtered_intent.model_copy(
+        update={"vector": (0.3, -0.2, 0.1), "intensity": 0.4}
+    )
+    altered = GeneratorState.model_validate(state_values)
+    runtime = StreamingMotionGenerator(
+        generator=_StatefulCandidate(),
+        horizon_s=1.0,
+        prefix_duration_s=0.4,
+    )
+
+    baseline_prefix, baseline_state = runtime.replan(_intent(), initial, 0)
+    mutated_prefix, mutated_state = runtime.replan(_intent(), altered, 0)
+
+    assert mutated_prefix != baseline_prefix
+    assert mutated_state != baseline_state
 
 
 class _StaticGenerator:
