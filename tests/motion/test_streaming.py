@@ -24,7 +24,11 @@ from alice.motion.state import (
     dump_state,
     load_state,
 )
-from alice.motion.streaming import StreamingMotionGenerator
+from alice.motion.streaming import (
+    CandidatePlan,
+    ProceduralCandidateGenerator,
+    StreamingMotionGenerator,
+)
 
 ROOT = Path(__file__).parents[2]
 CONFIG_PATH = ROOT / "config" / "models" / "procedural-motion-v1.yaml"
@@ -51,7 +55,7 @@ def _runtime() -> tuple[StreamingMotionGenerator, ProceduralMotionConfig]:
     generator = ProceduralMotionGenerator(config=config, anchor_planner=planner)
     return (
         StreamingMotionGenerator(
-            generator=generator,
+            generator=ProceduralCandidateGenerator(generator=generator),
             horizon_s=1.0,
             prefix_duration_s=0.4,
         ),
@@ -188,23 +192,211 @@ def test_replan_rejects_intent_from_the_future() -> None:
         runtime.replan(_intent(accepted_ns=1), _state(config), 0)
 
 
+def test_replan_rejects_filtered_intent_timestamp_regression() -> None:
+    """An older filter result must not replace newer persisted affect state."""
+
+    runtime, config = _runtime()
+
+    with pytest.raises(ValueError, match="filtered intent timestamp regressed"):
+        runtime.replan(_intent(accepted_ns=9), _state(config, now_ns=10), 10)
+
+
+@pytest.mark.parametrize(
+    "intent",
+    [
+        pytest.param(
+            _intent().model_copy(update={"affect_schema_id": "other-schema/v1"}),
+            id="schema-identity",
+        ),
+        pytest.param(
+            _intent().model_copy(update={"vector": (0.0, 0.0)}),
+            id="dimension-count",
+        ),
+    ],
+)
+def test_replan_rejects_incompatible_filtered_intent(intent: FilteredIntent) -> None:
+    """Incompatible affect state must be rejected before replacing persisted state."""
+
+    runtime, config = _runtime()
+
+    with pytest.raises(ValueError, match="filtered intent.*incompatible"):
+        runtime.replan(intent, _state(config), 0)
+
+
+class _StatefulCandidate:
+    """Pure candidate that advances every dynamic continuation-state family."""
+
+    def plan(
+        self,
+        intent: FilteredIntent,
+        state: GeneratorState,
+        horizon_s: float,
+        prefix_duration_s: float,
+        *,
+        generated_monotonic_ns: int,
+    ) -> CandidatePlan:
+        bit_generator = np.random.PCG64()
+        bit_generator.state = state.numpy_rng_state
+        rng = np.random.Generator(bit_generator)
+        seed = int(rng.integers(0, 1_000_000))
+        delta = float(rng.uniform(0.001, 0.01))
+
+        start_positions = {
+            target.actuator_name: target.normalized_position
+            for target in state.last_accepted_target.targets
+        }
+        first_name = state.last_accepted_target.targets[0].actuator_name
+        boundary_positions = dict(start_positions)
+        boundary_positions[first_name] += delta
+
+        def update(offset_s: float, positions: dict[str, float]) -> TargetUpdate:
+            return TargetUpdate(
+                offset_s=offset_s,
+                targets=tuple(
+                    ActuatorTarget(
+                        actuator_name=name,
+                        normalized_position=position,
+                    )
+                    for name, position in positions.items()
+                ),
+            )
+
+        start = update(0.0, start_positions)
+        boundary = update(prefix_duration_s, boundary_positions)
+        proposal = MotionProposal(
+            schema_version="motion-proposal/v1",
+            proposal_id=f"stateful-{generated_monotonic_ns}-{seed}",
+            run_id="stateful-test",
+            generated_monotonic_ns=generated_monotonic_ns,
+            expires_monotonic_ns=(
+                generated_monotonic_ns + round(horizon_s * 1_000_000_000) + 1
+            ),
+            seed=seed,
+            model_id=state.model_id,
+            model_sha256=state.model_sha256,
+            calibration_sha256=state.calibration_sha256,
+            controller_settings_sha256=state.controller_settings_sha256,
+            support_status=intent.support_status.value,
+            horizon=TargetUpdateHorizon(
+                schema_version="target-update-horizon/v1",
+                updates=(
+                    start,
+                    boundary,
+                    update(horizon_s, boundary_positions),
+                ),
+            ),
+        )
+        reported_positions = {
+            target.actuator_name: target.normalized_position
+            for target in state.last_reported_pose.targets
+        }
+        reported_positions[first_name] += delta / 2.0
+        ends_at_ns = generated_monotonic_ns + round(prefix_duration_s * 1_000_000_000)
+        state_values = state.model_dump()
+        state_values.update(
+            {
+                "last_accepted_target": boundary.model_copy(update={"offset_s": 0.0}),
+                "last_reported_pose": update(0.0, reported_positions),
+                "estimated_velocity": tuple(
+                    ActuatorVelocity(
+                        actuator_name=item.actuator_name,
+                        velocity_per_s=item.velocity_per_s + delta,
+                    )
+                    for item in state.estimated_velocity
+                ),
+                "filtered_intent": intent,
+                "latent_vector": tuple(value + delta for value in state.latent_vector),
+                "numpy_rng_state": rng.bit_generator.state,
+                "torch_rng_state": tuple(
+                    (value + 1) % 256 for value in state.torch_rng_state
+                ),
+                "event_history": (
+                    *state.event_history,
+                    EventHistoryRecord(
+                        event_type="test/stateful-step-v1",
+                        started_monotonic_ns=generated_monotonic_ns,
+                        ended_monotonic_ns=ends_at_ns,
+                        payload={"ordinal": len(state.event_history)},
+                    ),
+                ),
+                "monotonic_ns": ends_at_ns,
+            }
+        )
+        return CandidatePlan(
+            proposal=proposal,
+            boundary_state=GeneratorState.model_validate(state_values),
+        )
+
+
+def test_stateful_candidate_replays_after_prefix_boundary_restore() -> None:
+    """Dropping candidate-produced state would diverge after a persisted boundary."""
+
+    _, config = _runtime()
+    initial = _state(config)
+    runtime = StreamingMotionGenerator(
+        generator=_StatefulCandidate(),
+        horizon_s=1.0,
+        prefix_duration_s=0.4,
+    )
+
+    _, boundary = runtime.replan(_intent(), initial, 0)
+    restored = load_state(dump_state(boundary))
+    direct = runtime.replan(
+        _intent(accepted_ns=boundary.monotonic_ns),
+        boundary,
+        boundary.monotonic_ns,
+    )
+    replayed = runtime.replan(
+        _intent(accepted_ns=restored.monotonic_ns),
+        restored,
+        restored.monotonic_ns,
+    )
+
+    assert boundary.last_reported_pose != initial.last_reported_pose
+    assert boundary.estimated_velocity != initial.estimated_velocity
+    assert boundary.latent_vector != initial.latent_vector
+    assert boundary.numpy_rng_state != initial.numpy_rng_state
+    assert boundary.torch_rng_state != initial.torch_rng_state
+    assert boundary.event_history != initial.event_history
+    assert replayed == direct
+
+
 class _StaticGenerator:
     """Candidate source used to exercise acceptance boundary failures."""
 
     def __init__(self, template: MotionProposal) -> None:
         self._proposal = template
 
-    def step(
+    def plan(
         self,
         intent: FilteredIntent,
-        state: TargetUpdate,
-        seed: int,
+        state: GeneratorState,
         horizon_s: float,
+        prefix_duration_s: float,
         *,
         generated_monotonic_ns: int,
-    ) -> MotionProposal:
-        del intent, state, seed, horizon_s, generated_monotonic_ns
-        return self._proposal
+    ) -> CandidatePlan:
+        del horizon_s
+        accepted = tuple(
+            update
+            for update in self._proposal.horizon.updates
+            if update.offset_s <= prefix_duration_s
+        )
+        state_values = state.model_dump()
+        state_values.update(
+            {
+                "last_accepted_target": accepted[-1].model_copy(
+                    update={"offset_s": 0.0}
+                ),
+                "filtered_intent": intent,
+                "monotonic_ns": generated_monotonic_ns
+                + round(prefix_duration_s * 1_000_000_000),
+            }
+        )
+        return CandidatePlan(
+            proposal=self._proposal,
+            boundary_state=GeneratorState.model_validate(state_values),
+        )
 
 
 class _DiscontinuousGenerator(_StaticGenerator):

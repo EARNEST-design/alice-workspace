@@ -18,6 +18,18 @@ from alice.motion.state import GeneratorState
 
 
 class _CandidateGenerator(Protocol):
+    def plan(
+        self,
+        intent: FilteredIntent,
+        state: GeneratorState,
+        horizon_s: float,
+        prefix_duration_s: float,
+        *,
+        generated_monotonic_ns: int,
+    ) -> CandidatePlan: ...
+
+
+class _ProposalGenerator(Protocol):
     def step(
         self,
         intent: FilteredIntent,
@@ -27,6 +39,64 @@ class _CandidateGenerator(Protocol):
         *,
         generated_monotonic_ns: int,
     ) -> MotionProposal: ...
+
+
+class CandidatePlan(BaseModel):
+    """Candidate horizon and complete state at its accepted-prefix boundary."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    proposal: MotionProposal
+    boundary_state: GeneratorState
+
+
+class ProceduralCandidateGenerator:
+    """Adapt a seeded proposal generator to the explicit stateful protocol."""
+
+    def __init__(self, *, generator: _ProposalGenerator) -> None:
+        self._generator = generator
+
+    def plan(
+        self,
+        intent: FilteredIntent,
+        state: GeneratorState,
+        horizon_s: float,
+        prefix_duration_s: float,
+        *,
+        generated_monotonic_ns: int,
+    ) -> CandidatePlan:
+        rng = _restore_numpy_rng(state.numpy_rng_state)
+        seed = int(rng.integers(0, np.iinfo(np.int64).max))
+        proposal = self._generator.step(
+            intent,
+            state.last_accepted_target,
+            seed,
+            horizon_s,
+            generated_monotonic_ns=generated_monotonic_ns,
+        )
+        accepted_updates = tuple(
+            update
+            for update in proposal.horizon.updates
+            if update.offset_s <= prefix_duration_s
+        )
+        if not accepted_updates:
+            raise ValueError("candidate has no updates inside the accepted prefix")
+
+        boundary_target = accepted_updates[-1].model_copy(update={"offset_s": 0.0})
+        ends_at_ns = generated_monotonic_ns + round(prefix_duration_s * 1_000_000_000)
+        state_values = state.model_dump()
+        state_values.update(
+            {
+                "last_accepted_target": boundary_target,
+                "filtered_intent": intent,
+                "numpy_rng_state": rng.bit_generator.state,
+                "monotonic_ns": ends_at_ns,
+            }
+        )
+        return CandidatePlan(
+            proposal=proposal,
+            boundary_state=GeneratorState.model_validate(state_values),
+        )
 
 
 class AcceptedPrefix(BaseModel):
@@ -89,16 +159,21 @@ class StreamingMotionGenerator:
             raise ValueError("now_ns must not precede persisted generator state")
         if intent.accepted_monotonic_ns > now_ns:
             raise ValueError("filtered intent postdates replan time")
+        if intent.accepted_monotonic_ns < state.filtered_intent.accepted_monotonic_ns:
+            raise ValueError("filtered intent timestamp regressed")
+        if intent.affect_schema_id != state.filtered_intent.affect_schema_id:
+            raise ValueError("filtered intent schema identity is incompatible")
+        if len(intent.vector) != len(state.filtered_intent.vector):
+            raise ValueError("filtered intent dimension count is incompatible")
 
-        rng = self._restore_numpy_rng(state.numpy_rng_state)
-        seed = int(rng.integers(0, np.iinfo(np.int64).max))
-        proposal = self._generator.step(
+        plan = self._generator.plan(
             intent,
-            state.last_accepted_target,
-            seed,
+            state,
             self._horizon_s,
+            self._prefix_duration_s,
             generated_monotonic_ns=now_ns,
         )
+        proposal = plan.proposal
         self._validate_candidate(proposal, state=state, now_ns=now_ns)
 
         updates = tuple(
@@ -117,39 +192,15 @@ class StreamingMotionGenerator:
             ends_at_ns=ends_at_ns,
             updates=updates,
         )
-        boundary_target = updates[-1].model_copy(update={"offset_s": 0.0})
-        state_values = state.model_dump()
-        state_values.update(
-            {
-                "last_accepted_target": boundary_target,
-                "filtered_intent": intent,
-                "numpy_rng_state": rng.bit_generator.state,
-                "monotonic_ns": ends_at_ns,
-            }
+        self._validate_boundary_state(
+            plan.boundary_state,
+            previous=state,
+            intent=intent,
+            proposal=proposal,
+            accepted_updates=updates,
+            ends_at_ns=ends_at_ns,
         )
-        return prefix, GeneratorState.model_validate(state_values)
-
-    @staticmethod
-    def _restore_numpy_rng(state: Mapping[str, object]) -> np.random.Generator:
-        bit_generator_name = state.get("bit_generator")
-        bit_generators: dict[str, type[np.random.BitGenerator]] = {
-            "MT19937": np.random.MT19937,
-            "PCG64": np.random.PCG64,
-            "PCG64DXSM": np.random.PCG64DXSM,
-            "Philox": np.random.Philox,
-            "SFC64": np.random.SFC64,
-        }
-        if not isinstance(bit_generator_name, str):
-            raise ValueError("NumPy RNG state is missing its bit-generator identity")
-        bit_generator_type = bit_generators.get(bit_generator_name)
-        if bit_generator_type is None:
-            raise ValueError(f"unsupported NumPy bit generator: {bit_generator_name!r}")
-        bit_generator = bit_generator_type()
-        try:
-            bit_generator.state = copy.deepcopy(dict(state))
-        except (TypeError, ValueError) as error:
-            raise ValueError("invalid NumPy RNG state") from error
-        return np.random.Generator(bit_generator)
+        return prefix, plan.boundary_state
 
     def _validate_candidate(
         self,
@@ -194,3 +245,64 @@ class StreamingMotionGenerator:
             target.actuator_name: target.normalized_position
             for target in update.targets
         }
+
+    @classmethod
+    def _validate_boundary_state(
+        cls,
+        boundary: GeneratorState,
+        *,
+        previous: GeneratorState,
+        intent: FilteredIntent,
+        proposal: MotionProposal,
+        accepted_updates: tuple[TargetUpdate, ...],
+        ends_at_ns: int,
+    ) -> None:
+        if boundary.monotonic_ns != ends_at_ns:
+            raise ValueError("candidate boundary time does not match prefix end")
+        if boundary.filtered_intent != intent:
+            raise ValueError("candidate boundary did not retain filtered intent")
+        expected_target = accepted_updates[-1].model_copy(update={"offset_s": 0.0})
+        if cls._positions(boundary.last_accepted_target) != cls._positions(
+            expected_target
+        ):
+            raise ValueError("candidate boundary target does not match accepted prefix")
+
+        identities = (
+            ("model identity", boundary.model_id, previous.model_id),
+            ("model identity", boundary.model_sha256, proposal.model_sha256),
+            (
+                "calibration identity",
+                boundary.calibration_sha256,
+                proposal.calibration_sha256,
+            ),
+            (
+                "controller identity",
+                boundary.controller_settings_sha256,
+                proposal.controller_settings_sha256,
+            ),
+        )
+        for label, boundary_value, expected_value in identities:
+            if boundary_value != expected_value:
+                raise ValueError(f"candidate boundary {label} changed")
+
+
+def _restore_numpy_rng(state: Mapping[str, object]) -> np.random.Generator:
+    bit_generator_name = state.get("bit_generator")
+    bit_generators: dict[str, type[np.random.BitGenerator]] = {
+        "MT19937": np.random.MT19937,
+        "PCG64": np.random.PCG64,
+        "PCG64DXSM": np.random.PCG64DXSM,
+        "Philox": np.random.Philox,
+        "SFC64": np.random.SFC64,
+    }
+    if not isinstance(bit_generator_name, str):
+        raise ValueError("NumPy RNG state is missing its bit-generator identity")
+    bit_generator_type = bit_generators.get(bit_generator_name)
+    if bit_generator_type is None:
+        raise ValueError(f"unsupported NumPy bit generator: {bit_generator_name!r}")
+    bit_generator = bit_generator_type()
+    try:
+        bit_generator.state = copy.deepcopy(dict(state))
+    except (TypeError, ValueError) as error:
+        raise ValueError("invalid NumPy RNG state") from error
+    return np.random.Generator(bit_generator)
