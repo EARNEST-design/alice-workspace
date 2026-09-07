@@ -117,6 +117,28 @@ def test_target_reversal_brakes_without_instantaneous_velocity_change() -> None:
     assert observed.velocity == pytest.approx(-0.76)
 
 
+@pytest.mark.parametrize(
+    ("position", "velocity", "target"),
+    [
+        pytest.param(0.99, 0.8, 0.5, id="positive-endpoint"),
+        pytest.param(-0.99, -0.8, -0.5, id="negative-endpoint"),
+    ],
+)
+def test_reversal_rejects_turnaround_beyond_normalized_endpoint(
+    position: float,
+    velocity: float,
+    target: float,
+) -> None:
+    """Braking an away-directed velocity must not emit out-of-range state."""
+
+    with pytest.raises(ValueError, match="normalized endpoint"):
+        _model().predict(
+            _state(position, velocity=velocity),
+            _update(target),
+            elapsed_s=0.1,
+        )
+
+
 def test_response_cannot_arrive_before_accelerate_cruise_brake_minimum() -> None:
     """Cruising through the braking interval would fabricate early arrival."""
 

@@ -168,6 +168,13 @@ class ControllerResponse:
         remaining = abs(distance)
         initial_speed = direction * state.velocity
         acceleration_limit = parameters.max_acceleration_per_s2
+        if initial_speed < 0.0:
+            outward_excursion = initial_speed**2 / (2.0 * acceleration_limit)
+            turnaround_position = state.position - direction * outward_excursion
+            if not -1.0 <= turnaround_position <= 1.0:
+                raise ValueError(
+                    "reversal braking would cross a normalized endpoint"
+                )
         stopping_distance = (
             initial_speed**2 / (2.0 * acceleration_limit)
             if initial_speed > 0.0
@@ -185,8 +192,10 @@ class ControllerResponse:
         )
         arrival_s = sum(duration for duration, _ in segments)
         if elapsed_s >= arrival_s:
-            return state.model_copy(
-                update={"position": target_position, "velocity": 0.0}
+            return self._updated_state(
+                state,
+                position=target_position,
+                velocity=0.0,
             )
 
         traveled = 0.0
@@ -202,8 +211,27 @@ class ControllerResponse:
 
         next_position = state.position + direction * traveled
         next_velocity = direction * speed
-        return state.model_copy(
-            update={"position": next_position, "velocity": next_velocity}
+        return self._updated_state(
+            state,
+            position=next_position,
+            velocity=next_velocity,
+        )
+
+    @staticmethod
+    def _updated_state(
+        state: ControllerState,
+        *,
+        position: float,
+        velocity: float,
+    ) -> ControllerState:
+        """Build a fully validated successor state with unchanged identity."""
+
+        return ControllerState(
+            schema_version=state.schema_version,
+            actuator_name=state.actuator_name,
+            calibration_sha256=state.calibration_sha256,
+            position=position,
+            velocity=velocity,
         )
 
     @staticmethod
