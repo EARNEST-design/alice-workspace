@@ -192,16 +192,26 @@ git commit -m "feat: model controller response and sparse updates"
 - Test: `tests/motion/test_procedural.py`
 
 **Interfaces:**
-- Produces: `AnchorPlanner.plan(intent, state, horizon_s) -> TargetUpdateHorizon`, `ProceduralMotionGenerator.step(intent, state, seed, horizon_s) -> MotionProposal`.
+- Produces: `AnchorPlanner.plan(intent, state, horizon_s) -> TargetUpdateHorizon`, `ProceduralMotionGenerator.step(intent, state, seed, horizon_s, *, generated_monotonic_ns) -> MotionProposal`.
 
 - [ ] **Step 1: Write failing baseline tests**
 
 ```python
 def test_same_seed_replays_identically() -> None:
-    assert generator.step(intent, state, 41, 2.0) == generator.step(intent, state, 41, 2.0)
+    assert generator.step(
+        intent, state, 41, 2.0, generated_monotonic_ns=10_000_000_000
+    ) == generator.step(
+        intent, state, 41, 2.0, generated_monotonic_ns=10_000_000_000
+    )
 
 def test_unsupported_coordinate_returns_anchor_fallback() -> None:
-    proposal = generator.step(outside_support_intent(), state, 7, 1.0)
+    proposal = generator.step(
+        outside_support_intent(),
+        state,
+        7,
+        1.0,
+        generated_monotonic_ns=10_000_000_000,
+    )
     assert proposal.support_status == "fallback"
     assert proposal.horizon == anchor.plan_neutral(state, 1.0)
 ```
@@ -214,7 +224,7 @@ Expected: tests fail because planners do not exist.
 
 - [ ] **Step 3: Implement the smallest living-motion baseline**
 
-Interpolate only reviewed anchors. Add band-limited seeded drift and explicit blink/gaze timers with configured amplitude and refractory intervals. Emit targets at the configured effective cadence, continue from the accepted state, and return fallback outside configured affect support.
+Interpolate only reviewed anchors. Add band-limited seeded drift and explicit blink/gaze timers with configured amplitude and refractory intervals. Emit targets at the configured effective cadence, continue from the accepted state, timestamp proposals with an explicit generation time independent of accepted intent time, and return fallback outside configured affect support. Treat proposal expiry as exclusive and schedule every horizon update strictly before it.
 
 - [ ] **Step 4: Verify and commit**
 

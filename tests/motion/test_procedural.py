@@ -15,6 +15,7 @@ from alice.motion.procedural import ProceduralMotionGenerator
 
 ROOT = Path(__file__).parents[2]
 CONFIG_PATH = ROOT / "config" / "models" / "procedural-motion-v1.yaml"
+GENERATED_NS = 10_000_000_000
 
 
 def _intent(status: SupportStatus = SupportStatus.SUPPORTED) -> FilteredIntent:
@@ -66,8 +67,18 @@ def test_same_seed_replays_identically() -> None:
     planner, generator = _generator()
     state = _state(planner)
 
-    assert generator.step(_intent(), state, 41, 2.0) == generator.step(
-        _intent(), state, 41, 2.0
+    assert generator.step(
+        _intent(),
+        state,
+        41,
+        2.0,
+        generated_monotonic_ns=GENERATED_NS,
+    ) == generator.step(
+        _intent(),
+        state,
+        41,
+        2.0,
+        generated_monotonic_ns=GENERATED_NS,
     )
 
 
@@ -75,7 +86,13 @@ def test_generated_json_round_trips_through_canonical_motion_proposal() -> None:
     """Adding a subtype-only wire field would violate the canonical v1 contract."""
 
     planner, generator = _generator()
-    generated = generator.step(_intent(), _state(planner), seed=41, horizon_s=2.0)
+    generated = generator.step(
+        _intent(),
+        _state(planner),
+        seed=41,
+        horizon_s=2.0,
+        generated_monotonic_ns=GENERATED_NS,
+    )
 
     decoded = MotionProposal.model_validate_json(generated.model_dump_json())
 
@@ -83,13 +100,83 @@ def test_generated_json_round_trips_through_canonical_motion_proposal() -> None:
     assert decoded == generated
 
 
+def test_long_gap_fallback_uses_explicit_proposal_generation_time() -> None:
+    """Reusing retained intent time would create a newly generated stale proposal."""
+
+    planner, generator = _generator()
+    intent = _intent(SupportStatus.FALLBACK)
+
+    proposal = generator.step(
+        intent,
+        _state(planner),
+        seed=0,
+        horizon_s=1.0,
+        generated_monotonic_ns=GENERATED_NS,
+    )
+
+    assert intent.accepted_monotonic_ns == 2_000_000_000
+    assert proposal.generated_monotonic_ns == GENERATED_NS
+    assert proposal.is_expired(now_monotonic_ns=GENERATED_NS) is False
+
+
+def test_generation_time_participates_in_proposal_identity() -> None:
+    """Reusing an ID for proposals born at different times would be ambiguous."""
+
+    planner, generator = _generator()
+    state = _state(planner)
+
+    first = generator.step(
+        _intent(),
+        state,
+        seed=0,
+        horizon_s=1.0,
+        generated_monotonic_ns=GENERATED_NS,
+    )
+    later = generator.step(
+        _intent(),
+        state,
+        seed=0,
+        horizon_s=1.0,
+        generated_monotonic_ns=GENERATED_NS + 1,
+    )
+
+    assert first.horizon == later.horizon
+    assert first.proposal_id != later.proposal_id
+
+
+def test_generated_updates_are_strictly_before_exclusive_proposal_expiry() -> None:
+    """An update at the deadline could be scheduled only after proposal rejection."""
+
+    planner, generator = _generator()
+
+    proposal = generator.step(
+        _intent(),
+        _state(planner),
+        seed=5,
+        horizon_s=1.0,
+        generated_monotonic_ns=GENERATED_NS,
+    )
+
+    validity_s = (
+        proposal.expires_monotonic_ns - proposal.generated_monotonic_ns
+    ) / 1_000_000_000
+    assert proposal.horizon.updates[-1].offset_s == 1.0
+    assert all(
+        update.offset_s < validity_s for update in proposal.horizon.updates
+    )
+
+
 def test_different_seeds_produce_distinct_slow_variation() -> None:
     """Ignoring the seed would collapse the procedural baseline to one trajectory."""
 
     planner, generator = _generator()
     state = _state(planner)
-    first = generator.step(_intent(), state, 41, 2.0)
-    second = generator.step(_intent(), state, 42, 2.0)
+    first = generator.step(
+        _intent(), state, 41, 2.0, generated_monotonic_ns=GENERATED_NS
+    )
+    second = generator.step(
+        _intent(), state, 42, 2.0, generated_monotonic_ns=GENERATED_NS
+    )
 
     assert first.horizon != second.horizon
 
@@ -101,7 +188,11 @@ def test_unsupported_coordinate_returns_exact_anchor_fallback() -> None:
     state = _state(planner, mouth_open=0.2)
 
     proposal = generator.step(
-        _intent(SupportStatus.FALLBACK), state, seed=7, horizon_s=1.0
+        _intent(SupportStatus.FALLBACK),
+        state,
+        seed=7,
+        horizon_s=1.0,
+        generated_monotonic_ns=GENERATED_NS,
     )
 
     assert proposal.support_status == "fallback"
@@ -115,7 +206,11 @@ def test_checked_in_empty_support_forces_neutral_fallback() -> None:
     state = _state(planner)
 
     proposal = generator.step(
-        _intent(SupportStatus.FALLBACK), state, seed=17, horizon_s=2.0
+        _intent(SupportStatus.FALLBACK),
+        state,
+        seed=17,
+        horizon_s=2.0,
+        generated_monotonic_ns=GENERATED_NS,
     )
 
     assert proposal.support_status == "fallback"
@@ -128,7 +223,13 @@ def test_procedural_updates_start_at_state_and_follow_effective_cadence() -> Non
     planner, generator = _generator()
     state = _state(planner, head_tilt=0.1)
 
-    proposal = generator.step(_intent(), state, seed=5, horizon_s=1.0)
+    proposal = generator.step(
+        _intent(),
+        state,
+        seed=5,
+        horizon_s=1.0,
+        generated_monotonic_ns=GENERATED_NS,
+    )
 
     assert proposal.horizon.updates[0].targets == state.targets
     assert [update.offset_s for update in proposal.horizon.updates] == pytest.approx(
@@ -140,7 +241,13 @@ def test_seeded_drift_is_band_limited_instead_of_per_update_jitter() -> None:
     """Independent random offsets at each update would exceed the configured slope."""
 
     planner, generator = _generator()
-    proposal = generator.step(_intent(), _state(planner), seed=11, horizon_s=6.0)
+    proposal = generator.step(
+        _intent(),
+        _state(planner),
+        seed=11,
+        horizon_s=6.0,
+        generated_monotonic_ns=GENERATED_NS,
+    )
     values = [
         _position(update, "head_tilt") for update in proposal.horizon.updates
     ]
@@ -161,7 +268,13 @@ def test_blink_and_gaze_timers_are_coupled_and_respect_refractory_windows() -> N
     """Independent eye events or repeated closures would create visible twitching."""
 
     planner, generator = _generator()
-    proposal = generator.step(_intent(), _state(planner), seed=23, horizon_s=20.0)
+    proposal = generator.step(
+        _intent(),
+        _state(planner),
+        seed=23,
+        horizon_s=20.0,
+        generated_monotonic_ns=GENERATED_NS,
+    )
     updates = proposal.horizon.updates
 
     for update in updates:

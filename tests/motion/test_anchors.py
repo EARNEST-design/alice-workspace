@@ -6,12 +6,14 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
+from pydantic import ValidationError
 
 from alice.contracts.actuation import ActuatorTarget
 from alice.contracts.motion import TargetUpdate
 from alice.motion.anchors import (
     AffectAnchorMapping,
     AnchorPlanner,
+    ProceduralMotionConfig,
     load_procedural_motion_config,
 )
 from alice.motion.intent_filter import FilteredIntent, SupportStatus
@@ -159,6 +161,27 @@ def test_evidenced_mapping_interpolates_between_reviewed_anchor_targets() -> Non
     assert positions["left_mouth_corner"] == pytest.approx(0.5)
     assert positions["right_mouth_corner"] == pytest.approx(-0.5)
     assert all(-1.0 <= value <= 1.0 for value in positions.values())
+
+
+def test_config_rejects_duplicate_affect_mapping_coordinates() -> None:
+    """Two anchors at one coordinate would make interpolation evidence ambiguous."""
+
+    document = load_procedural_motion_config(CONFIG_PATH).model_dump()
+    document["affect_anchor_mappings"] = [
+        {
+            "anchor_name": "smile_open",
+            "coordinate": (0.5, 0.0, 0.0),
+            "provenance": "synthetic unit-test mapping",
+        },
+        {
+            "anchor_name": "frown_closed",
+            "coordinate": (0.5, 0.0, 0.0),
+            "provenance": "synthetic unit-test mapping",
+        },
+    ]
+
+    with pytest.raises(ValidationError, match="mapping coordinates must be unique"):
+        ProceduralMotionConfig.model_validate(document)
 
 
 @pytest.mark.parametrize("horizon_s", [0.0, -0.1, float("inf"), float("nan")])

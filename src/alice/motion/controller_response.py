@@ -156,8 +156,6 @@ class ControllerResponse:
                 f"state velocity exceeds configured limit for "
                 f"{state.actuator_name!r}"
             )
-        if elapsed_s == 0.0:
-            return state
         distance = target_position - state.position
         if distance == 0.0:
             if state.velocity != 0.0:
@@ -180,8 +178,10 @@ class ControllerResponse:
             if initial_speed > 0.0
             else 0.0
         )
-        if stopping_distance > remaining + _KINEMATIC_TOLERANCE:
+        if stopping_distance > remaining:
             raise ValueError("state velocity exceeds available stopping distance")
+        if elapsed_s == 0.0:
+            return state
         trajectory_distance = max(remaining, stopping_distance)
 
         segments = self._trajectory_segments(
@@ -196,6 +196,9 @@ class ControllerResponse:
                 state,
                 position=target_position,
                 velocity=0.0,
+                target_position=target_position,
+                direction=direction,
+                parameters=parameters,
             )
 
         traveled = 0.0
@@ -215,6 +218,9 @@ class ControllerResponse:
             state,
             position=next_position,
             velocity=next_velocity,
+            target_position=target_position,
+            direction=direction,
+            parameters=parameters,
         )
 
     @staticmethod
@@ -223,8 +229,20 @@ class ControllerResponse:
         *,
         position: float,
         velocity: float,
+        target_position: float,
+        direction: float,
+        parameters: ActuatorResponseParameters,
     ) -> ControllerState:
-        """Build a fully validated successor state with unchanged identity."""
+        """Build a strict successor after normalizing solver-scale boundary noise."""
+
+        position, velocity = ControllerResponse._normalize_generated_boundaries(
+            position=position,
+            velocity=velocity,
+            target_position=target_position,
+            direction=direction,
+            max_velocity=parameters.max_velocity_per_s,
+            acceleration=parameters.max_acceleration_per_s2,
+        )
 
         return ControllerState(
             schema_version=state.schema_version,
@@ -233,6 +251,87 @@ class ControllerResponse:
             position=position,
             velocity=velocity,
         )
+
+    @staticmethod
+    def _normalize_generated_boundaries(
+        *,
+        position: float,
+        velocity: float,
+        target_position: float,
+        direction: float,
+        max_velocity: float,
+        acceleration: float,
+    ) -> tuple[float, float]:
+        """Canonicalize only tolerance-sized errors created by this solver."""
+
+        if position < -1.0 or position > 1.0:
+            endpoint_error = max(-1.0 - position, position - 1.0)
+            ControllerResponse._require_internal_tolerance(
+                endpoint_error,
+                boundary="normalized position",
+            )
+            position = max(-1.0, min(1.0, position))
+
+        directed_remaining = direction * (target_position - position)
+        if directed_remaining < 0.0:
+            target_speed = max(0.0, direction * velocity)
+            stopping_distance = target_speed**2 / (2.0 * acceleration)
+            ControllerResponse._require_internal_tolerance(
+                max(-directed_remaining, stopping_distance),
+                boundary="target overshoot",
+            )
+            return target_position, 0.0
+
+        if abs(velocity) > max_velocity:
+            ControllerResponse._require_internal_tolerance(
+                abs(velocity) - max_velocity,
+                boundary="velocity limit",
+            )
+            velocity = math.copysign(max_velocity, velocity)
+
+        directed_speed = direction * velocity
+        if directed_speed > 0.0:
+            stopping_distance = directed_speed**2 / (2.0 * acceleration)
+            if stopping_distance > directed_remaining:
+                ControllerResponse._require_internal_tolerance(
+                    stopping_distance - directed_remaining,
+                    boundary="stopping distance",
+                )
+                safe_speed = ControllerResponse._safe_speed_for_distance(
+                    distance=directed_remaining,
+                    acceleration=acceleration,
+                )
+                velocity = direction * safe_speed
+        elif directed_speed < 0.0:
+            outward_distance = 1.0 + direction * position
+            stopping_distance = directed_speed**2 / (2.0 * acceleration)
+            if stopping_distance > outward_distance:
+                ControllerResponse._require_internal_tolerance(
+                    stopping_distance - outward_distance,
+                    boundary="reversal endpoint",
+                )
+                safe_speed = ControllerResponse._safe_speed_for_distance(
+                    distance=outward_distance,
+                    acceleration=acceleration,
+                )
+                velocity = -direction * safe_speed
+        return position, velocity
+
+    @staticmethod
+    def _safe_speed_for_distance(*, distance: float, acceleration: float) -> float:
+        """Return the largest representable speed with an exact safe stop."""
+
+        speed = math.sqrt(2.0 * acceleration * max(0.0, distance))
+        while speed**2 / (2.0 * acceleration) > distance:
+            speed = math.nextafter(speed, 0.0)
+        return speed
+
+    @staticmethod
+    def _require_internal_tolerance(error: float, *, boundary: str) -> None:
+        if error > _KINEMATIC_TOLERANCE:
+            raise RuntimeError(
+                f"controller solver crossed {boundary} by {error!r}"
+            )
 
     @staticmethod
     def _trajectory_segments(

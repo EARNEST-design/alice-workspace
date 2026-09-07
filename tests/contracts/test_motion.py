@@ -42,8 +42,8 @@ def valid_proposal(**overrides: object) -> dict[str, object]:
         "schema_version": "motion-proposal/v1",
         "proposal_id": "proposal-001",
         "run_id": "run-001",
-        "generated_monotonic_ns": 1_000,
-        "expires_monotonic_ns": 2_000,
+        "generated_monotonic_ns": 1_000_000_000,
+        "expires_monotonic_ns": 2_000_000_000,
         "seed": 41,
         "model_id": "procedural-motion-v1",
         "model_sha256": SHA256_A,
@@ -126,7 +126,41 @@ def test_motion_proposal_requires_expiry_after_generation() -> None:
     """A proposal stale when generated must fail at the contract boundary."""
 
     with pytest.raises(ValidationError, match="expire after generation"):
-        MotionProposal.model_validate(valid_proposal(expires_monotonic_ns=1_000))
+        MotionProposal.model_validate(
+            valid_proposal(expires_monotonic_ns=1_000_000_000)
+        )
+
+
+def test_motion_proposal_rejects_update_at_exclusive_expiry_deadline() -> None:
+    """Accepting a horizon endpoint at expiry would contradict expiry semantics."""
+
+    with pytest.raises(ValidationError, match="strictly before proposal expiry"):
+        MotionProposal.model_validate(
+            valid_proposal(
+                expires_monotonic_ns=1_200_000_000,
+                horizon=horizon(offsets=(0.0, 0.2)),
+            )
+        )
+
+
+def test_motion_proposal_expiry_is_an_exclusive_scheduling_deadline() -> None:
+    """Changing the deadline boundary could use a proposal after it expires."""
+
+    proposal = MotionProposal.model_validate(
+        valid_proposal(
+            expires_monotonic_ns=1_200_000_001,
+            horizon=horizon(offsets=(0.0, 0.2)),
+        )
+    )
+
+    validity_s = (
+        proposal.expires_monotonic_ns - proposal.generated_monotonic_ns
+    ) / 1_000_000_000
+    assert all(
+        update.offset_s < validity_s for update in proposal.horizon.updates
+    )
+    assert proposal.is_expired(now_monotonic_ns=1_200_000_000) is False
+    assert proposal.is_expired(now_monotonic_ns=1_200_000_001) is True
 
 
 def test_motion_proposal_is_frozen() -> None:

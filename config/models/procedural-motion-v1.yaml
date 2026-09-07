@@ -59,7 +59,7 @@ blink:
   actuator_names: [lower_eyelids, upper_eyelids]
   amplitude: 0.5
   close_s: 0.2
-  hold_s: 0.2
+  hold_s: 0.6
   open_s: 0.4
   refractory_s: 2.5
   interval_max_s: 4.5
@@ -71,5 +71,7 @@ gaze:
   refractory_s: 1.5
   interval_max_s: 3.5
 provenance: >-
-  Reviewed hardware anchors plus conservative procedural priors. Affect-to-anchor
-  mappings are intentionally empty pending retained empirical support evidence.
+  Reviewed hardware anchors plus conservative procedural priors. Blink timing is
+  replay-feasible at the configured cadence against the bound unfitted controller
+  response prior; it is not measured hardware evidence. Affect-to-anchor mappings
+  are intentionally empty pending retained empirical support evidence.

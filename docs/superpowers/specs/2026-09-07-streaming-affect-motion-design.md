@@ -121,6 +121,12 @@ velocity, affect-filter state, latent style state, pseudorandom-generator state,
 and recent event history. Given the same intent stream, initial state, model,
 calibration, controller settings, and seed, replay is deterministic.
 
+Proposal generation time is a caller-supplied monotonic timestamp, separate from
+the filtered intent's last accepted timestamp so a newly generated fallback is
+not backdated after rejected input. Proposal expiry is an exclusive deadline for
+acceptance and use. Every scheduled horizon update, including one exactly at the
+requested horizon endpoint, occurs strictly before that deadline.
+
 The face/head implementation is a segment implementing a generic motion-proposal
 interface. Later torso or limb segments get separate calibration identities,
 state, constraints, and validation. Their addition does not change the affect

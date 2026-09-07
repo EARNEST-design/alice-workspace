@@ -87,6 +87,29 @@ def test_affect_vector_schema_validates_ordered_dimension_count() -> None:
         )
 
 
+def test_affect_vector_schema_rejects_mismatched_schema_identity() -> None:
+    """Matching vector width must not conceal a different coordinate schema."""
+
+    schema = AffectVectorSchema(
+        schema_id="affect-vector/v1",
+        dimensions=("valence", "arousal", "dominance"),
+    )
+
+    with pytest.raises(ValueError, match="schema identity"):
+        schema.validate_intent(
+            AffectIntent.model_validate(
+                valid_intent(affect_schema_id="affect-vector/v2")
+            )
+        )
+
+
+def test_affect_intent_rejects_nonexact_contract_version() -> None:
+    """Coercing a nearby version would silently change the wire contract."""
+
+    with pytest.raises(ValidationError, match="schema_version"):
+        AffectIntent.model_validate(valid_intent(schema_version="affect-intent/v1.0"))
+
+
 def test_versioned_affect_schema_config_is_valid() -> None:
     """A malformed checked-in dimension order would make vectors ambiguous."""
 

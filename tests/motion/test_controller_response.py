@@ -199,6 +199,46 @@ def test_response_rejects_state_above_configured_speed() -> None:
         )
 
 
+@pytest.mark.parametrize("elapsed_s", [0.0, 0.02])
+def test_response_rejects_tolerance_sized_external_stopping_violation(
+    elapsed_s: float,
+) -> None:
+    """A tolerance must not admit external state that would overshoot its target."""
+
+    position = math.nextafter(0.84, 1.0)
+
+    with pytest.raises(ValueError, match="stopping distance"):
+        _model().predict(
+            _state(position, velocity=0.8),
+            _update(1.0),
+            elapsed_s=elapsed_s,
+        )
+
+
+def test_chained_predictions_stay_within_exact_kinematic_envelopes() -> None:
+    """Unnormalized generated boundaries could fail or overshoot on re-entry."""
+
+    model = _model()
+    parameters = model.config.actuator("neck_rotation")
+    update = _update(1.0)
+    state = _state(-0.9, velocity=-0.4)
+
+    for elapsed_s in (0.7, *(0.02 for _ in range(160))):
+        state = model.predict(state, update, elapsed_s=elapsed_s)
+        remaining = 1.0 - state.position
+        target_speed = max(0.0, state.velocity)
+
+        assert -1.0 <= state.position <= 1.0
+        assert abs(state.velocity) <= parameters.max_velocity_per_s
+        assert (
+            target_speed**2 / (2.0 * parameters.max_acceleration_per_s2)
+            <= remaining
+        )
+
+    assert state.position == pytest.approx(1.0)
+    assert state.velocity == pytest.approx(0.0)
+
+
 def test_repeated_small_steps_cross_braking_boundary_without_false_rejection() -> None:
     """Floating-point noise at the braking switch must not reject valid rollout."""
 

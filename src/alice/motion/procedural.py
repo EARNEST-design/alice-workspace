@@ -59,8 +59,10 @@ class ProceduralMotionGenerator:
         state: TargetUpdate,
         seed: int,
         horizon_s: float,
+        *,
+        generated_monotonic_ns: int,
     ) -> MotionProposal:
-        """Generate one replayable proposal from filtered intent and accepted state."""
+        """Generate a proposal at an explicit time, independent of intent age."""
 
         if seed < 0:
             raise ValueError("seed must be non-negative")
@@ -77,9 +79,10 @@ class ProceduralMotionGenerator:
                 horizon_s=horizon_s,
             )
 
-        expires_ns = intent.accepted_monotonic_ns + max(
+        validity_s = max(horizon_s, horizon.updates[-1].offset_s)
+        expires_ns = generated_monotonic_ns + max(
             1,
-            math.ceil(horizon_s * 1_000_000_000),
+            math.floor(validity_s * 1_000_000_000) + 1,
         )
         identity_material = "|".join(
             (
@@ -88,6 +91,7 @@ class ProceduralMotionGenerator:
                 state.model_dump_json(),
                 str(seed),
                 repr(horizon_s),
+                str(generated_monotonic_ns),
             )
         )
         proposal_digest = hashlib.sha256(identity_material.encode("utf-8")).hexdigest()
@@ -95,7 +99,7 @@ class ProceduralMotionGenerator:
             schema_version="motion-proposal/v1",
             proposal_id=f"procedural-{proposal_digest[:24]}",
             run_id=f"procedural-{intent.source_id}",
-            generated_monotonic_ns=intent.accepted_monotonic_ns,
+            generated_monotonic_ns=generated_monotonic_ns,
             expires_monotonic_ns=expires_ns,
             seed=seed,
             model_id=self._config.model_id,

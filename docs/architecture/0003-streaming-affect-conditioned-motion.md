@@ -49,6 +49,11 @@ Use a controller-aware, hierarchical streaming generator for face and head:
 8. Treat every generated trajectory as a proposal. Independent validation and
    the `SafetySupervisor` retain final authority. Mock and replay remain the
    default adapters.
+9. Timestamp each proposal with the caller-supplied monotonic generation time,
+   independently of the last accepted intent time. Proposal expiry is the
+   exclusive deadline for acceptance and use: every horizon update must be
+   scheduled strictly before it, including an update at the requested horizon
+   endpoint.
 
 Hardware trials use a minimal explicit boundary: load the identified calibration,
 confirm commands stay within its accepted ranges, obtain the operator's run

@@ -194,6 +194,11 @@ class ProceduralMotionConfig(BaseModel):
         mapped_names = [mapping.anchor_name for mapping in self.affect_anchor_mappings]
         if len(mapped_names) != len(set(mapped_names)):
             raise ValueError("an anchor may have only one affect mapping")
+        mapped_coordinates = [
+            mapping.coordinate for mapping in self.affect_anchor_mappings
+        ]
+        if len(mapped_coordinates) != len(set(mapped_coordinates)):
+            raise ValueError("affect mapping coordinates must be unique")
 
         configured_channels = (
             set(self.drift.actuator_names)

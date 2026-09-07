@@ -55,7 +55,11 @@ class TargetUpdateHorizon(BaseModel):
 
 
 class MotionProposal(BaseModel):
-    """A replayable, identity-bound proposal with no actuation authority."""
+    """A replayable, identity-bound proposal with no actuation authority.
+
+    ``expires_monotonic_ns`` is an exclusive deadline: every horizon update is
+    scheduled strictly before it, and the proposal is unusable at the deadline.
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -76,6 +80,13 @@ class MotionProposal(BaseModel):
     def validate_validity_window(self) -> MotionProposal:
         if self.expires_monotonic_ns <= self.generated_monotonic_ns:
             raise ValueError("motion proposal must expire after generation")
+        validity_s = (
+            self.expires_monotonic_ns - self.generated_monotonic_ns
+        ) / 1_000_000_000
+        if any(update.offset_s >= validity_s for update in self.horizon.updates):
+            raise ValueError(
+                "motion proposal updates must be strictly before proposal expiry"
+            )
         return self
 
     def is_expired(self, *, now_monotonic_ns: int) -> bool:
