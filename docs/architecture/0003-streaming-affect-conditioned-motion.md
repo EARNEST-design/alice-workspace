@@ -17,6 +17,10 @@ tilt, and face up/down. Full-body joints are not yet characterized. Human images
 and video may be used only under recorded consent and provenance constraints.
 The learning objective is morphology-appropriate affect equivalence, not exact
 human landmark imitation or a claim about a person's internal emotional state.
+Within the operator-tested motor ranges, platform safety is accepted prior work:
+the controller enforces firmware limits and the operator remains at the nearby
+master servo switch during hardware runs. This project does not reopen general
+range-combination testing as an ML research objective.
 
 ## Decision
 
@@ -45,6 +49,11 @@ Use a controller-aware, hierarchical streaming generator for face and head:
 8. Treat every generated trajectory as a proposal. Independent validation and
    the `SafetySupervisor` retain final authority. Mock and replay remain the
    default adapters.
+
+Hardware trials use a minimal explicit boundary: load the identified calibration,
+confirm commands stay within its accepted ranges, obtain the operator's run
+approval with the master switch ready, and enable hardware deliberately. The
+research does not require a new bring-up campaign for each model iteration.
 
 The runtime falls back smoothly to the current safe anchor or neutral state for
 stale or malformed intent, unsupported affect regions, invalid latent state,
@@ -79,6 +88,8 @@ model, safety boundary, human-rating protocol, and reproducibility requirements.
   initial state, and random seed.
 - Head gestures remain interpretable and can be evaluated independently from
   facial motion.
+- Engineering attention is concentrated on meaningful, humanlike sequencing;
+  accepted servo range combinations are not repeatedly requalified.
 - The first implementation cannot claim full-body humanoid generation.
 - Raw human media requires explicit consent, permitted-use, retention, and
   access decisions; derived features do not erase those obligations.
@@ -103,8 +114,8 @@ model, safety boundary, human-rating protocol, and reproducibility requirements.
 6. Report face and head results separately. A learned model is promoted only if
    it improves held-out human ratings without worsening controller-limit or
    continuity metrics.
-7. Require a separate reviewed procedure and explicit approval before any model
-   is evaluated on hardware.
+7. Require the short reviewed hardware-run boundary and explicit operator
+   approval before any model is evaluated on hardware.
 
 ## Relationship to ADR 0002
 

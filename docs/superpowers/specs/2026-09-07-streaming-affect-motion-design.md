@@ -13,6 +13,13 @@ natural, lively, continuous, intentional, and affect-equivalent to a reference
 or requested coordinate. It does not mean copying human facial geometry or
 inferring a person's true internal emotional state.
 
+The primary research problem is motion quality: generating valid, meaningful
+sequences that read as humanlike on Alice. Platform safety within the existing
+operator-tested motor ranges is accepted prior work. The Pololu firmware clamps
+configured ranges, and the operator remains ready at the nearby master servo
+switch during hardware trials. This design does not spend research cycles
+retesting arbitrary in-range motor combinations.
+
 ## Scope
 
 ### Included
@@ -35,7 +42,7 @@ inferring a person's true internal emotional state.
 - Literal human-landmark-to-robot-landmark imitation.
 - Online learning during hardware operation.
 - Direct model authority over actuators.
-- Hardware model trials without a separate reviewed procedure and approval.
+- Hardware model trials without deliberate enablement and operator approval.
 
 ## Research operating mode
 
@@ -53,8 +60,10 @@ every notebook, plot, or discarded idea.
   human media always keeps its access, retention, and permitted-use record.
 - A human study needs a stable rating protocol when its results support a model
   claim; informal lab feedback may guide iteration but is labeled as such.
-- A hardware run keeps the repository's explicit actuation approval and bring-up
-  boundary. Routine model hacking remains in mock, simulation, or replay.
+- A hardware run uses a short explicit boundary: identify the calibration,
+  confirm in-range output, deliberately enable actuation, and obtain the
+  operator's approval with the master switch ready. It does not require a new
+  safety investigation for each model iteration.
 
 Model cards, extensive reports, and promotion reviews are created for retained
 candidates and decision-grade results, not for every exploratory run. Templates
@@ -131,11 +140,13 @@ Phase 2 traces. Runtime chooses a command cadence supported by measured response
 and coalesces updates superseded before transmission. Dataset records retain
 both requested targets and observed positions.
 
-Safety validation still checks finite and calibrated targets, freshness,
-continuity, permitted ranges, and relevant motion limits. The implementation
-must distinguish controller setting value zero from an assumed zero physical
-speed or acceleration; its meaning comes from the controller specification and
-measured response.
+Validation checks finite and calibrated targets, freshness, continuity, and the
+accepted ranges before transmission. Sequence-quality analysis may also measure
+motion derivatives because jitter or abrupt motion looks unnatural, not because
+the ML project must re-prove every firmware-safe coordinate combination. The
+implementation must distinguish controller setting value zero from an assumed
+zero physical speed or acceleration; its meaning comes from the controller
+specification and measured response.
 
 ## Hierarchical motion model
 
@@ -181,10 +192,10 @@ channels 0-2 through the controller-response model. Gesture history and
 refractory periods prevent repetitive behavior. Face and eye motion may continue
 during a head gesture subject to explicit concurrency rules.
 
-Head motion has its own envelopes, promotion metrics, and conclusions so facial
-performance cannot conceal poor neck behavior. The known jankiness of channel 1
-at slow speed and the channel 2 software/firmware maximum discrepancy remain
-calibration facts to resolve or encode, not details for a model to learn around.
+Head motion has its own quality metrics and conclusions so facial performance
+cannot conceal poor neck behavior. The known jankiness of channel 1 at slow
+speed and the channel 2 software/firmware maximum discrepancy remain calibration
+facts to encode, not reasons to reopen general platform safety testing.
 
 ## Dataset design
 
@@ -238,14 +249,15 @@ spikes use the compact research record defined above.
 
 ## Evaluation
 
-### Automated and replay gates
+### Automated and replay checks
 
 - Contract, schema, calibration, freshness, and support behavior.
 - Deterministic replay and seed-dependent diversity.
 - Multistep controller-response error on held-out sessions.
 - Continuity across planning windows and intent changes.
 - Target cadence and superseded-target coalescing.
-- Realized position, velocity, acceleration, jerk, and settling behavior.
+- Realized position, velocity, acceleration, jerk, and settling behavior as
+  humanlike-motion quality signals.
 - Blink and gesture frequency, refractory violations, conflicts, and collapse.
 - Latency, missed deadlines, malformed input, invalid state, and recovery.
 
@@ -310,8 +322,9 @@ fresh input, silently change calibration, or switch from simulation to hardware.
 
 Model processes never open serial, camera, or ROS hardware as a side effect of
 loading. `SafetySupervisor` and the actuator adapter remain separate processes
-or modules with explicit contracts. Hardware execution is outside this design's
-automatic workflow.
+or modules with explicit contracts. A hardware trial is an explicit operator-
+approved action, but uses the established calibration, firmware protection, and
+master-switch practice rather than introducing a parallel safety workstream.
 
 ## Deliverables and research record
 
