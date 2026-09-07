@@ -47,6 +47,14 @@ versions, configuration, artifact checksums, and a short conclusion. Derived
 blendshape observations are stored by default. Raw frames or video require an
 explicit retention, consent, and privacy decision in the run configuration.
 
+The capture manifest is never extended by analysis. Each offline analysis is a
+separate immutable generation whose manifest records analyzer package and Git
+identity, exact capture-manifest and observation hashes, typed thresholds, and
+hashes of all derived metrics, acceptance, and conclusion artifacts. A
+generation is published only by an atomic directory rename after its files and
+directories are synced. Cross-run repeatability uses the same versioned
+generation mechanism and typed thresholds rather than operator metadata.
+
 Passive experiments measure:
 
 - detection rate and loss-of-face behavior;
@@ -64,6 +72,20 @@ the system must not compensate by moving hardware.
 Measure how actuator commands change Alice's observed blendshapes. This phase
 uses a dedicated experiment runner and an actuator interface with separate
 mock, replay, and Maestro implementations. Mock mode is the default.
+
+The public mock composition root is `run_mock_identification`. It constructs
+the exact `MockActuatorAdapter` internally and exposes no adapter argument or
+factory hook. Task 6 will add a separate capability-gated hardware entrypoint
+that constructs the exact Maestro adapter from reviewed configuration. Neither
+public entrypoint accepts an arbitrary adapter object; trusted composition
+roots may share a private deterministic execution core. This ruling supersedes
+the original generic runner signature because review showed that adapter
+injection could disguise a hardware-capable implementation as mock provenance.
+
+The injected monotonic clock is adequate for deterministic mock execution. The
+future hardware composition root must additionally provide an independent
+watchdog and permit-revocation path that remains effective if process-local
+clock or runner logic fails.
 
 Hardware mode requires all of the following:
 
@@ -109,6 +131,31 @@ and all relevant configuration identities. Analyses estimate:
 - actuator coupling and cross-effects;
 - local Jacobians with uncertainty across operating regions;
 - timing, settling, and tracking latency.
+
+All reported variance uses the versioned population definition
+`population-ddof0/v1`: `mean((x - mean(x))^2)`, divisor `N`, `ddof=0`.
+Monotonicity is signed Home-to-offset response consistency. Asymmetry is the
+absolute difference between positive and negative one-sided slope magnitudes.
+Saturation is `1 - |outer incremental slope| / |inner Home-to-offset slope|`;
+the initial single-magnitude protocol reports it as typed missing/inconclusive,
+never as zero.
+
+The trusted hardware composition constructs the exact stable C525 camera and
+pinned MediaPipe observer internally. It reserves and hash-binds the exact
+output identity before arming. The first durable result of successful motion is
+a `STAGED` manifest plus a typed `pending_power_removal` draft after final Home,
+watchdog stop, and interface cleanup; no durable `COMPLETED` manifest exists in
+that state. Only a fresh, hash-bound operator confirmation that master servo
+power is OFF can atomically publish the sole `COMPLETED` manifest. Invalid or
+stale confirmations and transient publication failures do not consume the
+pending capability. Expiry or explicit abandonment publishes sanitized
+`ABORTED` evidence, removes staged data and authority, and cannot later be
+upgraded.
+
+This composition boundary protects against accidental or in-scope experiment
+bypass. It is not a security boundary against arbitrary malicious Python in the
+same process importing low-level adapter classes. OS/process isolation and the
+operator-controlled servo-power switch remain authoritative.
 
 Phase 2 passes when the useful and unreliable observable dimensions are known,
 safe command limits are encoded, and a held-out repeat run reproduces the main

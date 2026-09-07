@@ -1,0 +1,48 @@
+schema_version: identification-config/v1
+run_id: mock-actuator-identification-001
+adapter: mock
+hardware_id: alice-face-v1
+calibration_sha256: 8ad9ad1f59dc70c47515c9a37b4531c5070c22a40ed66fb673d0e72a0d3dadb4
+hardware_manifest_path: hardware/alice-face-v1.yaml
+hardware_manifest_sha256: 626a37d265bc7f2b055682cc1b1d287b1f0d659040d60ef4e5634ee675c05a8a
+hardware_manifest_canonical_sha256: f1f2b5562112a98fdae473d02bd381be3c793e069f03bebdb55a13a5348cf54e
+actuator_names:
+  - neck_rotation
+  - head_tilt
+  - face_pitch
+  - lower_eyelids
+  - upper_eyelids
+  - forehead_frown
+  - mouth_open
+  - right_eye_horizontal
+  - left_mouth_corner
+  - left_eye_horizontal
+  - right_mouth_corner
+offsets: [0.1, -0.1]
+samples_per_step: 10
+command_interval_ms: 1000
+controller_settle_ms: 1000
+visual_settle_ms: 1000
+sample_interval_ms: 100
+step_timeout_ms: 10000
+command_ttl_ms: 500
+maximum_visual_variance: 0.01
+home_delta_tolerances:
+  jawOpen: 0.01
+recovery_timeout_ms: 10000
+maximum_recovery_attempts: 100
+random_seeds: []
+provenance:
+  kind: deterministic-mock
+  source: config/experiments/actuator-identification-mock.yaml
+retention: derived_observations_only
+observer:
+  camera_id: mock-camera
+  detector: mock-detector
+  detector_model_sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  camera_settings:
+    width: {availability: unavailable, value: null, set_succeeded: null}
+    height: {availability: unavailable, value: null, set_succeeded: null}
+    fps: {availability: unavailable, value: null, set_succeeded: null}
+    focus: {availability: unavailable, value: null, set_succeeded: null}
+    exposure: {availability: unavailable, value: null, set_succeeded: null}

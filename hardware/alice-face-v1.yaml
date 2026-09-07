@@ -1,0 +1,191 @@
+schema_version: hardware-manifest/v1
+hardware_id: alice-face-v1
+controller:
+  kind: pololu-maestro
+  serial_number: "00037376"
+  command_device_path: /dev/serial/by-id/usb-Pololu_Corporation_Pololu_Mini_Maestro_12-Channel_USB_Servo_Controller_00037376-if00
+
+evidence:
+  - source: hardware/motor-map.md
+    detail: Operator-confirmed semantic channel mapping dated 2026-08-28.
+  - source: hardware/reference-motor-calibration.md
+    detail: ros2_maestro software calibration and controller export comparison.
+  - source: hardware/maestro-00037376-settings-2026-08-28.txt
+    detail: Read-only controller-resident Min, Home, Max, speed, and acceleration export.
+
+preflight_requirements:
+  - requirement_id: emergency-power-removal-verified
+    description: Operator must identify and functionally verify the emergency power-removal procedure before arming.
+    satisfied: false
+    evidence:
+      - source: hardware/reference-motor-calibration.md
+        detail: No emergency-stop or deterministic disable evidence is documented.
+  - requirement_id: electrical-current-limit-verified
+    description: Electrical supply and per-actuator current limits must be measured or established from reviewed documentation.
+    satisfied: false
+    evidence:
+      - source: hardware/reference-motor-calibration.md
+        detail: No electrical or current-limit facts are documented.
+  - requirement_id: mechanical-clearance-verified
+    description: Operator must inspect clearances and confirm the conservative motion envelope immediately before arming.
+    satisfied: false
+    evidence:
+      - source: hardware/motor-map.md
+        detail: Physical functions are mapped but linkage clearances and safe travel are not established.
+  - requirement_id: channel-10-linkage-inspection
+    description: Operator must inspect and freely move the channel 10 linkage because it previously jammed.
+    satisfied: false
+    evidence:
+      - source: hardware/motor-map.md
+        detail: Channel 10 linkage was manually freed from a jam during mapping.
+  - requirement_id: maestro-command-interface-role-verified
+    description: Operator must independently verify that the recorded interface-00 path is the Maestro command port before arming.
+    satisfied: false
+    evidence:
+      - source: docs/discovery/hardware-inventory.md
+        detail: Read-only udev inventory identified exact interface-00 and interface-02 by-id paths for serial 00037376 but did not functionally verify their roles.
+
+actuators:
+  - name: neck_rotation
+    channel: 0
+    function: Neck rotation
+    software_min_qus: 4928
+    home_qus: 6480
+    software_max_qus: 7808
+    firmware_min_qus: 4928
+    firmware_max_qus: 7808
+    firmware_speed: 20
+    firmware_acceleration: 25
+    inspection_required: false
+    evidence: [{source: hardware/motor-map.md, detail: Channel 0 physical function confirmed during 40% sweep.}, {source: hardware/reference-motor-calibration.md, detail: ros2_maestro and controller values.}]
+  - name: head_tilt
+    channel: 1
+    function: Gimbal left/right used to tilt head
+    software_min_qus: 3712
+    home_qus: 6007
+    software_max_qus: 8000
+    firmware_min_qus: 3712
+    firmware_max_qus: 8000
+    firmware_speed: 25
+    firmware_acceleration: 25
+    inspection_required: false
+    evidence: [{source: hardware/motor-map.md, detail: Channel 1 physical function confirmed; motion slightly janky at slow speed.}, {source: hardware/reference-motor-calibration.md, detail: ros2_maestro and controller values.}]
+  - name: face_pitch
+    channel: 2
+    function: Face up/down
+    software_min_qus: 3712
+    home_qus: 7440
+    software_max_qus: 8000
+    firmware_min_qus: 3712
+    firmware_max_qus: 8832
+    firmware_speed: 25
+    firmware_acceleration: 25
+    inspection_required: false
+    evidence: [{source: hardware/motor-map.md, detail: Channel 2 physical function confirmed during 40% sweep.}, {source: hardware/reference-motor-calibration.md, detail: Software max 8000 differs from firmware max 8832.}]
+  - name: lower_eyelids
+    channel: 3
+    function: Lower eyelids, both eyes
+    software_min_qus: 2880
+    home_qus: 5626
+    software_max_qus: 6400
+    firmware_min_qus: 2880
+    firmware_max_qus: 6400
+    firmware_speed: 0
+    firmware_acceleration: 0
+    inspection_required: false
+    evidence: [{source: hardware/motor-map.md, detail: Channel 3 physical function confirmed during 60% sweep.}, {source: hardware/reference-motor-calibration.md, detail: ros2_maestro and controller values.}]
+  - name: upper_eyelids
+    channel: 4
+    function: Upper eyelids, both eyes
+    software_min_qus: 3840
+    home_qus: 6173
+    software_max_qus: 7232
+    firmware_min_qus: 3840
+    firmware_max_qus: 7232
+    firmware_speed: 0
+    firmware_acceleration: 0
+    inspection_required: false
+    evidence: [{source: hardware/motor-map.md, detail: Channel 4 physical function confirmed during 60% sweep.}, {source: hardware/reference-motor-calibration.md, detail: ros2_maestro and controller values.}]
+  - name: forehead_frown
+    channel: 5
+    function: Forehead frown actuator
+    software_min_qus: 4032
+    home_qus: 5918
+    software_max_qus: 6592
+    firmware_min_qus: 4032
+    firmware_max_qus: 6592
+    firmware_speed: 0
+    firmware_acceleration: 0
+    inspection_required: false
+    evidence: [{source: hardware/motor-map.md, detail: Channel 5 physical function confirmed during 90% sweep.}, {source: hardware/reference-motor-calibration.md, detail: ros2_maestro and controller values.}]
+  - name: mouth_open
+    channel: 6
+    function: Mouth opening; chin up/down
+    software_min_qus: 4608
+    home_qus: 5059
+    software_max_qus: 5440
+    firmware_min_qus: 4608
+    firmware_max_qus: 5440
+    firmware_speed: 0
+    firmware_acceleration: 11
+    decreasing_effect: Closes mouth and moves chin up
+    increasing_effect: Opens mouth and moves chin down
+    inspection_required: false
+    evidence: [{source: hardware/motor-map.md, detail: Channel 6 function and both directions operator-confirmed.}, {source: hardware/reference-motor-calibration.md, detail: ros2_maestro and controller values.}]
+  - name: right_eye_horizontal
+    channel: 8
+    function: Right-eye horizontal movement
+    software_min_qus: 5632
+    home_qus: 6000
+    software_max_qus: 6144
+    firmware_min_qus: 5632
+    firmware_max_qus: 6144
+    firmware_speed: 50
+    firmware_acceleration: 10
+    decreasing_effect: Looks right
+    increasing_effect: Looks left
+    inspection_required: false
+    evidence: [{source: hardware/motor-map.md, detail: Channel 8 function and both directions operator-confirmed.}, {source: hardware/reference-motor-calibration.md, detail: ros2_maestro and controller values.}]
+  - name: left_mouth_corner
+    channel: 9
+    function: Left mouth corner, vertical smile/frown
+    software_min_qus: 5120
+    home_qus: 6499
+    software_max_qus: 6912
+    firmware_min_qus: 5120
+    firmware_max_qus: 6912
+    firmware_speed: 50
+    firmware_acceleration: 10
+    decreasing_effect: Lowers corner (frown)
+    increasing_effect: Raises corner (smile)
+    inspection_required: false
+    evidence: [{source: hardware/motor-map.md, detail: Channel 9 function and corrected polarity operator-confirmed.}, {source: hardware/reference-motor-calibration.md, detail: ros2_maestro and controller values.}]
+  - name: left_eye_horizontal
+    channel: 10
+    function: Left-eye horizontal movement
+    software_min_qus: 5696
+    home_qus: 6000
+    software_max_qus: 6400
+    firmware_min_qus: 5696
+    firmware_max_qus: 6400
+    firmware_speed: 50
+    firmware_acceleration: 10
+    decreasing_effect: Looks right
+    increasing_effect: Looks left
+    inspection_required: true
+    preflight_requirement_ids: [channel-10-linkage-inspection]
+    evidence: [{source: hardware/motor-map.md, detail: Channel 10 function and directions confirmed; linkage manually freed from a jam.}, {source: hardware/reference-motor-calibration.md, detail: ros2_maestro and controller values.}]
+  - name: right_mouth_corner
+    channel: 11
+    function: Right mouth corner, vertical smile/frown
+    software_min_qus: 5120
+    home_qus: 5524
+    software_max_qus: 6912
+    firmware_min_qus: 5120
+    firmware_max_qus: 6912
+    firmware_speed: 50
+    firmware_acceleration: 10
+    decreasing_effect: Raises corner (smile)
+    increasing_effect: Lowers corner (frown)
+    inspection_required: false
+    evidence: [{source: hardware/motor-map.md, detail: Channel 11 function and corrected polarity operator-confirmed.}, {source: hardware/reference-motor-calibration.md, detail: ros2_maestro and controller values.}]

@@ -1,0 +1,85 @@
+run_id: "passive-alice-face-c920-comparison-template"
+camera_id: "usb-046d_HD_Pro_Webcam_C920_BF4BEEAF-video-index0"
+camera_device: "/dev/v4l/by-id/usb-046d_HD_Pro_Webcam_C920_BF4BEEAF-video-index0"
+requested_width: 1280
+requested_height: 720
+requested_fps: 10
+duration_seconds: 120
+sample_count: 1200
+sample_interval_ms: 100
+maximum_observation_age_ms: 250
+retain_frames: false
+retention_policy:
+  policy_id: "derived-observations-365d"
+  mode: "derived_observations_only"
+  retention_duration_days: 365
+acceptance_thresholds:
+  minimum_detection_rate: 0.995
+  categories:
+    browOuterUpLeft:
+      maximum_standard_deviation: 0.052
+      maximum_percentile_range: 0.047
+      maximum_warmup_drift: 0.002
+    browInnerUp:
+      maximum_standard_deviation: 0.036
+      maximum_percentile_range: 0.077
+      maximum_warmup_drift: 0.006
+    browOuterUpRight:
+      maximum_standard_deviation: 0.041
+      maximum_percentile_range: 0.078
+      maximum_warmup_drift: 0.008
+    eyeLookDownLeft:
+      maximum_standard_deviation: 0.046
+      maximum_percentile_range: 0.131
+      maximum_warmup_drift: 0.064
+    eyeLookDownRight:
+      maximum_standard_deviation: 0.047
+      maximum_percentile_range: 0.147
+      maximum_warmup_drift: 0.032
+    mouthSmileLeft:
+      maximum_standard_deviation: 0.058
+      maximum_percentile_range: 0.151
+      maximum_warmup_drift: 0.024
+    mouthSmileRight:
+      maximum_standard_deviation: 0.038
+      maximum_percentile_range: 0.126
+      maximum_warmup_drift: 0.024
+    eyeWideRight:
+      maximum_standard_deviation: 0.059
+      maximum_percentile_range: 0.167
+      maximum_warmup_drift: 0.070
+    mouthPucker:
+      maximum_standard_deviation: 0.044
+      maximum_percentile_range: 0.111
+      maximum_warmup_drift: 0.015
+setup:
+  camera_id: "usb-046d_HD_Pro_Webcam_C920_BF4BEEAF-video-index0"
+  stable_camera_identity: "Logitech HD Pro Webcam C920, USB serial BF4BEEAF, video-index0"
+  alice_full_face_confirmed: true
+  participant_exclusion_confirmed: true
+  confirmation:
+    confirmed_at: "2026-09-02T06:42:54Z"
+    source: "Operator reviewed the live C920 overlay on Alice, confirmed a sharper image, and reported comparable landmark wiggle"
+  lighting:
+    state: "confirmed"
+    detail: "Added diffuse light; operator corrected visible flicker before this comparison and reported residual sensor noise"
+  placement:
+    state: "confirmed"
+    detail: "C920 repositioned toward Alice with her full face tracked in the live overlay"
+  focus:
+    state: "confirmed"
+    detail: "V4L2 readback after auto-settle and separate lock transactions: focus_automatic_continuous=0 and focus_absolute=50"
+  exposure:
+    state: "confirmed"
+    detail: "V4L2 readback after auto-settle: auto_exposure=1 (manual), exposure_time_absolute=100, exposure_dynamic_framerate=0, white_balance_automatic=0, white_balance_temperature=3277, gain=0, power_line_frequency=1 (50 Hz)"
+repeatability_thresholds:
+  maximum_mean_delta:
+    browOuterUpLeft: 0.017
+    browInnerUp: 0.024
+    browOuterUpRight: 0.010
+    eyeLookDownLeft: 0.001
+    eyeLookDownRight: 0.004
+    mouthSmileLeft: 0.046
+    mouthSmileRight: 0.052
+    eyeWideRight: 0.001
+    mouthPucker: 0.012

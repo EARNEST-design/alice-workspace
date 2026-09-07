@@ -12,6 +12,8 @@ build/
 .env
 .env.*
 !.env.example
+/data/
+/artifacts/
 data/raw/
 artifacts/
 checkpoints/
@@ -19,4 +21,7 @@ checkpoints/
 *.pt
 *.pth
 *.engine
+*.task
+*.tflite
+*.binarypb
 hardware/calibration/local/

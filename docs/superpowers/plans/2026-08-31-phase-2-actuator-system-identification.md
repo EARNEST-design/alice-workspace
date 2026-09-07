@@ -13,6 +13,8 @@
 ## Global Constraints
 
 - Mock and replay adapters are the defaults; importing or constructing an adapter never opens a serial device.
+- Hardware completion is a three-stage prepare/execute/finalize lifecycle; execute first reserves the output before arming, durably publishes only `STAGED` evidence, and returns a `pending_power_removal` capability. Only a fresh bound power-OFF confirmation publishes the sole `COMPLETED` manifest. Invalid confirmations and transient publication failures remain retryable; expiry or abandonment publishes non-upgradable `ABORTED` evidence.
+- The hardware root constructs the exact C525/MediaPipe observer internally; low-level Python APIs are not a malicious in-process security boundary.
 - No hardware task runs without a separately reviewed bring-up procedure and contemporaneous user approval.
 - Commands use semantic actuator names and carry schema, calibration, timestamp, expiry, and run identity.
 - Dimension mismatch, non-finite values, stale commands, unknown identities, and out-of-limit targets fail closed.
@@ -142,8 +144,18 @@ git commit -m "feat: add mock-first Maestro actuator adapters"
 - Create: `tests/experiments/test_system_identification.py`
 
 **Interfaces:**
-- Consumes: Phase 1 observer, `SafetySupervisor`, and `ActuatorAdapter`.
-- Produces: `IdentificationConfig`, `IdentificationStep`, and `run_identification(config, observer, supervisor, adapter, output_dir, clock, sleeper) -> ArtifactManifest`.
+- Consumes: Phase 1 observer and `SafetySupervisor`; the public mock root
+  constructs the exact `MockActuatorAdapter` internally.
+- Produces: `IdentificationConfig`, `IdentificationStep`, and
+  `run_mock_identification(config, observer, supervisor, output_dir, clock,
+  sleeper) -> ArtifactManifest`.
+- Keeps the deterministic execution core private so a later trusted
+  composition root may reuse it without exposing arbitrary adapter injection.
+
+This supersedes the original generic `run_identification(..., adapter, ...)`
+signature. Review demonstrated that a caller-supplied adapter could delegate to
+hardware while presenting mock provenance, so no public composition root may
+accept an arbitrary adapter object or adapter factory.
 
 - [ ] **Step 1: Write failing end-to-end mock tests**
 
@@ -157,7 +169,11 @@ Expected: FAIL because the runner does not exist.
 
 - [ ] **Step 3: Implement the runner as a deterministic step machine**
 
-Inject clock, sleeper, observer, supervisor, and adapter. Store commands, observed positions, blendshape observations, settling samples, transitions, and faults in append-only JSONL artifacts with checksums. The mock configuration exercises all mapped channels but cannot select the Maestro adapter.
+Inject clock, sleeper, observer, and supervisor; construct the exact mock
+adapter inside the public mock root. Store commands, observed positions,
+blendshape observations, settling samples, transitions, and faults in
+append-only JSONL artifacts with checksums. The mock configuration exercises
+all mapped channels but cannot select the Maestro adapter.
 
 - [ ] **Step 4: Verify and commit**
 
@@ -194,6 +210,11 @@ Expected: FAIL because analysis does not exist.
 
 Use session-grouped samples, preserve actuator and blendshape names, emit NumPy arrays only internally, and serialize named matrices with explicit row/column labels. Report uncertainty rather than replacing missing effects with zero.
 
+Use the versioned population variance definition (`ddof=0`) consistently.
+Serialize named monotonicity, one-sided slope asymmetry, and outer/inner slope
+saturation formulas. A single-magnitude protocol must report saturation as
+typed missing/inconclusive.
+
 - [ ] **Step 4: Verify and commit**
 
 Run: `uv run pytest tests/analysis/test_system_identification.py -v && uv run ruff check src tests && uv run mypy src`
@@ -214,7 +235,14 @@ git commit -m "feat: analyze actuator blendshape effects"
 
 **Interfaces:**
 - Consumes: the tested Phase 2 implementation and verified Phase 1 conclusion.
-- Produces: a run-specific preflight checklist, conservative offsets, abort criteria, and recovery procedure.
+- Produces: a run-specific preflight checklist, conservative offsets, abort
+  criteria, recovery procedure, and a separate capability-gated hardware
+  composition/entrypoint that constructs the exact Maestro adapter from the
+  reviewed configuration. It accepts no arbitrary adapter object or factory,
+  though it may reuse Task 4's private deterministic core.
+
+The hardware composition must own an independent watchdog and permit-revocation
+path; process-local clock failure cannot be allowed to preserve motion authority.
 
 - [ ] **Step 1: Draft the procedure from verified manifests**
 

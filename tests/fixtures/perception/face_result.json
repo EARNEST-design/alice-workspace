@@ -1,0 +1,15 @@
+{
+  "face_confidence": 0.88,
+  "face_blendshapes": [
+    [
+      {
+        "category_name": "jawOpen",
+        "score": 0.2
+      },
+      {
+        "category_name": "eyeBlinkLeft",
+        "score": 0.1
+      }
+    ]
+  ]
+}

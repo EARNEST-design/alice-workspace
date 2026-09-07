@@ -1,0 +1,37 @@
+run_id: "passive-alice-face-2026-08-31"
+camera_id: "usb-046d_HD_Webcam_C525_REPLACE_SERIAL-video-index0"
+camera_device: "/dev/v4l/by-id/usb-046d_HD_Webcam_C525_REPLACE_SERIAL-video-index0"
+requested_width: 640
+requested_height: 480
+requested_fps: 10
+duration_seconds: 120
+sample_count: 1200
+sample_interval_ms: 100
+maximum_observation_age_ms: 250
+retain_frames: false
+retention_policy:
+  policy_id: "derived-observations-365d"
+  mode: "derived_observations_only"
+  retention_duration_days: 365
+setup:
+  camera_id: "alice-face-camera-stable-id"
+  stable_camera_identity: "REQUIRED: stable Alice-facing camera USB identity"
+  alice_full_face_confirmed: true
+  participant_exclusion_confirmed: true
+  confirmation:
+    confirmed_at: "2026-08-31T00:00:00Z"
+    source: "REQUIRED: operator preview or reviewed setup record"
+  lighting:
+    state: "unknown"
+    detail: "REQUIRED: record lighting, or why it cannot be measured"
+  placement:
+    state: "unknown"
+    detail: "REQUIRED: record distance/height/angle, or why unavailable"
+  focus:
+    state: "unknown"
+    detail: "REQUIRED: record actual focus state, or why unavailable"
+  exposure:
+    state: "unknown"
+    detail: "REQUIRED: record actual exposure state, or why unavailable"
+repeatability_thresholds:
+  maximum_mean_delta: {}
