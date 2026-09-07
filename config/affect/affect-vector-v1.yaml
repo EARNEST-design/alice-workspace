@@ -1,0 +1,5 @@
+schema_id: affect-vector/v1
+dimensions:
+  - valence
+  - arousal
+  - dominance
