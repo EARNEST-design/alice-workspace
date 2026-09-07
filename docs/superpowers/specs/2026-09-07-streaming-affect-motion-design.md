@@ -37,6 +37,30 @@ inferring a person's true internal emotional state.
 - Direct model authority over actuators.
 - Hardware model trials without a separate reviewed procedure and approval.
 
+## Research operating mode
+
+This work begins as exploratory research, so process must scale with risk and
+with the strength of the claim. Records exist to make useful results
+reproducible and unsafe actions explicit, not to require production ceremony for
+every notebook, plot, or discarded idea.
+
+- A disposable mock or replay spike needs a small captured config, seed where
+  relevant, input-data reference, and a short keep/discard note.
+- A result used to choose an architecture or reported as evidence additionally
+  needs immutable split and artifact identities, comparable metrics, and a
+  concise conclusion.
+- A retained dataset needs provenance and consent constraints. Identifiable
+  human media always keeps its access, retention, and permitted-use record.
+- A human study needs a stable rating protocol when its results support a model
+  claim; informal lab feedback may guide iteration but is labeled as such.
+- A hardware run keeps the repository's explicit actuation approval and bring-up
+  boundary. Routine model hacking remains in mock, simulation, or replay.
+
+Model cards, extensive reports, and promotion reviews are created for retained
+candidates and decision-grade results, not for every exploratory run. Templates
+should stay short, automation should fill mechanical metadata, and a negative or
+discarded experiment may end with one paragraph.
+
 ## Affect representation
 
 `AffectIntent` contains:
@@ -186,8 +210,10 @@ Participant and session identifiers are pseudonymous in model-facing data.
 Train, validation, and test splits are grouped by participant and capture
 session. Adjacent windows from an episode never cross splits. Predeclared regions
 of affect space are also held out to test interpolation and support detection.
-Every dataset records source checksums, preprocessing, schema and calibration
-identities, split membership, consent constraints, and immutable provenance.
+Every retained dataset records source checksums, preprocessing, schema and
+calibration identities, split membership, consent constraints, and immutable
+provenance. Disposable derived fixtures may use a compact manifest but must
+still identify their source and permitted use.
 
 ## Training strategy
 
@@ -205,9 +231,10 @@ Training is staged so each source of complexity can be measured:
    objective and replay gates pass.
 
 Rating disagreement is preserved as a distribution. Models are not trained to
-erase ambiguity or convert cluster annotations into ground truth. Every run
-records the dataset and split identities, configuration, seed, code revision,
-dependency lock, model artifact checksum, metrics, and a conclusion.
+erase ambiguity or convert cluster annotations into ground truth. Decision-grade
+runs record dataset and split identities, configuration, seed, code revision,
+dependency lock, model artifact checksum, metrics, and a conclusion. Early
+spikes use the compact research record defined above.
 
 ## Evaluation
 
@@ -291,8 +318,9 @@ automatic workflow.
 The implementation plan derived from this design will cover contracts,
 controller-response modeling, dataset manifests, baselines, stateful generation,
 face events, neck primitives and scheduling, evaluation, packaging, and
-simulation integration. Each experiment gets a versioned config, metrics,
-artifact manifest, model card where applicable, and short conclusion.
+simulation integration. Retained experiments get a versioned config, metrics,
+artifact manifest, model card where applicable, and short conclusion; disposable
+spikes use the compact record described in the research operating mode.
 
 Durable specifications and implementation plans live under `docs/superpowers/`
 and are committed. Temporary visual-companion state lives under `.superpowers/`

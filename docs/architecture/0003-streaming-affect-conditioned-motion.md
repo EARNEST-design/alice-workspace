@@ -69,6 +69,10 @@ model, safety boundary, human-rating protocol, and reproducibility requirements.
 
 ## Consequences
 
+- Research process scales with the claim being made. Disposable mock/replay
+  spikes need only enough metadata to reproduce or discard them; retained
+  datasets, comparative results, human studies, and hardware runs require the
+  fuller evidence record appropriate to their risk.
 - The model learns commands in the context of the controller's interpolation,
   rather than pretending to command instantaneous poses.
 - Controlled variation is reproducible from the intent stream, model identity,
