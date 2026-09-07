@@ -172,3 +172,13 @@ def test_versioned_config_loads_without_hardware_access() -> None:
     assert config.feature_size == (
         len(config.affect_dimensions) + 3 * len(config.actuator_names) + 2
     )
+
+
+def test_forward_rejects_non_finite_parameters() -> None:
+    model = ResidualStateSpace(_config())
+    with torch.no_grad():
+        next(model.parameters()).view(-1)[0] = float("inf")
+    features = torch.zeros((1, 1, model.config.feature_size))
+
+    with pytest.raises(ValueError, match="finite"):
+        model(features, None)

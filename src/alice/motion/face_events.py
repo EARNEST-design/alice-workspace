@@ -421,6 +421,35 @@ class FaceEventGenerator:
         self._validate_history_rules(restored.history)
         return restored
 
+    def compact_state(self, state: FaceEventState) -> FaceEventState:
+        """Keep active/planned events and the last completed event per kind."""
+
+        retained: list[FaceEvent] = [
+            event
+            for event in state.history
+            if event.ends_monotonic_ns > state.monotonic_ns
+        ]
+        for kind in FaceEventKind:
+            completed = [
+                event
+                for event in state.history
+                if event.kind is kind and event.ends_monotonic_ns <= state.monotonic_ns
+            ]
+            if completed:
+                retained.append(
+                    max(completed, key=lambda event: event.ends_monotonic_ns)
+                )
+        return state.model_copy(
+            update={
+                "history": tuple(
+                    sorted(
+                        {event.event_id: event for event in retained}.values(),
+                        key=lambda event: (event.starts_monotonic_ns, event.event_id),
+                    )
+                )
+            }
+        )
+
     def sample(
         self,
         intent: FilteredIntent,

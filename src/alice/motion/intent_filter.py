@@ -50,9 +50,7 @@ class IntentFilterConfig(BaseModel):
     @model_validator(mode="after")
     def validate_support_geometry(self) -> IntentFilterConfig:
         if self.supported_max_distance > self.interpolated_max_distance:
-            raise ValueError(
-                "supported distance must not exceed interpolated distance"
-            )
+            raise ValueError("supported distance must not exceed interpolated distance")
         width = len(self.coordinate_scales)
         if any(
             len(coordinate) != width
@@ -171,9 +169,7 @@ class IntentFilter:
             old + alpha * (requested - old)
             for old, requested in zip(previous.vector, intent.vector, strict=True)
         )
-        intensity = previous.intensity + alpha * (
-            intent.intensity - previous.intensity
-        )
+        intensity = previous.intensity + alpha * (intent.intensity - previous.intensity)
         return FilteredIntent(
             schema_version="filtered-intent/v1",
             affect_schema_id=self._schema.schema_id,

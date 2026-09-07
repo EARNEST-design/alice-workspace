@@ -14,6 +14,11 @@ from alice.models.residual_state_space import (
     ResidualStateSpace,
     ResidualStateSpaceConfig,
 )
+from alice.motion.controller_response import (
+    ActuatorResponseParameters,
+    ControllerLimitMode,
+    ControllerResponseConfig,
+)
 from alice.training.residual import (
     ResidualDataset,
     ResidualLossWeights,
@@ -91,7 +96,7 @@ def _training_config(path: Path, *, seed: int = 19) -> ResidualTrainingConfig:
         epochs=2,
         learning_rate=0.01,
         rollout_steps=3,
-        response_rate_per_s=4.0,
+        controller_response_config=_controller_config(),
         artifact_directory=path,
         disposition="keep",
         note="Tiny CPU reproducibility fixture; not evidence for model selection.",
@@ -104,6 +109,35 @@ def _training_config(path: Path, *, seed: int = 19) -> ResidualTrainingConfig:
             realized_acceleration=0.05,
             realized_jerk=0.02,
         ),
+    )
+
+
+def _controller_config() -> ControllerResponseConfig:
+    def actuator(
+        name: str, velocity: float, acceleration: float
+    ) -> ActuatorResponseParameters:
+        return ActuatorResponseParameters(
+            actuator_name=name,
+            firmware_speed_setting=1,
+            firmware_acceleration_setting=1,
+            speed_mode=ControllerLimitMode.CONTROLLER_LIMITED,
+            acceleration_mode=ControllerLimitMode.CONTROLLER_LIMITED,
+            max_velocity_per_s=velocity,
+            max_acceleration_per_s2=acceleration,
+            provenance="Synthetic training response fixture.",
+        )
+
+    return ControllerResponseConfig(
+        schema_version="controller-response-config/v1",
+        model_id="controller-response-test-v1",
+        hardware_id="synthetic-v1",
+        calibration_sha256="a" * 64,
+        model_kind="piecewise-acceleration-speed-limited",
+        actuators=(
+            actuator("mouth_open", 1.2, 4.0),
+            actuator("neck_rotation", 0.4, 1.0),
+        ),
+        provenance="Synthetic training response fixture.",
     )
 
 
@@ -259,7 +293,7 @@ def test_recurrent_rollout_feeds_predicted_response_into_later_steps() -> None:
         model,
         dataset,
         steps=2,
-        response_rate_per_s=4.0,
+        controller_response_config=_controller_config(),
     )
     first_features = model.compose_features(
         affect=dataset.affect[:, :1],
@@ -279,10 +313,9 @@ def test_recurrent_rollout_feeds_predicted_response_into_later_steps() -> None:
         elapsed_s=dataset.elapsed_s[:, 1:2],
     )
     teacher_second, _ = model(teacher_second_features, hidden=first_hidden)
-    blend = 1.0 - torch.exp(torch.tensor(-0.4))
-    expected_first_neck_position = 0.09 + blend * (
-        0.1 + rollout.residuals[0, 0, 1] - 0.09
-    )
+    # The per-axis 1.0/s² acceleration setting permits 0.01 normalized travel
+    # during this first 0.1 s step; no invented global response rate is used.
+    expected_first_neck_position = torch.tensor(0.1)
 
     assert float(rollout.realized_position[0, 0, 1].detach()) == pytest.approx(
         float(expected_first_neck_position.detach())

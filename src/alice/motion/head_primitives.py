@@ -96,6 +96,7 @@ class HeadGesture(BaseModel):
     hold_s: NonNegativeFloat
     recovery_s: FinitePositiveFloat
     recovery_targets: tuple[ActuatorTarget, ...] = Field(min_length=1)
+    initial_targets: tuple[ActuatorTarget, ...] = ()
 
     @model_validator(mode="after")
     def validate_parameters(self) -> HeadGesture:
@@ -110,6 +111,9 @@ class HeadGesture(BaseModel):
         names = [target.actuator_name for target in self.recovery_targets]
         if len(names) != len(set(names)):
             raise ValueError("head gesture recovery targets must be unique")
+        initial_names = [target.actuator_name for target in self.initial_targets]
+        if initial_names and initial_names != names:
+            raise ValueError("head gesture initial targets must match recovery order")
         return self
 
     @property
@@ -223,6 +227,61 @@ class HeadPrimitiveGenerator:
             schema_version="target-update-horizon/v1",
             updates=tuple(updates),
         )
+
+    def render_window(
+        self,
+        gesture: HeadGesture,
+        *,
+        window_start_ns: int,
+        horizon_s: float,
+    ) -> TargetUpdateHorizon:
+        """Render an absolute slice from the original persisted gesture pose."""
+
+        if not gesture.initial_targets:
+            raise ValueError("resumable head gesture is missing its initial pose")
+        elapsed_s = (
+            window_start_ns - gesture.starts_monotonic_ns
+        ) / _NANOSECONDS_PER_SECOND
+        if elapsed_s < 0.0:
+            raise ValueError("head gesture window precedes gesture start")
+        original = TargetUpdate(offset_s=0.0, targets=gesture.initial_targets)
+        full = self.render(gesture, original)
+        end_s = elapsed_s + horizon_s
+        offsets = {elapsed_s, min(end_s, full.updates[-1].offset_s)}
+        offsets.update(
+            update.offset_s
+            for update in full.updates
+            if elapsed_s <= update.offset_s <= end_s
+        )
+        updates = tuple(
+            TargetUpdate(
+                offset_s=absolute_s - elapsed_s,
+                targets=tuple(
+                    ActuatorTarget(actuator_name=name, normalized_position=value)
+                    for name, value in self._positions_at(full, absolute_s).items()
+                ),
+            )
+            for absolute_s in sorted(offsets)
+        )
+        return TargetUpdateHorizon(
+            schema_version="target-update-horizon/v1", updates=updates
+        )
+
+    @staticmethod
+    def _positions_at(horizon: TargetUpdateHorizon, at_s: float) -> dict[str, float]:
+        prior = horizon.updates[0]
+        for update in horizon.updates[1:]:
+            if update.offset_s >= at_s:
+                span = update.offset_s - prior.offset_s
+                phase = 0.0 if span == 0.0 else (at_s - prior.offset_s) / span
+                right = {t.actuator_name: t.normalized_position for t in update.targets}
+                return {
+                    target.actuator_name: target.normalized_position
+                    + (right[target.actuator_name] - target.normalized_position) * phase
+                    for target in prior.targets
+                }
+            prior = update
+        return {t.actuator_name: t.normalized_position for t in prior.targets}
 
     def minimum_transition_s(self, actuator_name: str, distance: float) -> float:
         """Return time needed to keep a quintic within controller derivatives."""

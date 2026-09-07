@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 from enum import StrEnum
 from pathlib import Path
@@ -104,6 +106,21 @@ class ControllerResponseConfig(BaseModel):
                 return parameters
         raise ValueError(f"unknown controller-response actuator: {actuator_name!r}")
 
+    @property
+    def controller_settings_sha256(self) -> str:
+        """Hash the actual ordered firmware settings embedded in this config."""
+
+        settings = [
+            {
+                "actuator_name": item.actuator_name,
+                "firmware_speed_setting": item.firmware_speed_setting,
+                "firmware_acceleration_setting": item.firmware_acceleration_setting,
+            }
+            for item in self.actuators
+        ]
+        encoded = json.dumps(settings, sort_keys=True, separators=(",", ":")).encode()
+        return hashlib.sha256(encoded).hexdigest()
+
 
 class ControllerState(BaseModel):
     """Estimated normalized output state for one semantic actuator."""
@@ -153,8 +170,7 @@ class ControllerResponse:
         target_position = matching_targets[0].normalized_position
         if abs(state.velocity) > parameters.max_velocity_per_s:
             raise ValueError(
-                f"state velocity exceeds configured limit for "
-                f"{state.actuator_name!r}"
+                f"state velocity exceeds configured limit for {state.actuator_name!r}"
             )
         distance = target_position - state.position
         if distance == 0.0:
@@ -170,9 +186,7 @@ class ControllerResponse:
             outward_excursion = initial_speed**2 / (2.0 * acceleration_limit)
             turnaround_position = state.position - direction * outward_excursion
             if not -1.0 <= turnaround_position <= 1.0:
-                raise ValueError(
-                    "reversal braking would cross a normalized endpoint"
-                )
+                raise ValueError("reversal braking would cross a normalized endpoint")
         stopping_distance = (
             initial_speed**2 / (2.0 * acceleration_limit)
             if initial_speed > 0.0
@@ -329,9 +343,7 @@ class ControllerResponse:
     @staticmethod
     def _require_internal_tolerance(error: float, *, boundary: str) -> None:
         if error > _KINEMATIC_TOLERANCE:
-            raise RuntimeError(
-                f"controller solver crossed {boundary} by {error!r}"
-            )
+            raise RuntimeError(f"controller solver crossed {boundary} by {error!r}")
 
     @staticmethod
     def _trajectory_segments(
@@ -344,21 +356,17 @@ class ControllerResponse:
         """Return time/acceleration segments ending at rest on the target."""
 
         stopping_distance = (
-            initial_speed**2 / (2.0 * acceleration)
-            if initial_speed > 0.0
-            else 0.0
+            initial_speed**2 / (2.0 * acceleration) if initial_speed > 0.0 else 0.0
         )
         if stopping_distance == distance:
             return ((initial_speed / acceleration, -acceleration),)
 
-        unconstrained_peak = math.sqrt(
-            acceleration * distance + 0.5 * initial_speed**2
-        )
+        unconstrained_peak = math.sqrt(acceleration * distance + 0.5 * initial_speed**2)
         peak_speed = min(max_speed, unconstrained_peak)
         acceleration_s = (peak_speed - initial_speed) / acceleration
-        acceleration_distance = (
-            peak_speed**2 - initial_speed**2
-        ) / (2.0 * acceleration)
+        acceleration_distance = (peak_speed**2 - initial_speed**2) / (
+            2.0 * acceleration
+        )
         braking_s = peak_speed / acceleration
         braking_distance = peak_speed**2 / (2.0 * acceleration)
         cruise_distance = max(

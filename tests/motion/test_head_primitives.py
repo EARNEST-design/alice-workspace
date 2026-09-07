@@ -126,6 +126,24 @@ def test_primitive_starts_at_state_and_returns_to_recovery_targets(
     )
 
 
+def test_long_gesture_resumes_from_persisted_original_pose_and_phase() -> None:
+    state = _state(face_pitch=0.02)
+    gesture = _gesture(HeadGestureKind.NOD, duration_s=3.2).model_copy(
+        update={"initial_targets": state.targets}
+    )
+    first = _primitives().render_window(gesture, window_start_ns=0, horizon_s=0.4)
+    second = _primitives().render_window(
+        gesture, window_start_ns=400_000_000, horizon_s=0.4
+    )
+    full = _primitives().render(gesture, state)
+
+    assert first.updates[-1].targets == second.updates[0].targets
+    expected = next(update for update in full.updates if update.offset_s == 0.6)
+    resumed = min(second.updates, key=lambda update: abs(update.offset_s - 0.2))
+    assert resumed.offset_s == pytest.approx(0.2)
+    assert resumed.targets == expected.targets
+
+
 @pytest.mark.parametrize(
     ("kind", "active_name"),
     [

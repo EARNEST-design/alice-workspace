@@ -35,6 +35,7 @@ from alice.models.residual_state_space import (
     ResidualStateSpace,
     ResidualStateSpaceConfig,
 )
+from alice.motion.anchors import AnchorPlanner, ProceduralMotionConfig
 from alice.motion.controller_response import (
     ActuatorResponseParameters,
     ControllerResponse,
@@ -45,10 +46,12 @@ from alice.motion.face_events import (
     FaceEventGenerator,
     FaceEventPolicy,
 )
+from alice.motion.streaming import ProductionCandidateComposer
 
 _WEIGHTS_PATH = "weights/residual.safetensors"
 _TRAINING_RECORD_PATH = "records/training.json"
 _CONFIG_PATHS = {
+    "anchor": "configs/anchor.json",
     "controller_response": "configs/controller_response.json",
     "face_events": "configs/face_events.json",
     "head_gestures": "configs/head_gestures.json",
@@ -134,7 +137,7 @@ class ResidualTrainingSettings(BaseModel):
     epochs: Annotated[StrictInt, Field(ge=1, le=_MAX_EPOCHS)]
     learning_rate: Annotated[StrictFloat, Field(gt=0.0, le=1.0, allow_inf_nan=False)]
     rollout_steps: Annotated[StrictInt, Field(ge=2, le=_MAX_ROLLOUT_STEPS)]
-    response_rate_per_s: FinitePositiveRate
+    controller_settings_sha256: Sha256Hex
     loss_weights: ResidualTrainingLossWeights
 
 
@@ -238,6 +241,7 @@ class MotionModelComponents(BaseModel):
     face_event_config: FaceEventConfig
     head_gesture_config: HeadGestureConfig
     controller_response_config: ControllerResponseConfig
+    anchor_config: ProceduralMotionConfig
 
 
 class MotionModelMetadata(BaseModel):
@@ -295,6 +299,7 @@ class LoadedMotionModel:
     training_record: ResidualTrainingRecord
     metrics_reference: str
     seed_policy: SeedPolicy
+    candidate_composer: ProductionCandidateComposer
 
 
 def save_package(
@@ -310,6 +315,7 @@ def save_package(
     components = _revalidate_components(components)
     weights_bytes = _read_regular_bytes(components.weights)
     weights = load(weights_bytes)
+    _validate_finite_weights(weights)
     weights_sha256 = _sha256_bytes(weights_bytes)
     _validate_components(components, metadata.identities)
     training_record = _validate_training_record(
@@ -330,6 +336,9 @@ def save_package(
         staged = Path(temporary) / package_path.name
         staged.mkdir()
         artifact_bytes = {
+            _CONFIG_PATHS["anchor"]: _encode_json(
+                components.anchor_config.model_dump(mode="json")
+            ),
             _CONFIG_PATHS["residual"]: _encode_json(
                 components.residual_config.model_dump(mode="json")
             ),
@@ -390,6 +399,9 @@ def load_package(
     residual_config = ResidualStateSpaceConfig.model_validate(
         _decode_json(snapshot[_CONFIG_PATHS["residual"]], label="residual config")
     )
+    anchor_config = ProceduralMotionConfig.model_validate(
+        _decode_json(snapshot[_CONFIG_PATHS["anchor"]], label="anchor config")
+    )
     face_event_config = FaceEventConfig.model_validate(
         _decode_json(snapshot[_CONFIG_PATHS["face_events"]], label="face-event config")
     )
@@ -410,6 +422,7 @@ def load_package(
         face_event_config=face_event_config,
         head_gesture_config=head_gesture_config,
         controller_response_config=controller_config,
+        anchor_config=anchor_config,
     )
     _validate_components(components, manifest.identities)
 
@@ -420,6 +433,7 @@ def load_package(
         seed_policy=manifest.seed_policy,
     )
     weights = load(snapshot[_WEIGHTS_PATH])
+    _validate_finite_weights(weights)
 
     residual_model = ResidualStateSpace(residual_config)
     residual_model.load_state_dict(weights, strict=True)
@@ -433,6 +447,13 @@ def load_package(
         config=head_gesture_config,
         controller_config=controller_config,
     )
+    candidate_composer = ProductionCandidateComposer(
+        anchor_planner=AnchorPlanner(config=anchor_config),
+        residual_model=residual_model,
+        face_events=face_event_generator,
+        head_scheduler=head_gesture_scheduler,
+        controller_response=controller_response,
+    )
     return LoadedMotionModel(
         identities=manifest.identities,
         residual_model=residual_model,
@@ -442,6 +463,7 @@ def load_package(
         training_record=training_record,
         metrics_reference=manifest.metrics_reference,
         seed_policy=manifest.seed_policy,
+        candidate_composer=candidate_composer,
     )
 
 
@@ -472,6 +494,21 @@ def _validate_components(
             identities.controller_settings_sha256,
         )
     _require_identity(
+        "affect schema",
+        components.anchor_config.affect_schema_id,
+        identities.affect_schema_id,
+    )
+    _require_identity(
+        "calibration",
+        components.anchor_config.calibration_sha256,
+        identities.calibration_sha256,
+    )
+    _require_identity(
+        "controller settings",
+        components.anchor_config.controller_settings_sha256,
+        identities.controller_settings_sha256,
+    )
+    _require_identity(
         "controller-response model",
         components.controller_response_config.model_id,
         identities.controller_response_model_id,
@@ -481,10 +518,17 @@ def _validate_components(
         components.controller_response_config.calibration_sha256,
         identities.calibration_sha256,
     )
+    if (
+        components.controller_response_config.controller_settings_sha256
+        != identities.controller_settings_sha256
+    ):
+        raise ValueError("embedded controller settings identity mismatch")
     response_actuators = tuple(
         actuator.actuator_name
         for actuator in components.controller_response_config.actuators
     )
+    if components.anchor_config.semantic_actuator_names != response_actuators:
+        raise ValueError("anchor and controller-response actuator identities mismatch")
     if components.residual_config.actuator_names != response_actuators:
         raise ValueError(
             "residual and controller-response actuator identities mismatch"
@@ -555,6 +599,9 @@ def _revalidate_components(components: MotionModelComponents) -> MotionModelComp
             ),
             controller_response_config=ControllerResponseConfig.model_validate(
                 components.controller_response_config.model_dump(mode="python")
+            ),
+            anchor_config=ProceduralMotionConfig.model_validate(
+                components.anchor_config.model_dump(mode="python")
             ),
         )
     except ValidationError as error:
@@ -686,6 +733,11 @@ def _validate_training_record(
         raise ValueError("training record model config identity mismatch")
     if validated.run.seed != seed_policy.training_seed:
         raise ValueError("training record seed and package seed policy mismatch")
+    if (
+        validated.training.controller_settings_sha256
+        != residual_config.controller_settings_sha256
+    ):
+        raise ValueError("training controller settings identity mismatch")
     if validated.artifact.weights_sha256 != weights_sha256:
         raise ValueError("training record weights checksum mismatch")
     return validated
@@ -778,3 +830,15 @@ def _read_regular_bytes(path: Path) -> bytes:
 
 def _sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def _validate_finite_weights(weights: Mapping[str, object]) -> None:
+    """Reject NaN/Inf tensors before constructing a deployable model."""
+
+    import torch
+
+    if not weights or any(
+        not isinstance(tensor, torch.Tensor) or not bool(torch.isfinite(tensor).all())
+        for tensor in weights.values()
+    ):
+        raise ValueError("model weights must contain only finite tensors")

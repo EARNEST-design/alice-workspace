@@ -8,13 +8,21 @@ from collections.abc import Mapping
 from typing import Literal, Protocol
 
 import numpy as np
+import torch
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from alice.contracts.actuation import ActuatorTarget
 from alice.contracts.affect import MonotonicNanoseconds
 from alice.contracts.blendshapes import NonEmptyString
-from alice.contracts.motion import MotionProposal, TargetUpdate
+from alice.contracts.motion import MotionProposal, TargetUpdate, TargetUpdateHorizon
+from alice.models.head_scheduler import HeadGestureScheduler
+from alice.models.residual_state_space import ResidualStateSpace
+from alice.motion.anchors import AnchorPlanner
+from alice.motion.controller_response import ControllerResponse, ControllerState
+from alice.motion.face_events import FaceEvent, FaceEventGenerator
+from alice.motion.head_primitives import HeadGesture
 from alice.motion.intent_filter import FilteredIntent
-from alice.motion.state import GeneratorState
+from alice.motion.state import EventHistoryRecord, GeneratorState
 
 
 class _CandidateGenerator(Protocol):
@@ -97,6 +105,316 @@ class ProceduralCandidateGenerator:
             proposal=proposal,
             boundary_state=GeneratorState.model_validate(state_values),
         )
+
+
+class ProductionCandidateComposer:
+    """Compose anchor, residual, sparse events, gestures, and response state.
+
+    Merge precedence is explicit: the bounded residual augments the anchor;
+    face events then override their coupled facial channels; an active head
+    primitive overrides its semantic head axis. The controller model realizes
+    the merged commands before they enter a proposal.
+    """
+
+    def __init__(
+        self,
+        *,
+        anchor_planner: AnchorPlanner,
+        residual_model: ResidualStateSpace,
+        face_events: FaceEventGenerator,
+        head_scheduler: HeadGestureScheduler,
+        controller_response: ControllerResponse,
+    ) -> None:
+        self._anchor = anchor_planner
+        self._residual = residual_model.eval()
+        self._face = face_events
+        self._head = head_scheduler
+        self._response = controller_response
+        names = residual_model.config.actuator_names
+        if names != anchor_planner.config.semantic_actuator_names:
+            raise ValueError("anchor and residual actuator identities mismatch")
+        if (
+            tuple(a.actuator_name for a in controller_response.config.actuators)
+            != names
+        ):
+            raise ValueError("residual and controller actuator identities mismatch")
+
+    def plan(
+        self,
+        intent: FilteredIntent,
+        state: GeneratorState,
+        horizon_s: float,
+        prefix_duration_s: float,
+        *,
+        generated_monotonic_ns: int,
+    ) -> CandidatePlan:
+        rng = _restore_numpy_rng(state.numpy_rng_state)
+        torch_rng = torch.tensor(state.torch_rng_state, dtype=torch.uint8)
+        try:
+            with torch.random.fork_rng(devices=[]):
+                torch.random.set_rng_state(torch_rng)
+        except RuntimeError as error:
+            raise ValueError("invalid Torch RNG state") from error
+        fallback = intent.support_status.value in {"fallback", "stale"}
+        anchor = (
+            self._anchor.plan_neutral(state.last_accepted_target, horizon_s)
+            if fallback
+            else self._anchor.plan(intent, state.last_accepted_target, horizon_s)
+        )
+        face_state = self._face.state_from(state)
+        sampled_face = (
+            () if fallback else self._face.sample(intent, face_state, rng, horizon_s)
+        )
+        history = self._head.compact_history(
+            state.event_history, at_ns=generated_monotonic_ns
+        )
+
+        active_head = (
+            None if fallback else self._active_head(history, generated_monotonic_ns)
+        )
+        if active_head is None and self._head.decision_due(
+            history, generated_monotonic_ns=generated_monotonic_ns
+        ):
+            active_head = self._head.sample(
+                intent,
+                history,
+                rng,
+                generated_monotonic_ns=generated_monotonic_ns,
+            )
+            history = self._head.record_decision(
+                history, generated_monotonic_ns=generated_monotonic_ns
+            )
+            if active_head is not None:
+                head_targets = tuple(
+                    target
+                    for target in state.last_accepted_target.targets
+                    if target.actuator_name
+                    in self._head.config.semantics.actuator_names
+                )
+                active_head = active_head.model_copy(
+                    update={"initial_targets": head_targets}
+                )
+                history = self._head.record(history, active_head)
+
+        head_horizon = None
+        if active_head is not None:
+            head_horizon = self._head.primitives.render_window(
+                active_head,
+                window_start_ns=generated_monotonic_ns,
+                horizon_s=horizon_s,
+            )
+
+        hidden_size = self._residual.config.hidden_size
+        latent = torch.tensor(state.latent_vector, dtype=torch.float32)
+        hidden = (
+            latent.reshape(1, 1, hidden_size)
+            if latent.numel() == hidden_size
+            else torch.zeros((1, 1, hidden_size), dtype=torch.float32)
+        )
+        response_states = {
+            item.actuator_name: ControllerState(
+                schema_version="controller-state/v1",
+                actuator_name=item.actuator_name,
+                calibration_sha256=state.calibration_sha256,
+                position=next(
+                    t.normalized_position
+                    for t in state.last_reported_pose.targets
+                    if t.actuator_name == item.actuator_name
+                ),
+                velocity=item.velocity_per_s,
+            )
+            for item in state.estimated_velocity
+        }
+        updates: list[TargetUpdate] = []
+        previous_s = 0.0
+        boundary_hidden = hidden
+        boundary_velocities = {
+            name: item.velocity for name, item in response_states.items()
+        }
+        with torch.no_grad():
+            for index, base in enumerate(anchor.updates):
+                anchor_values = self._positions(base)
+                if index == 0:
+                    updates.append(state.last_accepted_target)
+                    continue
+                elapsed = base.offset_s - previous_s
+                previous_s = base.offset_s
+                ordered_anchor = torch.tensor(
+                    [
+                        [
+                            list(
+                                anchor_values[name]
+                                for name in self._residual.config.actuator_names
+                            )
+                        ]
+                    ],
+                    dtype=torch.float32,
+                )
+                positions = torch.tensor(
+                    [
+                        [
+                            [
+                                response_states[name].position
+                                for name in self._residual.config.actuator_names
+                            ]
+                        ]
+                    ],
+                    dtype=torch.float32,
+                )
+                velocities = torch.tensor(
+                    [
+                        [
+                            [
+                                response_states[name].velocity
+                                for name in self._residual.config.actuator_names
+                            ]
+                        ]
+                    ],
+                    dtype=torch.float32,
+                )
+                features = self._residual.compose_features(
+                    affect=torch.tensor([[list(intent.vector)]], dtype=torch.float32),
+                    intensity=torch.tensor([[[intent.intensity]]], dtype=torch.float32),
+                    anchor_pose=ordered_anchor,
+                    response_position=positions,
+                    response_velocity=velocities,
+                    elapsed_s=torch.tensor([[[elapsed]]], dtype=torch.float32),
+                )
+                residual, hidden = self._residual(features, hidden)
+                if fallback:
+                    residual = torch.zeros_like(residual)
+                commands = {
+                    name: max(
+                        -1.0, min(1.0, anchor_values[name] + float(residual[0, 0, i]))
+                    )
+                    for i, name in enumerate(self._residual.config.actuator_names)
+                }
+                absolute_ns = generated_monotonic_ns + round(base.offset_s * 1e9)
+                self._merge_face(commands, sampled_face, absolute_ns)
+                if head_horizon is not None:
+                    commands.update(
+                        self._positions_at(head_horizon.updates, base.offset_s)
+                    )
+                command_update = self._update(base.offset_s, commands)
+                for name, controller_state in tuple(response_states.items()):
+                    response_states[name] = self._response.predict(
+                        controller_state, command_update, elapsed
+                    )
+                updates.append(
+                    self._update(
+                        base.offset_s,
+                        {name: item.position for name, item in response_states.items()},
+                    )
+                )
+                if base.offset_s <= prefix_duration_s:
+                    boundary_hidden = hidden.clone()
+                    boundary_velocities = {
+                        name: item.velocity for name, item in response_states.items()
+                    }
+
+        horizon = TargetUpdateHorizon(
+            schema_version="target-update-horizon/v1", updates=tuple(updates)
+        )
+        seed = int(rng.integers(0, np.iinfo(np.int64).max))
+        proposal = MotionProposal(
+            schema_version="motion-proposal/v1",
+            proposal_id=f"composed-{generated_monotonic_ns}-{seed}",
+            run_id=f"composed-{intent.source_id}",
+            generated_monotonic_ns=generated_monotonic_ns,
+            expires_monotonic_ns=generated_monotonic_ns + round(horizon_s * 1e9) + 1,
+            seed=seed,
+            model_id=state.model_id,
+            model_sha256=state.model_sha256,
+            calibration_sha256=state.calibration_sha256,
+            controller_settings_sha256=state.controller_settings_sha256,
+            horizon=horizon,
+            support_status=intent.support_status.value,
+        )
+        accepted = [u for u in horizon.updates if u.offset_s <= prefix_duration_s]
+        boundary = accepted[-1].model_copy(update={"offset_s": 0.0})
+        ends_ns = generated_monotonic_ns + round(prefix_duration_s * 1e9)
+        state_values = state.model_dump()
+        state_values.update(
+            last_accepted_target=boundary,
+            last_reported_pose=boundary,
+            estimated_velocity=tuple(
+                {"actuator_name": name, "velocity_per_s": boundary_velocities[name]}
+                for name in self._residual.config.actuator_names
+            ),
+            filtered_intent=intent,
+            latent_vector=tuple(float(v) for v in boundary_hidden.reshape(-1)),
+            numpy_rng_state=rng.bit_generator.state,
+            event_history=history,
+            monotonic_ns=ends_ns,
+        )
+        next_state = GeneratorState.model_validate(state_values)
+        advanced_face = face_state.advance(
+            sampled_face,
+            monotonic_ns=ends_ns,
+            planned_through_ns=generated_monotonic_ns + round(horizon_s * 1e9),
+        )
+        next_state = self._face.compact_state(advanced_face).to_generator_state(
+            next_state
+        )
+        return CandidatePlan(proposal=proposal, boundary_state=next_state)
+
+    @staticmethod
+    def _positions(update: TargetUpdate) -> dict[str, float]:
+        return {t.actuator_name: t.normalized_position for t in update.targets}
+
+    @staticmethod
+    def _update(offset_s: float, positions: Mapping[str, float]) -> TargetUpdate:
+        return TargetUpdate(
+            offset_s=offset_s,
+            targets=tuple(
+                ActuatorTarget(actuator_name=name, normalized_position=value)
+                for name, value in positions.items()
+            ),
+        )
+
+    @staticmethod
+    def _positions_at(
+        updates: tuple[TargetUpdate, ...], at_s: float
+    ) -> dict[str, float]:
+        chosen = updates[0]
+        for update in updates:
+            if update.offset_s > at_s:
+                break
+            chosen = update
+        return ProductionCandidateComposer._positions(chosen)
+
+    @staticmethod
+    def _merge_face(
+        commands: dict[str, float], events: tuple[FaceEvent, ...], at_ns: int
+    ) -> None:
+        for event in events:
+            if not event.starts_monotonic_ns <= at_ns <= event.ends_monotonic_ns:
+                continue
+            elapsed = (at_ns - event.starts_monotonic_ns) / 1e9
+            if elapsed < event.onset_s:
+                phase = elapsed / event.onset_s
+            elif elapsed <= event.onset_s + event.hold_s:
+                phase = 1.0
+            else:
+                phase = 1.0 - (elapsed - event.onset_s - event.hold_s) / event.release_s
+            envelope = max(0.0, min(1.0, phase))
+            for target in event.peak_targets:
+                base = commands[target.actuator_name]
+                commands[target.actuator_name] = max(
+                    -1.0, min(1.0, base + envelope * target.normalized_position)
+                )
+
+    @staticmethod
+    def _active_head(
+        history: tuple[EventHistoryRecord, ...], at_ns: int
+    ) -> HeadGesture | None:
+        gestures = []
+        for record in history:
+            if getattr(record, "event_type", None) == "head-gesture/v1":
+                gesture = HeadGesture.from_history_record(record)
+                if gesture.starts_monotonic_ns <= at_ns < gesture.ends_monotonic_ns:
+                    gestures.append(gesture)
+        return gestures[-1] if gestures else None
 
 
 class AcceptedPrefix(BaseModel):

@@ -160,9 +160,7 @@ class ProceduralMotionConfig(BaseModel):
     def validate_references(self) -> ProceduralMotionConfig:
         if len(self.affect_dimensions) != len(set(self.affect_dimensions)):
             raise ValueError("affect dimensions must be unique")
-        if len(self.semantic_actuator_names) != len(
-            set(self.semantic_actuator_names)
-        ):
+        if len(self.semantic_actuator_names) != len(set(self.semantic_actuator_names)):
             raise ValueError("semantic actuator names must be unique")
         anchor_names = [anchor.name for anchor in self.anchors]
         if len(anchor_names) != len(set(anchor_names)):
@@ -210,13 +208,16 @@ class ProceduralMotionConfig(BaseModel):
         if self.drift.max_frequency_hz >= self.effective_cadence_hz / 2.0:
             raise ValueError("drift frequency must remain below cadence Nyquist limit")
         cadence_period_s = 1.0 / self.effective_cadence_hz
-        if min(
-            self.blink.close_s,
-            self.blink.hold_s,
-            self.blink.open_s,
-            self.gaze.transition_s,
-            self.gaze.hold_s,
-        ) < cadence_period_s:
+        if (
+            min(
+                self.blink.close_s,
+                self.blink.hold_s,
+                self.blink.open_s,
+                self.gaze.transition_s,
+                self.gaze.hold_s,
+            )
+            < cadence_period_s
+        ):
             raise ValueError("event phases must be observable at effective cadence")
         return self
 
@@ -293,12 +294,9 @@ class AnchorPlanner:
 
         if not math.isfinite(horizon_s) or horizon_s <= 0.0:
             raise ValueError("horizon_s must be finite and positive")
-        count = math.floor(
-            horizon_s * self._config.effective_cadence_hz + 1e-12
-        )
+        count = math.floor(horizon_s * self._config.effective_cadence_hz + 1e-12)
         return tuple(
-            index / self._config.effective_cadence_hz
-            for index in range(count + 1)
+            index / self._config.effective_cadence_hz for index in range(count + 1)
         )
 
     def _interpolated_target(self, intent: FilteredIntent) -> dict[str, float]:
@@ -317,14 +315,17 @@ class AnchorPlanner:
         total_weight = sum(inverse_distances)
         weighted = dict(self._neutral)
         for name in self._config.semantic_actuator_names:
-            weighted[name] = sum(
-                weight * self._complete_anchor(mapping.anchor_name)[name]
-                for mapping, weight in zip(
-                    mappings,
-                    inverse_distances,
-                    strict=True,
+            weighted[name] = (
+                sum(
+                    weight * self._complete_anchor(mapping.anchor_name)[name]
+                    for mapping, weight in zip(
+                        mappings,
+                        inverse_distances,
+                        strict=True,
+                    )
                 )
-            ) / total_weight
+                / total_weight
+            )
         return {
             name: self._neutral[name]
             + intent.intensity * (weighted[name] - self._neutral[name])
@@ -358,8 +359,7 @@ class AnchorPlanner:
 
     def _state_positions(self, state: TargetUpdate) -> dict[str, float]:
         positions = {
-            target.actuator_name: target.normalized_position
-            for target in state.targets
+            target.actuator_name: target.normalized_position for target in state.targets
         }
         expected = set(self._config.semantic_actuator_names)
         if set(positions) != expected:

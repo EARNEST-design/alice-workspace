@@ -135,8 +135,7 @@ class ProceduralMotionGenerator:
                 )
 
             blink_value = sum(
-                self._event_envelope(event, base_update.offset_s)
-                for event in blinks
+                self._event_envelope(event, base_update.offset_s) for event in blinks
             )
             for name in self._config.blink.actuator_names:
                 positions[name] -= blink_value
@@ -250,11 +249,15 @@ class ProceduralMotionGenerator:
         amplitude: float,
         at_s: float,
     ) -> float:
-        return amplitude * 0.5 * sum(
-            math.sin(2.0 * math.pi * frequency * at_s + phase)
-            - math.sin(phase)
-            for frequency, phase in components
-        ) / len(components)
+        return (
+            amplitude
+            * 0.5
+            * sum(
+                math.sin(2.0 * math.pi * frequency * at_s + phase) - math.sin(phase)
+                for frequency, phase in components
+            )
+            / len(components)
+        )
 
     @classmethod
     def _event_envelope(cls, event: _TimedEvent, at_s: float) -> float:

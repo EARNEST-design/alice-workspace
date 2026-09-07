@@ -4,7 +4,7 @@ affect_schema_id: affect-vector/v1
 affect_dimensions: [valence, arousal, dominance]
 controller_response_model_id: maestro-response-v1
 calibration_sha256: 8ad9ad1f59dc70c47515c9a37b4531c5070c22a40ed66fb673d0e72a0d3dadb4
-controller_settings_sha256: e9695abc1888fef19d5ec4f49d396c7f53c8955335e72e241c6c2851d783d133
+controller_settings_sha256: c0fba4a4d521ac7feb5fb4b24f1031470cbc4d276269d2cfc2fd65b81b6112f0
 actuator_names:
   - neck_rotation
   - head_tilt

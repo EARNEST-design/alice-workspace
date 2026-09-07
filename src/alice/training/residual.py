@@ -16,6 +16,7 @@ from alice.models.residual_state_space import (
     ResidualStateSpace,
     ResidualStateSpaceConfig,
 )
+from alice.motion.controller_response import ControllerResponseConfig
 
 DatasetSplit = Literal["train", "validation", "test"]
 Disposition = Literal["keep", "discard"]
@@ -105,7 +106,7 @@ class ResidualTrainingConfig:
     epochs: int
     learning_rate: float
     rollout_steps: int
-    response_rate_per_s: float
+    controller_response_config: ControllerResponseConfig
     artifact_directory: Path
     disposition: Disposition
     note: str
@@ -120,8 +121,21 @@ class ResidualTrainingConfig:
             raise ValueError("learning_rate must be finite and positive")
         if self.rollout_steps < 2:
             raise ValueError("rollout_steps must be at least two")
-        if not math.isfinite(self.response_rate_per_s) or self.response_rate_per_s <= 0:
-            raise ValueError("response_rate_per_s must be finite and positive")
+        if (
+            self.controller_response_config.model_id
+            != self.model.controller_response_model_id
+        ):
+            raise ValueError("training controller-response model identity mismatch")
+        if (
+            self.controller_response_config.calibration_sha256
+            != self.model.calibration_sha256
+        ):
+            raise ValueError("training controller calibration identity mismatch")
+        if (
+            tuple(a.actuator_name for a in self.controller_response_config.actuators)
+            != self.model.actuator_names
+        ):
+            raise ValueError("training controller actuator identities mismatch")
         if self.disposition not in {"keep", "discard"}:
             raise ValueError("disposition must be keep or discard")
         if not self.note.strip():
@@ -247,12 +261,12 @@ def _loss_terms(
         model,
         dataset,
         steps=dataset.affect.shape[1],
-        response_rate_per_s=config.response_rate_per_s,
+        controller_response_config=config.controller_response_config,
     )
     target_realized, _ = _target_response_rollout(
         dataset,
         steps=dataset.affect.shape[1],
-        response_rate_per_s=config.response_rate_per_s,
+        controller_response_config=config.controller_response_config,
     )
     terms = residual_objective_terms(
         prediction=prediction,
@@ -277,7 +291,7 @@ def recurrent_rollout(
     dataset: ResidualDataset,
     *,
     steps: int,
-    response_rate_per_s: float,
+    controller_response_config: ControllerResponseConfig,
 ) -> ResidualRollout:
     """Roll forward while feeding each predicted response into the next GRU step."""
 
@@ -306,7 +320,7 @@ def recurrent_rollout(
             position=position,
             velocity=velocity,
             elapsed_s=dataset.elapsed_s[:, index],
-            response_rate_per_s=response_rate_per_s,
+            controller_response_config=controller_response_config,
         )
         residuals.append(residual)
         positions.append(position)
@@ -377,7 +391,7 @@ def _target_response_rollout(
     dataset: ResidualDataset,
     *,
     steps: int,
-    response_rate_per_s: float,
+    controller_response_config: ControllerResponseConfig,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     position = dataset.response_position[:, 0]
     velocity = dataset.response_velocity[:, 0]
@@ -390,7 +404,7 @@ def _target_response_rollout(
             position=position,
             velocity=velocity,
             elapsed_s=dataset.elapsed_s[:, index],
-            response_rate_per_s=response_rate_per_s,
+            controller_response_config=controller_response_config,
         )
         positions.append(position)
         velocities.append(velocity)
@@ -403,12 +417,29 @@ def _response_step(
     position: torch.Tensor,
     velocity: torch.Tensor,
     elapsed_s: torch.Tensor,
-    response_rate_per_s: float,
+    controller_response_config: ControllerResponseConfig,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    projected = position + velocity * elapsed_s
-    blend = 1.0 - torch.exp(-response_rate_per_s * elapsed_s)
-    next_position = projected + blend * (command - projected)
-    next_velocity = (next_position - position) / elapsed_s
+    velocities = position.new_tensor(
+        [a.max_velocity_per_s for a in controller_response_config.actuators]
+    )
+    accelerations = position.new_tensor(
+        [a.max_acceleration_per_s2 for a in controller_response_config.actuators]
+    )
+    dt = elapsed_s.expand_as(position)
+    desired_velocity = torch.clamp((command - position) / dt, -velocities, velocities)
+    velocity_delta = torch.clamp(
+        desired_velocity - velocity,
+        -accelerations * dt,
+        accelerations * dt,
+    )
+    next_velocity = velocity + velocity_delta
+    step = next_velocity * dt
+    remaining = command - position
+    step = torch.where(step.abs() > remaining.abs(), remaining, step)
+    next_position = torch.clamp(position + step, -1.0, 1.0)
+    next_velocity = torch.where(
+        step == remaining, torch.zeros_like(next_velocity), next_velocity
+    )
     return next_position, next_velocity
 
 
@@ -517,7 +548,9 @@ def _research_record(
             "epochs": config.epochs,
             "learning_rate": config.learning_rate,
             "rollout_steps": config.rollout_steps,
-            "response_rate_per_s": config.response_rate_per_s,
+            "controller_settings_sha256": (
+                config.controller_response_config.controller_settings_sha256
+            ),
             "loss_weights": asdict(config.losses),
         },
         "run": {

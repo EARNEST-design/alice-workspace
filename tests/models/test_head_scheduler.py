@@ -90,6 +90,25 @@ def test_scheduler_is_seeded_but_not_static() -> None:
     assert _sample_sequence(17) != _sample_sequence(18)
 
 
+def test_scheduler_uses_generation_time_and_persists_empty_decisions() -> None:
+    scheduler = _scheduler()
+    intent = _intent(accepted_ns=1)
+    history = scheduler.record_decision((), generated_monotonic_ns=9_000_000_000)
+
+    assert (
+        scheduler.decision_due(history, generated_monotonic_ns=9_100_000_000) is False
+    )
+    assert scheduler.decision_due(history, generated_monotonic_ns=9_500_000_000) is True
+    gesture = _certain_scheduler().sample(
+        intent,
+        (),
+        np.random.default_rng(1),
+        generated_monotonic_ns=9_000_000_000,
+    )
+    assert gesture is not None
+    assert gesture.starts_monotonic_ns == 9_000_000_000
+
+
 def test_scheduler_respects_global_and_same_gesture_refractory() -> None:
     """Ignoring accepted history could repeat head motion immediately."""
 

@@ -26,6 +26,7 @@ from alice.motion.state import EventHistoryRecord
 FiniteFloat = Annotated[float, Field(allow_inf_nan=False)]
 FinitePositiveFloat = Annotated[float, Field(gt=0.0, allow_inf_nan=False)]
 _NANOSECONDS_PER_SECOND = 1_000_000_000
+_DECISION_RECORD_TYPE = "head-decision-state/v1"
 
 
 class FloatRange(BaseModel):
@@ -215,6 +216,8 @@ class HeadGestureScheduler:
         intent: FilteredIntent,
         history: tuple[EventHistoryRecord, ...],
         rng: np.random.Generator,
+        *,
+        generated_monotonic_ns: int | None = None,
     ) -> HeadGesture | None:
         """Sample one bounded gesture while honoring absolute accepted history."""
 
@@ -223,7 +226,13 @@ class HeadGestureScheduler:
             raise TypeError("rng must be a NumPy Generator")
         gestures = self._head_history(history)
         self._validate_history(gestures)
-        now_ns = intent.accepted_monotonic_ns
+        now_ns = (
+            intent.accepted_monotonic_ns
+            if generated_monotonic_ns is None
+            else generated_monotonic_ns
+        )
+        if now_ns < intent.accepted_monotonic_ns:
+            raise ValueError("generation time precedes accepted intent")
         if intent.support_status in {SupportStatus.FALLBACK, SupportStatus.STALE}:
             return None
         if self._inside_global_refractory(gestures, at_ns=now_ns):
@@ -249,6 +258,72 @@ class HeadGestureScheduler:
                     return None
                 return candidate
         return None
+
+    def decision_due(
+        self,
+        history: tuple[EventHistoryRecord, ...],
+        *,
+        generated_monotonic_ns: int,
+    ) -> bool:
+        """Return whether the absolute scheduling cadence has elapsed."""
+
+        decisions = [
+            record.started_monotonic_ns
+            for record in history
+            if record.event_type == _DECISION_RECORD_TYPE
+        ]
+        if not decisions:
+            return True
+        interval_ns = round(self._config.decision_interval_s * _NANOSECONDS_PER_SECOND)
+        return generated_monotonic_ns - max(decisions) >= interval_ns
+
+    def record_decision(
+        self,
+        history: tuple[EventHistoryRecord, ...],
+        *,
+        generated_monotonic_ns: int,
+    ) -> tuple[EventHistoryRecord, ...]:
+        """Persist cadence even when a stochastic decision emits no gesture."""
+
+        retained = tuple(
+            record for record in history if record.event_type != _DECISION_RECORD_TYPE
+        )
+        return (
+            *retained,
+            EventHistoryRecord(
+                event_type=_DECISION_RECORD_TYPE,
+                started_monotonic_ns=generated_monotonic_ns,
+                ended_monotonic_ns=generated_monotonic_ns,
+                payload={"model_sha256": self._model_sha256},
+            ),
+        )
+
+    def compact_history(
+        self,
+        history: tuple[EventHistoryRecord, ...],
+        *,
+        at_ns: int,
+    ) -> tuple[EventHistoryRecord, ...]:
+        """Bound completed gesture history without losing refractory state."""
+
+        unrelated = tuple(
+            record for record in history if record.event_type != "head-gesture/v1"
+        )
+        gestures = self._head_history(history)
+        retained = [g for g in gestures if g.ends_monotonic_ns > at_ns]
+        for kind in HeadGestureKind:
+            if kind is HeadGestureKind.RETURN:
+                continue
+            completed = [
+                g for g in gestures if g.kind is kind and g.ends_monotonic_ns <= at_ns
+            ]
+            if completed:
+                retained.append(max(completed, key=lambda g: g.ends_monotonic_ns))
+        unique = {gesture.gesture_id: gesture for gesture in retained}
+        return (
+            *unrelated,
+            *(gesture.as_history_record() for gesture in unique.values()),
+        )
 
     def record(
         self,

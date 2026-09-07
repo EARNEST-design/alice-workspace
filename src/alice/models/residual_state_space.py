@@ -145,9 +145,17 @@ class ResidualStateSpace(nn.Module):
                 raise ValueError("hidden must share feature device and dtype")
             if not bool(torch.isfinite(hidden).all()):
                 raise ValueError("hidden must contain only finite values")
+        if any(
+            not bool(torch.isfinite(parameter).all()) for parameter in self.parameters()
+        ):
+            raise ValueError("model parameters must contain only finite values")
 
         recurrent, next_hidden = self.gru(features, hidden)
         raw_residual = self.residual_head(recurrent)
+        if not bool(torch.isfinite(raw_residual).all()) or not bool(
+            torch.isfinite(next_hidden).all()
+        ):
+            raise ValueError("model outputs must contain only finite values")
         envelope = self.residual_envelope.to(
             device=raw_residual.device,
             dtype=raw_residual.dtype,

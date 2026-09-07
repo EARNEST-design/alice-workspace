@@ -15,6 +15,7 @@ import torch
 from safetensors.torch import load_file, save_file
 
 import alice.models.package as package_module
+from alice.contracts.motion import TargetUpdate
 from alice.models.head_scheduler import load_head_gesture_config
 from alice.models.package import (
     MotionModelComponents,
@@ -28,14 +29,19 @@ from alice.models.residual_state_space import (
     ResidualStateSpace,
     load_residual_state_space_config,
 )
+from alice.motion.anchors import load_procedural_motion_config
 from alice.motion.controller_response import load_controller_response_config
 from alice.motion.face_events import load_face_event_config
+from alice.motion.intent_filter import FilteredIntent, SupportStatus
+from alice.motion.state import ActuatorVelocity, GeneratorState, dump_state, load_state
+from alice.motion.streaming import ProductionCandidateComposer, StreamingMotionGenerator
 
 ROOT = Path(__file__).parents[2]
 MODEL_CONFIG = ROOT / "config" / "models" / "residual-state-space-v1.yaml"
 FACE_CONFIG = ROOT / "config" / "models" / "face-events-v1.yaml"
 HEAD_CONFIG = ROOT / "config" / "models" / "head-gestures-v1.yaml"
 CONTROLLER_CONFIG = ROOT / "config" / "models" / "maestro-response-v1.yaml"
+ANCHOR_CONFIG = ROOT / "config" / "models" / "procedural-motion-v1.yaml"
 
 
 def _identities() -> PackageIdentities:
@@ -75,6 +81,7 @@ def _valid_inputs(
         face_event_config=load_face_event_config(FACE_CONFIG),
         head_gesture_config=load_head_gesture_config(HEAD_CONFIG),
         controller_response_config=load_controller_response_config(CONTROLLER_CONFIG),
+        anchor_config=load_procedural_motion_config(ANCHOR_CONFIG),
     )
     training_record = {
         "schema_version": "residual-training-record/v1",
@@ -83,7 +90,7 @@ def _valid_inputs(
             "epochs": 2,
             "learning_rate": 0.001,
             "rollout_steps": 4,
-            "response_rate_per_s": 5.0,
+            "controller_settings_sha256": residual.controller_settings_sha256,
             "loss_weights": {
                 "reconstruction": 1.0,
                 "multistep_rollout": 0.5,
@@ -187,6 +194,59 @@ def test_loading_does_not_construct_hardware(
 
     assert loaded.identities == _identities()
     assert isinstance(loaded.residual_model, ResidualStateSpace)
+    assert isinstance(loaded.candidate_composer, ProductionCandidateComposer)
+
+
+def test_loaded_composer_replans_deterministically_with_complete_state(
+    tmp_path: Path,
+) -> None:
+    package = _write_valid_package(tmp_path)
+    loaded = load_package(package.path, _identities())
+    anchor = load_procedural_motion_config(ANCHOR_CONFIG).anchor("neutral")
+    target = TargetUpdate(offset_s=0.0, targets=anchor.targets)
+    intent = FilteredIntent(
+        schema_version="filtered-intent/v1",
+        affect_schema_id="affect-vector/v1",
+        vector=(0.1, 0.2, -0.1),
+        intensity=0.5,
+        source_id="package-composer-test",
+        accepted_monotonic_ns=0,
+        support_status=SupportStatus.SUPPORTED,
+        support_distance=0.0,
+        reason="synthetic integration fixture",
+    )
+    rng = __import__("numpy").random.default_rng(7)
+    state = GeneratorState(
+        schema_version="generator-state/v1",
+        last_accepted_target=target,
+        last_reported_pose=target,
+        estimated_velocity=tuple(
+            ActuatorVelocity(actuator_name=t.actuator_name, velocity_per_s=0.0)
+            for t in target.targets
+        ),
+        filtered_intent=intent,
+        latent_vector=(0.0,) * loaded.residual_model.config.hidden_size,
+        numpy_rng_state=rng.bit_generator.state,
+        torch_rng_state=tuple(int(v) for v in torch.random.get_rng_state()),
+        event_history=(),
+        model_id=_identities().motion_model_id,
+        model_sha256=hashlib.sha256(package.manifest.read_bytes()).hexdigest(),
+        calibration_sha256=_identities().calibration_sha256,
+        controller_settings_sha256=_identities().controller_settings_sha256,
+        monotonic_ns=0,
+    )
+    runtime = StreamingMotionGenerator(
+        generator=loaded.candidate_composer, horizon_s=1.0, prefix_duration_s=0.4
+    )
+    direct = runtime.replan(intent, state, 0)
+    replay = runtime.replan(intent, load_state(dump_state(state)), 0)
+    assert direct == replay
+    assert direct[0].updates[0] == target
+    assert all(
+        -1.0 <= t.normalized_position <= 1.0
+        for update in direct[0].updates
+        for t in update.targets
+    )
 
 
 def test_loading_restores_exact_weights_in_inference_mode(tmp_path: Path) -> None:
@@ -201,6 +261,75 @@ def test_loading_restores_exact_weights_in_inference_mode(tmp_path: Path) -> Non
     assert set(loaded.residual_model.state_dict()) == set(expected_weights)
     for name, expected in expected_weights.items():
         assert torch.equal(loaded.residual_model.state_dict()[name], expected)
+
+
+@pytest.mark.parametrize("operation", ["save", "load"])
+def test_non_finite_weights_are_rejected(tmp_path: Path, operation: str) -> None:
+    components, metadata = _valid_inputs(tmp_path)
+    tensors = load_file(components.weights)
+    first = next(iter(tensors))
+    tensors[first].view(-1)[0] = float("nan")
+    save_file(tensors, components.weights)
+    digest = hashlib.sha256(components.weights.read_bytes()).hexdigest()
+    metadata = metadata.model_copy(
+        update={
+            "training_record": metadata.training_record.model_copy(
+                update={
+                    "artifact": metadata.training_record.artifact.model_copy(
+                        update={"weights_sha256": digest}
+                    )
+                }
+            )
+        }
+    )
+    if operation == "save":
+        with pytest.raises(ValueError, match="finite"):
+            save_package(tmp_path / "bad", components, metadata)
+        return
+    other = tmp_path / "other"
+    other.mkdir()
+    package = save_package(tmp_path / "package", *_valid_inputs(other))
+    bad = load_file(package.weights)
+    name = next(iter(bad))
+    bad[name].view(-1)[0] = float("inf")
+    save_file(bad, package.weights)
+    payload = package.weights.read_bytes()
+    manifest = json.loads(package.manifest.read_text())
+    manifest["checksums"]["weights/residual.safetensors"] = hashlib.sha256(
+        payload
+    ).hexdigest()
+    record_path = package.training_record
+    record = json.loads(record_path.read_text())
+    record["artifact"]["weights_sha256"] = manifest["checksums"][
+        "weights/residual.safetensors"
+    ]
+    record_path.write_text(json.dumps(record, sort_keys=True) + "\n")
+    manifest["checksums"]["records/training.json"] = hashlib.sha256(
+        record_path.read_bytes()
+    ).hexdigest()
+    package.manifest.write_text(json.dumps(manifest, sort_keys=True) + "\n")
+    with pytest.raises(ValueError, match="finite"):
+        load_package(package.path, _identities())
+
+
+def test_embedded_controller_settings_are_bound_to_identity(tmp_path: Path) -> None:
+    components, metadata = _valid_inputs(tmp_path)
+    changed = components.controller_response_config.model_copy(
+        update={
+            "actuators": (
+                components.controller_response_config.actuators[0].model_copy(
+                    update={"firmware_speed_setting": 21}
+                ),
+                *components.controller_response_config.actuators[1:],
+            )
+        }
+    )
+    with pytest.raises(ValueError, match="embedded controller settings"):
+        save_package(
+            tmp_path / "mismatch",
+            components.model_copy(update={"controller_response_config": changed}),
+            metadata,
+        )
 
 
 def test_identity_mismatch_is_rejected_before_model_construction(
@@ -245,6 +374,7 @@ def test_package_contains_only_declared_offline_artifacts(tmp_path: Path) -> Non
         "manifest.json",
         "weights/residual.safetensors",
         "configs/controller_response.json",
+        "configs/anchor.json",
         "configs/face_events.json",
         "configs/head_gestures.json",
         "configs/residual.json",
