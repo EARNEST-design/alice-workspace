@@ -36,6 +36,7 @@ from alice.motion.face_events import (
     FaceEventState,
     load_face_event_config,
 )
+from alice.motion.head_primitives import HeadGesture, HeadGestureKind
 from alice.motion.intent_filter import FilteredIntent, SupportStatus
 from alice.motion.procedural import ProceduralMotionGenerator
 from alice.motion.state import (
@@ -309,6 +310,126 @@ def test_moving_blink_falls_back_atomically_to_controller_feasible_anchor() -> N
     assert not any(
         record.event_type == "head-decision-state/v1"
         for record in plan.boundary_state.event_history
+    )
+
+
+def test_nod_preserves_residual_displacement_on_inactive_head_axis(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Starting a nod must not turn residual yaw into an implicit head reset."""
+
+    controller_config = load_controller_response_config(CONTROLLER_CONFIG_PATH)
+    response = ControllerResponse(config=controller_config)
+    anchor_config = load_procedural_motion_config(CONFIG_PATH)
+    residual = ResidualStateSpace(
+        load_residual_state_space_config(RESIDUAL_CONFIG_PATH)
+    )
+    with torch.no_grad():
+        for parameter in residual.parameters():
+            parameter.zero_()
+        yaw_index = residual.config.actuator_names.index("neck_rotation")
+        residual.residual_head.bias[yaw_index] = 0.5
+    face = FaceEventGenerator(
+        config=load_face_event_config(FACE_CONFIG_PATH),
+        controller_config=controller_config,
+    )
+    head = HeadGestureScheduler(
+        config=load_head_gesture_config(HEAD_CONFIG_PATH),
+        controller_config=controller_config,
+    )
+    composer = ProductionCandidateComposer(
+        anchor_planner=AnchorPlanner(config=anchor_config),
+        residual_model=residual,
+        face_events=face,
+        head_scheduler=head,
+        controller_response=response,
+    )
+    neutral = anchor_config.anchor("neutral")
+    target = TargetUpdate(offset_s=0.0, targets=neutral.targets)
+    intent = _intent().model_copy(update={"intensity": 0.0})
+    rng = np.random.default_rng(19)
+    state = GeneratorState(
+        schema_version="generator-state/v1",
+        last_accepted_target=target,
+        last_reported_pose=target,
+        estimated_velocity=tuple(
+            ActuatorVelocity(actuator_name=item.actuator_name, velocity_per_s=0.0)
+            for item in target.targets
+        ),
+        filtered_intent=intent,
+        latent_vector=(0.0,) * residual.config.hidden_size,
+        numpy_rng_state=rng.bit_generator.state,
+        torch_rng_state=tuple(int(value) for value in torch.random.get_rng_state()),
+        event_history=(
+            EventHistoryRecord(
+                event_type="head-decision-state/v1",
+                started_monotonic_ns=0,
+                ended_monotonic_ns=0,
+                payload={"model_sha256": head.model_sha256},
+            ),
+        ),
+        model_id="residual-before-head-test-v1",
+        model_sha256=SHA256_ZERO,
+        calibration_sha256=controller_config.calibration_sha256,
+        controller_settings_sha256=controller_config.controller_settings_sha256,
+        monotonic_ns=0,
+    )
+
+    residual_plan = composer.plan(
+        intent,
+        state,
+        horizon_s=1.0,
+        prefix_duration_s=1.0,
+        generated_monotonic_ns=0,
+    )
+    residual_yaw = next(
+        target.normalized_position
+        for target in residual_plan.boundary_state.last_accepted_target.targets
+        if target.actuator_name == "neck_rotation"
+    )
+    assert residual_yaw != 0.0
+    state_values = residual_plan.boundary_state.model_dump()
+    accepted_targets = state_values["last_accepted_target"]["targets"]
+    state_values["last_accepted_target"]["targets"] = tuple(
+        reversed(accepted_targets)
+    )
+    residual_state = GeneratorState.model_validate(state_values)
+    policy = head.config.policy(HeadGestureKind.NOD)
+    nod = HeadGesture(
+        schema_version="head-gesture/v1",
+        gesture_id="nod-after-residual",
+        model_id=head.config.model_id,
+        model_sha256=head.model_sha256,
+        kind=HeadGestureKind.NOD,
+        starts_monotonic_ns=1_000_000_000,
+        actuator_name=policy.actuator_name,
+        amplitude=policy.amplitude.minimum,
+        duration_s=policy.duration_s.minimum,
+        cycles=policy.cycles.minimum,
+        asymmetry=policy.asymmetry.minimum,
+        hold_s=policy.hold_s.minimum,
+        recovery_s=policy.recovery_s.minimum,
+        recovery_targets=head.config.recovery_targets,
+    )
+    monkeypatch.setattr(head, "sample", lambda *args, **kwargs: nod)
+
+    gesture_plan = composer.plan(
+        intent.model_copy(update={"accepted_monotonic_ns": 1_000_000_000}),
+        residual_state,
+        horizon_s=1.0,
+        prefix_duration_s=0.4,
+        generated_monotonic_ns=1_000_000_000,
+    )
+
+    assert gesture_plan.proposal.support_status == "supported"
+    assert all(
+        next(
+            target.normalized_position
+            for target in update.targets
+            if target.actuator_name == "neck_rotation"
+        )
+        == residual_yaw
+        for update in gesture_plan.proposal.horizon.updates
     )
 
 

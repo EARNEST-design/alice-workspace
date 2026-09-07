@@ -126,8 +126,10 @@ def test_primitive_starts_at_state_and_returns_to_recovery_targets(
     )
 
 
-def test_long_gesture_resumes_from_persisted_original_pose_and_phase() -> None:
-    state = _state(face_pitch=0.02)
+def test_nod_from_non_neutral_pose_preserves_inactive_axes_across_windows() -> None:
+    """Resetting inactive axes or local phase would move at a prefix boundary."""
+
+    state = _state(neck_rotation=0.01, head_tilt=0.0, face_pitch=0.02)
     gesture = _gesture(HeadGestureKind.NOD, duration_s=3.2).model_copy(
         update={"initial_targets": state.targets}
     )
@@ -137,6 +139,18 @@ def test_long_gesture_resumes_from_persisted_original_pose_and_phase() -> None:
     )
     full = _primitives().render(gesture, state)
 
+    for update in full.updates:
+        positions = {
+            target.actuator_name: target.normalized_position
+            for target in update.targets
+        }
+        assert positions["neck_rotation"] == 0.01
+        assert positions["head_tilt"] == 0.0
+    final_positions = {
+        target.actuator_name: target.normalized_position
+        for target in full.updates[-1].targets
+    }
+    assert final_positions["face_pitch"] == 0.0
     assert first.updates[-1].targets == second.updates[0].targets
     expected = next(update for update in full.updates if update.offset_s == 0.6)
     resumed = min(second.updates, key=lambda update: abs(update.offset_s - 0.2))

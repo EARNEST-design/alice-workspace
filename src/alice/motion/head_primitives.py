@@ -210,7 +210,13 @@ class HeadPrimitiveGenerator:
         updates: list[TargetUpdate] = []
         for offset_s in offsets:
             if offset_s == total_s:
-                targets = gesture.recovery_targets
+                targets = tuple(
+                    ActuatorTarget(
+                        actuator_name=target.actuator_name,
+                        normalized_position=recovery[target.actuator_name],
+                    )
+                    for target in state.targets
+                )
             else:
                 current = dict(positions)
                 for actuator_name, axis_segments in segments.items():
@@ -329,15 +335,13 @@ class HeadPrimitiveGenerator:
             for target in gesture.recovery_targets
         }
         if gesture.kind is not HeadGestureKind.RETURN:
-            changed_inactive = {
-                name
-                for name in names
-                if name != expected_actuator and positions[name] != recovery[name]
-            }
-            if changed_inactive:
-                raise ValueError(
-                    "non-active head axes cannot change during gesture recovery"
-                )
+            recovery.update(
+                {
+                    name: positions[name]
+                    for name in names
+                    if name != expected_actuator
+                }
+            )
         return positions, recovery
 
     def _gesture_segments(

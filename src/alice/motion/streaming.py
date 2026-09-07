@@ -240,11 +240,13 @@ class ProductionCandidateComposer:
                 history, generated_monotonic_ns=generated_monotonic_ns
             )
             if active_head is not None:
+                accepted_positions = self._positions(state.last_accepted_target)
                 head_targets = tuple(
-                    target
-                    for target in state.last_accepted_target.targets
-                    if target.actuator_name
-                    in self._head.config.semantics.actuator_names
+                    ActuatorTarget(
+                        actuator_name=actuator_name,
+                        normalized_position=accepted_positions[actuator_name],
+                    )
+                    for actuator_name in self._head.config.semantics.actuator_names
                 )
                 active_head = active_head.model_copy(
                     update={"initial_targets": head_targets}
