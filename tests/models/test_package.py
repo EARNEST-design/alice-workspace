@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 from copy import deepcopy
 from pathlib import Path
@@ -215,7 +216,7 @@ def test_loaded_composer_replans_deterministically_with_complete_state(
         support_distance=0.0,
         reason="synthetic integration fixture",
     )
-    rng = __import__("numpy").random.default_rng(7)
+    rng = __import__("numpy").random.default_rng(0)
     state = GeneratorState(
         schema_version="generator-state/v1",
         last_accepted_target=target,
@@ -238,15 +239,38 @@ def test_loaded_composer_replans_deterministically_with_complete_state(
     runtime = StreamingMotionGenerator(
         generator=loaded.candidate_composer, horizon_s=1.0, prefix_duration_s=0.4
     )
-    direct = runtime.replan(intent, state, 0)
-    replay = runtime.replan(intent, load_state(dump_state(state)), 0)
-    assert direct == replay
-    assert direct[0].updates[0] == target
-    assert all(
-        -1.0 <= t.normalized_position <= 1.0
-        for update in direct[0].updates
-        for t in update.targets
-    )
+    direct_state = state
+    replay_state = load_state(dump_state(state))
+    previous_ends_ns = 0
+
+    for _ in range(25):
+        direct = runtime.replan(
+            intent, direct_state, direct_state.monotonic_ns
+        )
+        replay = runtime.replan(
+            intent, replay_state, replay_state.monotonic_ns
+        )
+
+        assert direct == replay
+        prefix, direct_state = direct
+        _, replay_boundary = replay
+        assert prefix.starts_at_ns == previous_ends_ns
+        assert prefix.ends_at_ns > prefix.starts_at_ns
+        assert all(
+            math.isfinite(t.normalized_position)
+            and -1.0 <= t.normalized_position <= 1.0
+            for update in prefix.updates
+            for t in update.targets
+        )
+        assert all(
+            left.offset_s < right.offset_s
+            for left, right in zip(prefix.updates, prefix.updates[1:])
+        )
+
+        replay_state = load_state(dump_state(replay_boundary))
+        previous_ends_ns = prefix.ends_at_ns
+
+    assert state.last_accepted_target == target
 
 
 def test_loading_restores_exact_weights_in_inference_mode(tmp_path: Path) -> None:

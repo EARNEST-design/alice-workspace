@@ -24,6 +24,10 @@ NormalizedPosition = Annotated[
 _KINEMATIC_TOLERANCE = 1e-12
 
 
+class InfeasibleControllerTargetError(ValueError):
+    """A valid moving state cannot realize the requested target safely."""
+
+
 class ControllerLimitMode(StrEnum):
     """How a controller setting is resolved to a physical-response estimate."""
 
@@ -144,6 +148,15 @@ class ControllerResponse:
     def config(self) -> ControllerResponseConfig:
         return self._config
 
+    def is_feasible(self, state: ControllerState, update: TargetUpdate) -> bool:
+        """Return whether a target is feasible without advancing controller state."""
+
+        try:
+            self.predict(state, update, elapsed_s=0.0)
+        except InfeasibleControllerTargetError:
+            return False
+        return True
+
     def predict(
         self,
         state: ControllerState,
@@ -175,7 +188,9 @@ class ControllerResponse:
         distance = target_position - state.position
         if distance == 0.0:
             if state.velocity != 0.0:
-                raise ValueError("state velocity exceeds available stopping distance")
+                raise InfeasibleControllerTargetError(
+                    "state velocity exceeds available stopping distance"
+                )
             return state
 
         direction = math.copysign(1.0, distance)
@@ -186,14 +201,18 @@ class ControllerResponse:
             outward_excursion = initial_speed**2 / (2.0 * acceleration_limit)
             turnaround_position = state.position - direction * outward_excursion
             if not -1.0 <= turnaround_position <= 1.0:
-                raise ValueError("reversal braking would cross a normalized endpoint")
+                raise InfeasibleControllerTargetError(
+                    "reversal braking would cross a normalized endpoint"
+                )
         stopping_distance = (
             initial_speed**2 / (2.0 * acceleration_limit)
             if initial_speed > 0.0
             else 0.0
         )
         if stopping_distance > remaining:
-            raise ValueError("state velocity exceeds available stopping distance")
+            raise InfeasibleControllerTargetError(
+                "state velocity exceeds available stopping distance"
+            )
         if elapsed_s == 0.0:
             return state
         trajectory_distance = max(remaining, stopping_distance)

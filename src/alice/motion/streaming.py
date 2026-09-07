@@ -58,6 +58,10 @@ class CandidatePlan(BaseModel):
     boundary_state: GeneratorState
 
 
+class _InfeasibleCandidateError(ValueError):
+    """A composed event or residual command cannot be realized safely."""
+
+
 class ProceduralCandidateGenerator:
     """Adapt a seeded proposal generator to the explicit stateful protocol."""
 
@@ -148,6 +152,49 @@ class ProductionCandidateComposer:
         *,
         generated_monotonic_ns: int,
     ) -> CandidatePlan:
+        conservative = intent.support_status.value in {"fallback", "stale"}
+        if conservative:
+            return self._compose(
+                intent,
+                state,
+                horizon_s,
+                prefix_duration_s,
+                generated_monotonic_ns=generated_monotonic_ns,
+                conservative=True,
+                project_infeasible=True,
+            )
+        try:
+            return self._compose(
+                intent,
+                state,
+                horizon_s,
+                prefix_duration_s,
+                generated_monotonic_ns=generated_monotonic_ns,
+                conservative=False,
+                project_infeasible=False,
+            )
+        except _InfeasibleCandidateError:
+            return self._compose(
+                intent,
+                state,
+                horizon_s,
+                prefix_duration_s,
+                generated_monotonic_ns=generated_monotonic_ns,
+                conservative=True,
+                project_infeasible=True,
+            )
+
+    def _compose(
+        self,
+        intent: FilteredIntent,
+        state: GeneratorState,
+        horizon_s: float,
+        prefix_duration_s: float,
+        *,
+        generated_monotonic_ns: int,
+        conservative: bool,
+        project_infeasible: bool,
+    ) -> CandidatePlan:
         rng = _restore_numpy_rng(state.numpy_rng_state)
         torch_rng = torch.tensor(state.torch_rng_state, dtype=torch.uint8)
         try:
@@ -155,25 +202,33 @@ class ProductionCandidateComposer:
                 torch.random.set_rng_state(torch_rng)
         except RuntimeError as error:
             raise ValueError("invalid Torch RNG state") from error
-        fallback = intent.support_status.value in {"fallback", "stale"}
+        fallback_intent = intent.support_status.value in {"fallback", "stale"}
         anchor = (
             self._anchor.plan_neutral(state.last_accepted_target, horizon_s)
-            if fallback
+            if fallback_intent
             else self._anchor.plan(intent, state.last_accepted_target, horizon_s)
         )
         face_state = self._face.state_from(state)
         sampled_face = (
-            () if fallback else self._face.sample(intent, face_state, rng, horizon_s)
+            ()
+            if conservative
+            else self._face.sample(intent, face_state, rng, horizon_s)
         )
         history = self._head.compact_history(
             state.event_history, at_ns=generated_monotonic_ns
         )
 
         active_head = (
-            None if fallback else self._active_head(history, generated_monotonic_ns)
+            None
+            if conservative
+            else self._active_head(history, generated_monotonic_ns)
         )
-        if active_head is None and self._head.decision_due(
-            history, generated_monotonic_ns=generated_monotonic_ns
+        if (
+            not conservative
+            and active_head is None
+            and self._head.decision_due(
+                history, generated_monotonic_ns=generated_monotonic_ns
+            )
         ):
             active_head = self._head.sample(
                 intent,
@@ -281,7 +336,7 @@ class ProductionCandidateComposer:
                     elapsed_s=torch.tensor([[[elapsed]]], dtype=torch.float32),
                 )
                 residual, hidden = self._residual(features, hidden)
-                if fallback:
+                if conservative:
                     residual = torch.zeros_like(residual)
                 commands = {
                     name: max(
@@ -296,6 +351,14 @@ class ProductionCandidateComposer:
                         self._positions_at(head_horizon.updates, base.offset_s)
                     )
                 command_update = self._update(base.offset_s, commands)
+                if not self._commands_feasible(response_states, command_update):
+                    if not project_infeasible:
+                        raise _InfeasibleCandidateError(
+                            "composed command is not controller-feasible"
+                        )
+                    command_update = self._project_feasible_commands(
+                        response_states, command_update
+                    )
                 for name, controller_state in tuple(response_states.items()):
                     response_states[name] = self._response.predict(
                         controller_state, command_update, elapsed
@@ -328,7 +391,11 @@ class ProductionCandidateComposer:
             calibration_sha256=state.calibration_sha256,
             controller_settings_sha256=state.controller_settings_sha256,
             horizon=horizon,
-            support_status=intent.support_status.value,
+            support_status=(
+                "fallback"
+                if conservative and not fallback_intent
+                else intent.support_status.value
+            ),
         )
         accepted = [u for u in horizon.updates if u.offset_s <= prefix_duration_s]
         boundary = accepted[-1].model_copy(update={"offset_s": 0.0})
@@ -342,21 +409,73 @@ class ProductionCandidateComposer:
                 for name in self._residual.config.actuator_names
             ),
             filtered_intent=intent,
-            latent_vector=tuple(float(v) for v in boundary_hidden.reshape(-1)),
-            numpy_rng_state=rng.bit_generator.state,
+            latent_vector=(
+                state.latent_vector
+                if conservative
+                else tuple(float(v) for v in boundary_hidden.reshape(-1))
+            ),
+            numpy_rng_state=(
+                state.numpy_rng_state
+                if conservative
+                else rng.bit_generator.state
+            ),
             event_history=history,
             monotonic_ns=ends_ns,
         )
         next_state = GeneratorState.model_validate(state_values)
+        planned_through_ns = (
+            max(face_state.planned_through_ns, ends_ns)
+            if conservative
+            else generated_monotonic_ns + round(horizon_s * 1e9)
+        )
         advanced_face = face_state.advance(
             sampled_face,
             monotonic_ns=ends_ns,
-            planned_through_ns=generated_monotonic_ns + round(horizon_s * 1e9),
+            planned_through_ns=planned_through_ns,
         )
         next_state = self._face.compact_state(advanced_face).to_generator_state(
             next_state
         )
         return CandidatePlan(proposal=proposal, boundary_state=next_state)
+
+    def _commands_feasible(
+        self,
+        states: Mapping[str, ControllerState],
+        update: TargetUpdate,
+    ) -> bool:
+        return all(
+            self._response.is_feasible(state, update) for state in states.values()
+        )
+
+    def _project_feasible_commands(
+        self,
+        states: Mapping[str, ControllerState],
+        update: TargetUpdate,
+    ) -> TargetUpdate:
+        positions = self._positions(update)
+        for name, state in states.items():
+            if self._response.is_feasible(state, update):
+                continue
+            parameters = self._response.config.actuator(name)
+            stopping_distance = state.velocity**2 / (
+                2.0 * parameters.max_acceleration_per_s2
+            )
+            direction = math.copysign(1.0, state.velocity)
+            target = state.position + direction * stopping_distance
+            while direction * (target - state.position) < stopping_distance:
+                target = math.nextafter(target, direction * math.inf)
+            if not -1.0 <= target <= 1.0:
+                raise ValueError(
+                    f"controller state for {name!r} cannot stop inside normalized range"
+                )
+            positions[name] = target
+            projected = self._update(update.offset_s, positions)
+            if not self._response.is_feasible(state, projected):
+                raise RuntimeError(
+                    f"failed to project controller-feasible fallback for {name!r}"
+                )
+            update = projected
+        return update
 
     @staticmethod
     def _positions(update: TargetUpdate) -> dict[str, float]:

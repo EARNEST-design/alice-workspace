@@ -7,13 +7,34 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import torch
 
 from alice.contracts.actuation import ActuatorTarget
 from alice.contracts.motion import MotionProposal, TargetUpdate, TargetUpdateHorizon
+from alice.models.head_scheduler import (
+    HeadGestureScheduler,
+    load_head_gesture_config,
+)
+from alice.models.residual_state_space import (
+    ResidualStateSpace,
+    load_residual_state_space_config,
+)
 from alice.motion.anchors import (
     AnchorPlanner,
     ProceduralMotionConfig,
     load_procedural_motion_config,
+)
+from alice.motion.controller_response import (
+    ControllerResponse,
+    ControllerState,
+    load_controller_response_config,
+)
+from alice.motion.face_events import (
+    FaceEvent,
+    FaceEventGenerator,
+    FaceEventKind,
+    FaceEventState,
+    load_face_event_config,
 )
 from alice.motion.intent_filter import FilteredIntent, SupportStatus
 from alice.motion.procedural import ProceduralMotionGenerator
@@ -27,11 +48,16 @@ from alice.motion.state import (
 from alice.motion.streaming import (
     CandidatePlan,
     ProceduralCandidateGenerator,
+    ProductionCandidateComposer,
     StreamingMotionGenerator,
 )
 
 ROOT = Path(__file__).parents[2]
 CONFIG_PATH = ROOT / "config" / "models" / "procedural-motion-v1.yaml"
+CONTROLLER_CONFIG_PATH = ROOT / "config" / "models" / "maestro-response-v1.yaml"
+FACE_CONFIG_PATH = ROOT / "config" / "models" / "face-events-v1.yaml"
+HEAD_CONFIG_PATH = ROOT / "config" / "models" / "head-gestures-v1.yaml"
+RESIDUAL_CONFIG_PATH = ROOT / "config" / "models" / "residual-state-space-v1.yaml"
 SHA256_ZERO = "0" * 64
 
 
@@ -144,6 +170,146 @@ def test_state_accepts_array_backed_numpy_rng_for_portable_replay() -> None:
 
     assert restored == state
     assert runtime.replan(_intent(), restored, 0) == runtime.replan(_intent(), state, 0)
+
+
+def test_moving_blink_falls_back_atomically_to_controller_feasible_anchor() -> None:
+    """An event target inside stopping distance must not leak attempted state."""
+
+    moving_position = -0.4664151512
+    moving_velocity = -0.3869662820
+    requested_target = -0.4718372893
+    generated_ns = 1_000_000_000
+    controller_config = load_controller_response_config(CONTROLLER_CONFIG_PATH)
+    response = ControllerResponse(config=controller_config)
+    anchor_config = load_procedural_motion_config(CONFIG_PATH).model_copy(
+        update={"anchor_transition_s": 0.1}
+    )
+    residual = ResidualStateSpace(
+        load_residual_state_space_config(RESIDUAL_CONFIG_PATH)
+    )
+    with torch.no_grad():
+        for parameter in residual.parameters():
+            parameter.zero_()
+    face = FaceEventGenerator(
+        config=load_face_event_config(FACE_CONFIG_PATH),
+        controller_config=controller_config,
+    )
+    head = HeadGestureScheduler(
+        config=load_head_gesture_config(HEAD_CONFIG_PATH),
+        controller_config=controller_config,
+    )
+    composer = ProductionCandidateComposer(
+        anchor_planner=AnchorPlanner(config=anchor_config),
+        residual_model=residual,
+        face_events=face,
+        head_scheduler=head,
+        controller_response=response,
+    )
+    neutral = anchor_config.anchor("neutral")
+    positions = {
+        target.actuator_name: target.normalized_position for target in neutral.targets
+    }
+    positions["upper_eyelids"] = moving_position
+    target = ProductionCandidateComposer._update(0.0, positions)
+    rng = np.random.default_rng(7)
+    state = GeneratorState(
+        schema_version="generator-state/v1",
+        last_accepted_target=target,
+        last_reported_pose=target,
+        estimated_velocity=tuple(
+            ActuatorVelocity(
+                actuator_name=item.actuator_name,
+                velocity_per_s=(
+                    moving_velocity if item.actuator_name == "upper_eyelids" else 0.0
+                ),
+            )
+            for item in target.targets
+        ),
+        filtered_intent=_intent(accepted_ns=generated_ns),
+        latent_vector=(0.1,) * residual.config.hidden_size,
+        numpy_rng_state=rng.bit_generator.state,
+        torch_rng_state=tuple(int(value) for value in torch.random.get_rng_state()),
+        event_history=(),
+        model_id="moving-blink-test-v1",
+        model_sha256=SHA256_ZERO,
+        calibration_sha256=controller_config.calibration_sha256,
+        controller_settings_sha256=controller_config.controller_settings_sha256,
+        monotonic_ns=generated_ns,
+    )
+    blink = FaceEvent(
+        schema_version="face-event/v1",
+        event_id="recorded-moving-blink",
+        model_id=face.config.model_id,
+        model_sha256=face.model_sha256,
+        kind=FaceEventKind.BLINK,
+        starts_monotonic_ns=600_000_000,
+        onset_s=0.6,
+        hold_s=0.2,
+        release_s=0.6,
+        amplitude=abs(requested_target),
+        actuator_names=("lower_eyelids", "upper_eyelids"),
+        peak_targets=(
+            ActuatorTarget(
+                actuator_name="lower_eyelids",
+                normalized_position=requested_target,
+            ),
+            ActuatorTarget(
+                actuator_name="upper_eyelids",
+                normalized_position=requested_target,
+            ),
+        ),
+    )
+    state = FaceEventState(
+        schema_version="face-event-state/v1",
+        model_id=face.config.model_id,
+        model_sha256=face.model_sha256,
+        monotonic_ns=generated_ns,
+        planned_through_ns=2_000_000_000,
+        history=(blink,),
+    ).to_generator_state(state)
+    moving = ControllerState(
+        schema_version="controller-state/v1",
+        actuator_name="upper_eyelids",
+        calibration_sha256=controller_config.calibration_sha256,
+        position=moving_position,
+        velocity=moving_velocity,
+    )
+    with pytest.raises(ValueError, match="stopping distance"):
+        response.predict(
+            moving,
+            ProductionCandidateComposer._update(
+                0.2, {"upper_eyelids": requested_target}
+            ),
+            elapsed_s=0.2,
+        )
+
+    plan = composer.plan(
+        _intent(accepted_ns=generated_ns),
+        state,
+        horizon_s=1.0,
+        prefix_duration_s=0.4,
+        generated_monotonic_ns=generated_ns,
+    )
+
+    expected = response.predict(
+        moving,
+        ProductionCandidateComposer._update(0.2, {"upper_eyelids": 0.0}),
+        elapsed_s=0.2,
+    )
+    first_fallback = next(
+        target
+        for target in plan.proposal.horizon.updates[1].targets
+        if target.actuator_name == "upper_eyelids"
+    )
+    assert plan.proposal.support_status == "fallback"
+    assert first_fallback.normalized_position == pytest.approx(expected.position)
+    assert plan.boundary_state.numpy_rng_state == state.numpy_rng_state
+    assert plan.boundary_state.latent_vector == state.latent_vector
+    assert plan.boundary_state.torch_rng_state == state.torch_rng_state
+    assert not any(
+        record.event_type == "head-decision-state/v1"
+        for record in plan.boundary_state.event_history
+    )
 
 
 def test_replan_emits_only_the_configured_prefix() -> None:
