@@ -20,7 +20,13 @@ from alice.motion.face_events import (
     load_face_event_config,
 )
 from alice.motion.intent_filter import FilteredIntent, SupportStatus
-from alice.motion.state import ActuatorVelocity, GeneratorState, dump_state, load_state
+from alice.motion.state import (
+    ActuatorVelocity,
+    EventHistoryRecord,
+    GeneratorState,
+    dump_state,
+    load_state,
+)
 
 ROOT = Path(__file__).parents[2]
 CONFIG_PATH = ROOT / "config" / "models" / "face-events-v1.yaml"
@@ -104,6 +110,81 @@ def _sample_many(*, seconds: int, seed: int) -> tuple[FaceEvent, ...]:
     return tuple(sorted(observed.values(), key=lambda event: event.starts_monotonic_ns))
 
 
+def _sample_partitions(
+    durations_s: tuple[float, ...],
+    *,
+    seed: int,
+) -> tuple[FaceEvent, ...]:
+    generator = _generator()
+    rng = np.random.default_rng(seed)
+    state = generator.state_from(_generic_state())
+    observed: dict[str, FaceEvent] = {}
+    boundary_ns = 0
+    for duration_s in durations_s:
+        events = generator.sample(
+            _intent(accepted_ns=boundary_ns),
+            state,
+            rng,
+            duration_s,
+        )
+        observed.update((event.event_id, event) for event in events)
+        boundary_ns += round(duration_s * 1_000_000_000)
+        state = state.advance(
+            events,
+            monotonic_ns=boundary_ns,
+            planned_through_ns=boundary_ns,
+        )
+    return tuple(
+        sorted(
+            observed.values(),
+            key=lambda event: (event.starts_monotonic_ns, event.event_id),
+        )
+    )
+
+
+def _blink(
+    generator: FaceEventGenerator,
+    *,
+    onset_s: float = 0.6,
+    hold_s: float = 0.2,
+    release_s: float = 0.6,
+    amplitude: float = 0.5,
+) -> FaceEvent:
+    return FaceEvent(
+        schema_version="face-event/v1",
+        event_id="persisted-blink",
+        model_id=generator.config.model_id,
+        model_sha256=generator.model_sha256,
+        kind=FaceEventKind.BLINK,
+        starts_monotonic_ns=1_000_000_000,
+        onset_s=onset_s,
+        hold_s=hold_s,
+        release_s=release_s,
+        amplitude=amplitude,
+        actuator_names=("lower_eyelids", "upper_eyelids"),
+        peak_targets=(
+            ActuatorTarget(
+                actuator_name="lower_eyelids",
+                normalized_position=-amplitude,
+            ),
+            ActuatorTarget(
+                actuator_name="upper_eyelids",
+                normalized_position=-amplitude,
+            ),
+        ),
+    )
+
+
+def _persisted(generator: FaceEventGenerator, event: FaceEvent) -> GeneratorState:
+    generic = _generic_state()
+    typed = generator.state_from(generic).advance(
+        (event,),
+        monotonic_ns=0,
+        planned_through_ns=event.starts_monotonic_ns,
+    )
+    return typed.to_generator_state(generic)
+
+
 def test_blinks_respect_refractory_period() -> None:
     """Forgetting absolute history would permit rapid blinks at horizon seams."""
 
@@ -126,6 +207,25 @@ def test_events_are_seeded_but_not_static() -> None:
 
     assert _sample_many(seconds=30, seed=4) == _sample_many(seconds=30, seed=4)
     assert _sample_many(seconds=30, seed=4) != _sample_many(seconds=30, seed=5)
+
+
+def test_decisions_are_invariant_to_irregular_horizon_partitions() -> None:
+    """Restarting cadence at each 0.7-second seam would shift event decisions."""
+
+    one_shot = _sample_partitions((7.0,), seed=23)
+    partitioned = _sample_partitions((0.7,) * 10, seed=23)
+
+    assert partitioned == one_shot
+
+
+def test_sub_interval_horizons_accumulate_to_event_decisions() -> None:
+    """Repeated horizons below decision cadence must not suppress all events."""
+
+    one_shot = _sample_partitions((0.5,), seed=3)
+    partitioned = _sample_partitions((0.05,) * 10, seed=3)
+
+    assert one_shot
+    assert partitioned == one_shot
 
 
 def test_hazard_depends_on_continuous_affect_and_elapsed_refractory() -> None:
@@ -194,7 +294,13 @@ def test_face_event_state_round_trips_through_generic_generator_state() -> None:
     """Subtype-only state would be lost at the generic streaming boundary."""
 
     generator = _generator()
-    generic = _generic_state()
+    head_record = EventHistoryRecord(
+        event_type="head-gesture/v1",
+        started_monotonic_ns=8_000_000_000,
+        ended_monotonic_ns=9_000_000_000,
+        payload={"kind": "nod", "amplitude": 0.2},
+    )
+    generic = _generic_state().model_copy(update={"event_history": (head_record,)})
     state = generator.state_from(generic)
     events = generator.sample(_intent(), state, np.random.default_rng(11), 5.0)
     state = state.advance(
@@ -209,6 +315,11 @@ def test_face_event_state_round_trips_through_generic_generator_state() -> None:
 
     assert restored == state
     assert all(record.started_monotonic_ns >= 0 for record in persisted.event_history)
+    assert tuple(
+        record
+        for record in persisted.event_history
+        if record.event_type == "head-gesture/v1"
+    ) == (head_record,)
 
 
 def test_overlapping_horizon_reuses_persisted_future_events() -> None:
@@ -283,6 +394,52 @@ def test_generator_rejects_conflicting_persisted_events() -> None:
 
     with pytest.raises(ValueError, match="conflicting face events"):
         generator.sample(_intent(), state, np.random.default_rng(2), 2.0)
+
+
+def test_restore_rejects_persisted_event_outside_policy_amplitude() -> None:
+    """A forged current model hash must not admit an old amplitude policy."""
+
+    generator = _generator()
+    persisted = _persisted(generator, _blink(generator, amplitude=0.9))
+
+    with pytest.raises(ValueError, match="amplitude.*policy"):
+        generator.state_from(persisted)
+
+
+def test_restore_rejects_response_infeasible_persisted_event() -> None:
+    """A 0.01-second transition cannot realize a 0.9 eyelid movement."""
+
+    generator = _generator()
+    persisted = _persisted(
+        generator,
+        _blink(generator, onset_s=0.01, release_s=0.01, amplitude=0.9),
+    )
+
+    with pytest.raises(ValueError, match="amplitude.*policy|controller response"):
+        generator.state_from(persisted)
+
+
+def test_restore_checks_each_event_against_controller_response() -> None:
+    """Policy-shaped amplitude alone must not bypass response feasibility."""
+
+    generator = _generator()
+    persisted = _persisted(
+        generator,
+        _blink(generator, onset_s=0.01, release_s=0.01, amplitude=0.49),
+    )
+
+    with pytest.raises(ValueError, match="controller response"):
+        generator.state_from(persisted)
+
+
+def test_restore_rejects_event_from_changed_phase_policy() -> None:
+    """Claiming the current hash must not hide a changed hold-duration policy."""
+
+    generator = _generator()
+    persisted = _persisted(generator, _blink(generator, hold_s=0.4))
+
+    with pytest.raises(ValueError, match="timing.*policy"):
+        generator.state_from(persisted)
 
 
 def test_face_event_rejects_uncoupled_target_values() -> None:

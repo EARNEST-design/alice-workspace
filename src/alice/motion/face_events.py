@@ -413,11 +413,13 @@ class FaceEventGenerator:
             raise ValueError("generator state calibration identity mismatch")
         if state.controller_settings_sha256 != self._config.controller_settings_sha256:
             raise ValueError("generator state controller identity mismatch")
-        return FaceEventState.from_generator_state(
+        restored = FaceEventState.from_generator_state(
             state,
             model_id=self._config.model_id,
             model_sha256=self._model_sha256,
         )
+        self._validate_history_rules(restored.history)
+        return restored
 
     def sample(
         self,
@@ -445,7 +447,7 @@ class FaceEventGenerator:
 
         history = list(typed_state.history)
         interval_ns = round(self._config.decision_interval_s * _NANOSECONDS_PER_SECOND)
-        candidate_ns = typed_state.planned_through_ns + interval_ns
+        candidate_ns = (typed_state.planned_through_ns // interval_ns + 1) * interval_ns
         while candidate_ns <= horizon_end_ns:
             for policy in self._config.events:
                 elapsed_since_end_s = self._elapsed_since_last_end(
@@ -565,8 +567,7 @@ class FaceEventGenerator:
         ordered = sorted(history, key=lambda event: event.starts_monotonic_ns)
         for index, left in enumerate(ordered):
             left_policy = self._config.policy(left.kind)
-            if left.actuator_names != left_policy.actuator_names:
-                raise ValueError("persisted face event coupling changed")
+            self._validate_event_against_policy(left, left_policy)
             for right in ordered[index + 1 :]:
                 if right.starts_monotonic_ns >= left.ends_monotonic_ns:
                     break
@@ -581,6 +582,30 @@ class FaceEventGenerator:
                 gap_ns = right.starts_monotonic_ns - left.ends_monotonic_ns
                 if gap_ns < round(policy.refractory_s * _NANOSECONDS_PER_SECOND):
                     raise ValueError("persisted face event violates refractory period")
+
+    def _validate_event_against_policy(
+        self,
+        event: FaceEvent,
+        policy: FaceEventPolicy,
+    ) -> None:
+        if event.actuator_names != policy.actuator_names:
+            raise ValueError("persisted face event coupling changed")
+        magnitude = abs(event.amplitude)
+        if not policy.amplitude_min <= magnitude <= policy.amplitude_max:
+            raise ValueError("persisted face event amplitude violates current policy")
+        if policy.polarity == "negative" and event.amplitude < 0.0:
+            raise ValueError("persisted face event polarity violates current policy")
+        minimum_s = self.minimum_transition_s(event.actuator_names, magnitude)
+        if event.onset_s < minimum_s or event.release_s < minimum_s:
+            raise ValueError(
+                "persisted face event phase is shorter than controller response"
+            )
+        if (
+            event.onset_s != policy.onset_s
+            or event.hold_s != policy.hold_s
+            or event.release_s != policy.release_s
+        ):
+            raise ValueError("persisted face event timing violates current policy")
 
     def _time_conflicts(
         self,
