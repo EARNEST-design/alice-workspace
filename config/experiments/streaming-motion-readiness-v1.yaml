@@ -1,0 +1,14 @@
+schema_version: motion-readiness-device-config/v1
+controller:
+  stable_path: /dev/serial/by-id/usb-Pololu_Corporation_Pololu_Mini_Maestro_12-Channel_USB_Servo_Controller_00037376-if00
+  usb_vendor_id: "1ffb"
+  usb_product_id: "008a"
+  usb_serial: "00037376"
+  usb_interface: "00"
+camera:
+  stable_path: /dev/v4l/by-id/usb-046d_HD_Webcam_C525_79C73260-video-index0
+  usb_vendor_id: "046d"
+  usb_product_id: "0826"
+  usb_serial: "79C73260"
+  usb_interface: "02"
+  video_index: 0

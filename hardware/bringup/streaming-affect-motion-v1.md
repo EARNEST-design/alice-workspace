@@ -13,6 +13,10 @@ send Set Target, or move Alice.
 - Use the reviewed controller Command Port path ending in serial `00037376-if00`.
 - Use the Alice-facing C525 capture identity ending in
   `C525_79C73260-video-index0`.
+- Use the reviewed device-identity record
+  `config/experiments/streaming-motion-readiness-v1.yaml`. It pins the exact
+  Pololu command-port and C525 kernel/USB identities; do not substitute a
+  copied record or use the CLI device arguments as an identity override.
 - Install the repository environment with its software-model dependencies:
   `uv sync --extra ml`.
 - Select one immutable `motion-model-package/v2` directory. Do not point the
@@ -27,6 +31,7 @@ package to evaluate:
 mkdir -p artifacts/readiness
 uv run alice-motion-readiness \
   --hardware-manifest hardware/alice-face-v1.yaml \
+  --device-config config/experiments/streaming-motion-readiness-v1.yaml \
   --model-package artifacts/models/streaming-affect-motion-v1 \
   --camera-device /dev/v4l/by-id/usb-046d_HD_Webcam_C525_79C73260-video-index0 \
   --json-output artifacts/readiness/streaming-affect-motion-v1.json

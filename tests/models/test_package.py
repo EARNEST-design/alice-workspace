@@ -8,7 +8,7 @@ import math
 import os
 from copy import deepcopy
 from pathlib import Path
-from typing import IO, Any
+from typing import Any
 
 import pytest
 import serial
@@ -570,45 +570,17 @@ def test_load_uses_the_same_weight_bytes_that_passed_checksum(
         replacement,
     )
     assert replacement.read_bytes() != package.weights.read_bytes()
-    original_open = Path.open
     original_os_open = os.open
     swapped = False
-
-    class SwapAfterFirstRead:
-        def __init__(self, stream: IO[bytes]) -> None:
-            self._stream = stream
-
-        def __enter__(self) -> SwapAfterFirstRead:
-            self._stream.__enter__()
-            return self
-
-        def __exit__(self, *args: object) -> object:
-            return self._stream.__exit__(*args)
-
-        def read(self, size: int = -1) -> bytes:
-            nonlocal swapped
-            data = self._stream.read(size)
-            if data and not swapped:
-                package.weights.write_bytes(replacement.read_bytes())
-                swapped = True
-            return data
-
-    def racing_open(path: Path, *args: Any, **kwargs: Any) -> Any:
-        stream = original_open(path, *args, **kwargs)
-        mode = args[0] if args else kwargs.get("mode", "r")
-        if path == package.weights and mode == "rb" and not swapped:
-            return SwapAfterFirstRead(stream)
-        return stream
 
     def racing_os_open(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
         nonlocal swapped
         descriptor = original_os_open(path, flags, *args, **kwargs)
-        if Path(path) == package.weights and not swapped:
+        if Path(path).name == package.weights.name and not swapped:
             os.replace(replacement, package.weights)
             swapped = True
         return descriptor
 
-    monkeypatch.setattr(Path, "open", racing_open)
     monkeypatch.setattr(os, "open", racing_os_open)
 
     loaded = load_package(package.path, _identities())
@@ -616,6 +588,51 @@ def test_load_uses_the_same_weight_bytes_that_passed_checksum(
     assert swapped
     for name, tensor in expected.items():
         assert torch.equal(loaded.residual_model.state_dict()[name], tensor)
+
+
+def test_validated_snapshot_is_the_only_bytes_used_after_path_substitution(
+    tmp_path: Path,
+) -> None:
+    """Reopening package paths after validation would permit an ABA substitution."""
+
+    package = _write_valid_package(tmp_path)
+    snapshot = package_module.snapshot_package(package.path)
+    consumed_digest = hashlib.sha256(snapshot.manifest_bytes).hexdigest()
+    package.manifest.write_text("{}\n", encoding="utf-8")
+
+    loaded = package_module.load_package_snapshot(snapshot, _identities())
+
+    assert snapshot.manifest_sha256 == consumed_digest
+    assert loaded.identities == _identities()
+    with pytest.raises(ValueError, match="manifest"):
+        load_package(package.path, _identities())
+
+
+def test_snapshot_inspects_special_artifacts_without_a_read_capable_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A FIFO package artifact must fail before the loader can read from it."""
+
+    package = _write_valid_package(tmp_path)
+    fifo = package.path / "weights" / "replacement"
+    os.mkfifo(fifo)
+    fifo.replace(package.weights)
+    original_open = os.open
+    inspected_flags: list[int] = []
+
+    def record_open(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+        if Path(path).name == package.weights.name:
+            inspected_flags.append(flags)
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", record_open)
+
+    with pytest.raises(ValueError, match="regular file"):
+        package_module.snapshot_package(package.path)
+
+    assert inspected_flags
+    assert all(flags & os.O_PATH for flags in inspected_flags)
 
 
 def _fail_if_constructed(*args: object, **kwargs: object) -> None:

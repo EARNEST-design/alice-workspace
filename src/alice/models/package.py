@@ -304,6 +304,26 @@ class LoadedMotionModel:
     candidate_composer: ProductionCandidateComposer
 
 
+@dataclass(frozen=True, slots=True)
+class FilesystemIdentity:
+    """Stable identity of one snapshotted filesystem object."""
+
+    device: int
+    inode: int
+
+
+@dataclass(frozen=True, slots=True)
+class PackageSnapshot:
+    """Validated immutable package bytes captured through anchored descriptors."""
+
+    manifest_bytes: bytes
+    manifest_sha256: str
+    identities: PackageIdentities
+    artifacts: Mapping[str, bytes]
+    file_identities: frozenset[FilesystemIdentity]
+    directory_identities: frozenset[FilesystemIdentity]
+
+
 def save_package(
     path: str | Path,
     components: MotionModelComponents,
@@ -394,35 +414,113 @@ def load_package(
 ) -> LoadedMotionModel:
     """Validate a package completely, then construct software model components."""
 
-    package = _package_paths(Path(path))
+    return load_package_snapshot(snapshot_package(path), expected_identities)
+
+
+def snapshot_package(path: str | Path) -> PackageSnapshot:
+    """Capture and validate one package through a real directory descriptor."""
+
+    root_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    root_flags |= getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        root_fd = os.open(Path(path), root_flags)
+    except OSError as error:
+        raise ValueError("model package path is unreadable") from error
+    directory_identities: set[FilesystemIdentity] = set()
+    file_identities: set[FilesystemIdentity] = set()
+    directory_fds: dict[str, int] = {}
+    try:
+        root_stat = os.fstat(root_fd)
+        if not stat.S_ISDIR(root_stat.st_mode):
+            raise ValueError("model package path must be a real directory")
+        directory_identities.add(_filesystem_identity(root_stat))
+        expected_root = {"manifest.json", "configs", "records", "weights"}
+        if set(os.listdir(root_fd)) != expected_root:
+            raise ValueError("model package contains undeclared or non-regular entries")
+
+        expected_directories = {
+            "configs": {Path(item).name for item in _CONFIG_PATHS.values()},
+            "records": {Path(_TRAINING_RECORD_PATH).name},
+            "weights": {Path(_WEIGHTS_PATH).name},
+        }
+        for directory_name, expected_entries in expected_directories.items():
+            descriptor = os.open(directory_name, root_flags, dir_fd=root_fd)
+            directory_fds[directory_name] = descriptor
+            directory_stat = os.fstat(descriptor)
+            if not stat.S_ISDIR(directory_stat.st_mode):
+                raise ValueError("model package contains a non-directory container")
+            directory_identities.add(_filesystem_identity(directory_stat))
+            if set(os.listdir(descriptor)) != expected_entries:
+                raise ValueError(
+                    "model package contains undeclared or non-regular entries"
+                )
+
+        manifest_bytes, manifest_identity = _read_regular_at(root_fd, "manifest.json")
+        file_identities.add(manifest_identity)
+        artifact_bytes: dict[str, bytes] = {}
+        for relative_path in sorted(_DECLARED_ARTIFACT_PATHS):
+            directory_name, filename = relative_path.split("/", 1)
+            payload, identity = _read_regular_at(
+                directory_fds[directory_name], filename
+            )
+            artifact_bytes[relative_path] = payload
+            file_identities.add(identity)
+
+        manifest = _load_manifest(manifest_bytes)
+        for relative_path, expected_sha256 in manifest.checksums.items():
+            if _sha256_bytes(artifact_bytes[relative_path]) != expected_sha256:
+                raise ValueError(f"artifact checksum mismatch: {relative_path}")
+        return PackageSnapshot(
+            manifest_bytes=manifest_bytes,
+            manifest_sha256=_sha256_bytes(manifest_bytes),
+            identities=manifest.identities,
+            artifacts=MappingProxyType(artifact_bytes),
+            file_identities=frozenset(file_identities),
+            directory_identities=frozenset(directory_identities),
+        )
+    except OSError as error:
+        raise ValueError("model package snapshot failed") from error
+    finally:
+        for descriptor in directory_fds.values():
+            os.close(descriptor)
+        os.close(root_fd)
+
+
+def load_package_snapshot(
+    snapshot: PackageSnapshot,
+    expected_identities: PackageIdentities | Mapping[str, object],
+) -> LoadedMotionModel:
+    """Construct software components solely from one validated byte snapshot."""
+
     expected = PackageIdentities.model_validate(expected_identities)
-    _validate_package_inventory(package.path)
-    manifest = _load_manifest(_read_regular_bytes(package.manifest))
+    manifest = _load_manifest(snapshot.manifest_bytes)
     _validate_expected_identities(manifest.identities, expected)
-    snapshot = _snapshot_artifacts(package.path, manifest.checksums)
+    artifacts = snapshot.artifacts
 
     residual_config = ResidualStateSpaceConfig.model_validate(
-        _decode_json(snapshot[_CONFIG_PATHS["residual"]], label="residual config")
+        _decode_json(artifacts[_CONFIG_PATHS["residual"]], label="residual config")
     )
     anchor_config = ProceduralMotionConfig.model_validate(
-        _decode_json(snapshot[_CONFIG_PATHS["anchor"]], label="anchor config")
+        _decode_json(artifacts[_CONFIG_PATHS["anchor"]], label="anchor config")
     )
     face_event_config = FaceEventConfig.model_validate(
-        _decode_json(snapshot[_CONFIG_PATHS["face_events"]], label="face-event config")
+        _decode_json(
+            artifacts[_CONFIG_PATHS["face_events"]], label="face-event config"
+        )
     )
     head_gesture_config = HeadGestureConfig.model_validate(
         _decode_json(
-            snapshot[_CONFIG_PATHS["head_gestures"]], label="head-gesture config"
+            artifacts[_CONFIG_PATHS["head_gestures"]], label="head-gesture config"
         )
     )
     controller_config = ControllerResponseConfig.model_validate(
         _decode_json(
-            snapshot[_CONFIG_PATHS["controller_response"]],
+            artifacts[_CONFIG_PATHS["controller_response"]],
             label="controller-response config",
         )
     )
     components = MotionModelComponents(
-        weights=package.weights,
+        weights=Path("validated-snapshot.safetensors"),
         residual_config=residual_config,
         face_event_config=face_event_config,
         head_gesture_config=head_gesture_config,
@@ -432,13 +530,13 @@ def load_package(
     _validate_components(components, manifest.identities)
 
     training_record = _validate_training_record(
-        _decode_json(snapshot[_TRAINING_RECORD_PATH], label="training record"),
+        _decode_json(artifacts[_TRAINING_RECORD_PATH], label="training record"),
         residual_config=residual_config,
         controller_response_sha256=controller_config.response_sha256,
         weights_sha256=manifest.checksums[_WEIGHTS_PATH],
         seed_policy=manifest.seed_policy,
     )
-    weights = load(snapshot[_WEIGHTS_PATH])
+    weights = load(artifacts[_WEIGHTS_PATH])
     _validate_finite_weights(weights)
 
     residual_model = ResidualStateSpace(residual_config)
@@ -829,21 +927,81 @@ def _encode_json(document: object) -> bytes:
 
 
 def _read_regular_bytes(path: Path) -> bytes:
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-    flags |= getattr(os, "O_NONBLOCK", 0)
     try:
-        descriptor = os.open(path, flags)
+        descriptor = _open_verified_regular_file(path)
     except OSError as error:
         raise ValueError(f"package artifact is unreadable: {path.name}") from error
     try:
-        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-            raise ValueError(f"package artifact is not a regular file: {path.name}")
         with os.fdopen(descriptor, "rb") as stream:
             descriptor = -1
             return stream.read()
     finally:
         if descriptor >= 0:
             os.close(descriptor)
+
+
+def _read_regular_at(
+    directory_fd: int,
+    filename: str,
+) -> tuple[bytes, FilesystemIdentity]:
+    """Read one unchanged regular file relative to an anchored directory."""
+
+    if Path(filename).name != filename:
+        raise ValueError("package artifact name must be one filename")
+    descriptor = _open_verified_regular_file(filename, directory_fd=directory_fd)
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise ValueError("model package artifact must be a regular file")
+        chunks: list[bytes] = []
+        while chunk := os.read(descriptor, 1024 * 1024):
+            chunks.append(chunk)
+        after = os.fstat(descriptor)
+        if (
+            _filesystem_identity(before) != _filesystem_identity(after)
+            or before.st_size != after.st_size
+            or before.st_mtime_ns != after.st_mtime_ns
+            or before.st_ctime_ns != after.st_ctime_ns
+        ):
+            raise ValueError("model package artifact changed during snapshot")
+        return b"".join(chunks), _filesystem_identity(after)
+    finally:
+        os.close(descriptor)
+
+
+def _open_verified_regular_file(
+    path: str | Path,
+    *,
+    directory_fd: int | None = None,
+) -> int:
+    """Acquire a readable descriptor only after an O_PATH type inspection."""
+
+    try:
+        path_flags = os.O_PATH
+    except AttributeError as error:
+        raise ValueError("secure regular file inspection is unavailable") from error
+    path_flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    probe = os.open(path, path_flags, dir_fd=directory_fd)
+    try:
+        expected = os.fstat(probe)
+        if not stat.S_ISREG(expected.st_mode):
+            raise ValueError("model package artifact must be a regular file")
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+        descriptor = os.open(f"/proc/self/fd/{probe}", flags)
+        try:
+            actual = os.fstat(descriptor)
+            if _filesystem_identity(actual) != _filesystem_identity(expected):
+                raise ValueError("model package artifact changed before snapshot")
+            return descriptor
+        except BaseException:
+            os.close(descriptor)
+            raise
+    finally:
+        os.close(probe)
+
+
+def _filesystem_identity(metadata: os.stat_result) -> FilesystemIdentity:
+    return FilesystemIdentity(device=metadata.st_dev, inode=metadata.st_ino)
 
 
 def _sha256_bytes(data: bytes) -> str:
