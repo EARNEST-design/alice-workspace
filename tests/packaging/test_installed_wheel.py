@@ -1,6 +1,7 @@
 import os
 import subprocess
 import sys
+import zipfile
 from pathlib import Path
 
 
@@ -94,3 +95,33 @@ def test_built_wheel_runs_entry_points_without_repository_files(
     assert "['opencv-contrib-python']" in probe
     assert "# Passive Blendshape Conclusion" in probe
     assert "# Actuator-identification conclusion" in probe
+
+
+def test_built_wheel_keeps_ml_dependencies_behind_optional_extra(
+    tmp_path: Path,
+) -> None:
+    """Base installs must not download Torch when no model code is requested."""
+
+    repository = Path(__file__).resolve().parents[2]
+    dist = tmp_path / "dist"
+    _run("uv", "build", "--wheel", "--out-dir", str(dist), cwd=repository)
+    wheel = next(dist.glob("alice-*.whl"))
+    with zipfile.ZipFile(wheel) as archive:
+        metadata_name = next(
+            name for name in archive.namelist() if name.endswith(".dist-info/METADATA")
+        )
+        metadata = archive.read(metadata_name).decode("utf-8")
+    requirements = tuple(
+        line.removeprefix("Requires-Dist: ")
+        for line in metadata.splitlines()
+        if line.startswith("Requires-Dist: ")
+    )
+
+    for dependency in ("torch", "safetensors"):
+        matching = tuple(
+            requirement
+            for requirement in requirements
+            if requirement.split(";", 1)[0].strip().startswith(dependency)
+        )
+        assert matching
+        assert all("extra == 'ml'" in requirement for requirement in matching)

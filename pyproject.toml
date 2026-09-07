@@ -16,6 +16,12 @@ dependencies = [
   "pyyaml",
 ]
 
+[project.optional-dependencies]
+ml = [
+  "safetensors>=0.8.0",
+  "torch>=2.14.0",
+]
+
 [project.scripts]
 alice-camera = "alice.perception.cli:main"
 alice-passive-capture = "alice.experiments.passive_capture:main"
@@ -27,8 +33,15 @@ dev = [
   "mypy",
   "pytest",
   "ruff",
+  "safetensors>=0.8.0",
+  "torch>=2.14.0",
   "types-pyserial",
 ]
+
+[[tool.uv.index]]
+name = "pytorch"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/alice"]
@@ -43,6 +56,9 @@ include = [
 [tool.uv]
 default-groups = ["dev"]
 managed = true
+
+[tool.uv.sources]
+torch = { index = "pytorch" }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
