@@ -27,6 +27,7 @@ alice-camera = "alice.perception.cli:main"
 alice-passive-capture = "alice.experiments.passive_capture:main"
 alice-hardware-preflight = "alice.experiments.hardware_cli:main"
 alice-hardware-run = "alice.experiments.hardware_run_cli:main"
+alice-motion-readiness = "alice.experiments.motion_readiness_cli:main"
 
 [dependency-groups]
 dev = [

@@ -70,6 +70,12 @@ def test_built_wheel_runs_entry_points_without_repository_files(
         cwd=outside_repository,
         env=clean_env,
     )
+    readiness_help = _run(
+        str(environment / "bin" / "alice-motion-readiness"),
+        "--help",
+        cwd=outside_repository,
+        env=clean_env,
+    )
     probe = _run(
         str(environment / "bin" / "python"),
         "-c",
@@ -92,6 +98,7 @@ def test_built_wheel_runs_entry_points_without_repository_files(
     assert "alice-passive-capture" in passive_help
     assert "Phase 2 hardware" in hardware_help
     assert "Guarded Phase 2" in hardware_run_help
+    assert "read-only streaming motion readiness" in readiness_help
     assert "['opencv-contrib-python']" in probe
     assert "# Passive Blendshape Conclusion" in probe
     assert "# Actuator-identification conclusion" in probe
