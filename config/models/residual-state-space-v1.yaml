@@ -30,3 +30,7 @@ residual_envelope:
   - 0.08
   - 0.06
   - 0.08
+research_status: unfitted-research-prior
+provenance: >-
+  Hidden size and per-actuator residual envelopes are conservative hand-authored
+  unfitted research priors; they are not empirical or promotion evidence.

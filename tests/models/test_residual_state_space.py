@@ -24,6 +24,8 @@ def _config() -> ResidualStateSpaceConfig:
         actuator_names=("mouth_open", "neck_rotation"),
         hidden_size=5,
         residual_envelope=(0.05, 0.2),
+        research_status="unfitted-research-prior",
+        provenance="Hand-authored unit-test priors; not empirical evidence.",
     )
 
 
@@ -54,6 +56,19 @@ def test_residual_is_bounded_per_actuator() -> None:
     assert hidden.shape == (1, 2, 5)
     assert torch.all(residual.abs() <= envelope + 1e-7)
     assert torch.all(residual[:, -1].abs() > 0.99 * envelope.expand(2, 1, 2)[:, 0])
+
+
+def test_loading_weights_cannot_replace_configured_envelope() -> None:
+    """A same-shape checkpoint from another config must not expand output bounds."""
+
+    source = ResidualStateSpace(
+        _config().model_copy(update={"residual_envelope": (0.9, 0.9)})
+    )
+    target = ResidualStateSpace(_config())
+
+    target.load_state_dict(source.state_dict())
+
+    assert torch.equal(target.residual_envelope, torch.tensor((0.05, 0.2)))
 
 
 def test_state_carry_matches_one_contiguous_rollout() -> None:
@@ -124,6 +139,26 @@ def test_config_binds_controller_response_feature_identity() -> None:
     assert config.controller_settings_sha256 == "b" * 64
 
 
+def test_config_records_durable_research_provenance() -> None:
+    """An unfitted architecture must not serialize as promotion evidence."""
+
+    values = _config().model_dump()
+    values.update(
+        {
+            "research_status": "unfitted-research-prior",
+            "provenance": (
+                "Hidden size and envelopes are hand-authored priors; "
+                "not empirical or promotion evidence."
+            ),
+        }
+    )
+
+    config = ResidualStateSpaceConfig.model_validate(values)
+
+    assert config.research_status == "unfitted-research-prior"
+    assert "not empirical or promotion evidence" in config.provenance
+
+
 def test_versioned_config_loads_without_hardware_access() -> None:
     """The checked-in model contract must be parseable as an offline artifact."""
 
@@ -131,6 +166,8 @@ def test_versioned_config_loads_without_hardware_access() -> None:
     config = load_residual_state_space_config(path)
 
     assert config.model_id == "residual-state-space-v1"
+    assert config.research_status == "unfitted-research-prior"
+    assert "not empirical or promotion evidence" in config.provenance
     assert len(config.actuator_names) == len(config.residual_envelope)
     assert config.feature_size == (
         len(config.affect_dimensions) + 3 * len(config.actuator_names) + 2

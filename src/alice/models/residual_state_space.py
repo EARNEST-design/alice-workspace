@@ -34,6 +34,8 @@ class ResidualStateSpaceConfig(BaseModel):
     actuator_names: tuple[NonEmptyString, ...] = Field(min_length=1)
     hidden_size: PositiveInteger
     residual_envelope: tuple[ResidualEnvelope, ...] = Field(min_length=1)
+    research_status: Literal["unfitted-research-prior", "empirically-evaluated"]
+    provenance: NonEmptyString
 
     @model_validator(mode="after")
     def validate_dimensions(self) -> ResidualStateSpaceConfig:
@@ -73,6 +75,7 @@ class ResidualStateSpace(nn.Module):
         self.register_buffer(
             "residual_envelope",
             torch.tensor(config.residual_envelope, dtype=torch.float32),
+            persistent=False,
         )
 
     def compose_features(

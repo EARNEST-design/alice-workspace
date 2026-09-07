@@ -130,7 +130,7 @@ class ResidualTrainingConfig:
 
 @dataclass(frozen=True, slots=True)
 class EpochLosses:
-    """Scalar objective components captured after one optimizer step."""
+    """Scalar objective components used for one optimizer step."""
 
     epoch: int
     losses: dict[str, float]
@@ -144,6 +144,16 @@ class TrainingResult:
     research_record_path: Path
     weights_sha256: str
     epochs: tuple[EpochLosses, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ResidualRollout:
+    """Closed-loop residual and differentiable controller-response trajectory."""
+
+    residuals: torch.Tensor
+    realized_position: torch.Tensor
+    realized_velocity: torch.Tensor
+    hidden: torch.Tensor
 
 
 def train_residual(
@@ -161,43 +171,44 @@ def train_residual(
     if weights_path.exists() or record_path.exists():
         raise FileExistsError("training artifacts already exist")
 
-    deterministic_was_enabled = torch.are_deterministic_algorithms_enabled()
+    deterministic_debug_mode = torch.get_deterministic_debug_mode()
+    cpu_rng_state = torch.random.get_rng_state()
     epoch_records: list[EpochLosses] = []
     try:
-        torch.use_deterministic_algorithms(True)
-        with torch.random.fork_rng(devices=[]):
-            torch.manual_seed(config.seed)
-            model = ResidualStateSpace(config.model).cpu()
-            optimizer = torch.optim.Adam(
-                model.parameters(),
-                lr=config.learning_rate,
-            )
-            inputs = _cpu_float_dataset(dataset)
-            features = model.compose_features(
-                affect=inputs.affect,
-                intensity=inputs.intensity,
-                anchor_pose=inputs.anchor_pose,
-                response_position=inputs.response_position,
-                response_velocity=inputs.response_velocity,
-                elapsed_s=inputs.elapsed_s,
-            )
-            for epoch in range(1, config.epochs + 1):
-                optimizer.zero_grad(set_to_none=True)
-                prediction, _ = model(features, hidden=None)
-                terms = _loss_terms(config, inputs, prediction)
-                torch.autograd.backward(terms["total"])
-                optimizer.step()
-                epoch_records.append(
-                    EpochLosses(
-                        epoch=epoch,
-                        losses={
-                            name: float(value.detach().cpu())
-                            for name, value in terms.items()
-                        },
-                    )
+        torch.set_deterministic_debug_mode("error")
+        torch.default_generator.manual_seed(config.seed)
+        model = ResidualStateSpace(config.model).cpu()
+        optimizer = torch.optim.Adam(
+            model.parameters(),
+            lr=config.learning_rate,
+        )
+        inputs = _cpu_float_dataset(dataset)
+        features = model.compose_features(
+            affect=inputs.affect,
+            intensity=inputs.intensity,
+            anchor_pose=inputs.anchor_pose,
+            response_position=inputs.response_position,
+            response_velocity=inputs.response_velocity,
+            elapsed_s=inputs.elapsed_s,
+        )
+        for epoch in range(1, config.epochs + 1):
+            optimizer.zero_grad(set_to_none=True)
+            prediction, _ = model(features, hidden=None)
+            terms = _loss_terms(config, inputs, prediction, model=model)
+            torch.autograd.backward(terms["total"])
+            optimizer.step()
+            epoch_records.append(
+                EpochLosses(
+                    epoch=epoch,
+                    losses={
+                        name: float(value.detach().cpu())
+                        for name, value in terms.items()
+                    },
                 )
+            )
     finally:
-        torch.use_deterministic_algorithms(deterministic_was_enabled)
+        torch.random.set_rng_state(cpu_rng_state)
+        torch.set_deterministic_debug_mode(deterministic_debug_mode)
 
     config.artifact_directory.mkdir(parents=True, exist_ok=True)
     weights = {
@@ -229,67 +240,30 @@ def _loss_terms(
     config: ResidualTrainingConfig,
     dataset: ResidualDataset,
     prediction: torch.Tensor,
+    *,
+    model: ResidualStateSpace,
 ) -> dict[str, torch.Tensor]:
-    target = dataset.target_residual
-    reconstruction = torch.mean((prediction - target) ** 2)
-    multistep_rollout = _multistep_rollout_loss(
-        prediction,
-        target,
-        steps=config.rollout_steps,
-    )
-    predicted_command = dataset.anchor_pose + prediction
-    target_command = dataset.anchor_pose + target
-    anchor_drift = torch.mean(
-        (
-            (predicted_command - predicted_command[:, :1])
-            - (target_command - target_command[:, :1])
-        )
-        ** 2
-    )
-    boundary_continuity = torch.mean(
-        (prediction[:, 0] - dataset.boundary_residual) ** 2
-    )
-    predicted_realized = _realized_positions(
-        command=predicted_command,
-        response_position=dataset.response_position,
-        response_velocity=dataset.response_velocity,
-        elapsed_s=dataset.elapsed_s,
+    rollout = recurrent_rollout(
+        model,
+        dataset,
+        steps=dataset.affect.shape[1],
         response_rate_per_s=config.response_rate_per_s,
     )
-    target_realized = _realized_positions(
-        command=target_command,
-        response_position=dataset.response_position,
-        response_velocity=dataset.response_velocity,
-        elapsed_s=dataset.elapsed_s,
+    target_realized, _ = _target_response_rollout(
+        dataset,
+        steps=dataset.affect.shape[1],
         response_rate_per_s=config.response_rate_per_s,
     )
-    realized_velocity = _derivative_loss(
-        predicted_realized,
-        target_realized,
-        dataset.elapsed_s,
-        order=1,
+    terms = residual_objective_terms(
+        prediction=prediction,
+        target_residual=dataset.target_residual,
+        anchor_pose=dataset.anchor_pose,
+        boundary_residual=dataset.boundary_residual,
+        predicted_realized=rollout.realized_position,
+        target_realized=target_realized,
+        elapsed_s=dataset.elapsed_s,
+        rollout_steps=min(config.rollout_steps, dataset.affect.shape[1]),
     )
-    realized_acceleration = _derivative_loss(
-        predicted_realized,
-        target_realized,
-        dataset.elapsed_s,
-        order=2,
-    )
-    realized_jerk = _derivative_loss(
-        predicted_realized,
-        target_realized,
-        dataset.elapsed_s,
-        order=3,
-    )
-    terms = {
-        "reconstruction": reconstruction,
-        "multistep_rollout": multistep_rollout,
-        "anchor_drift": anchor_drift,
-        "boundary_continuity": boundary_continuity,
-        "realized_velocity": realized_velocity,
-        "realized_acceleration": realized_acceleration,
-        "realized_jerk": realized_jerk,
-    }
     weights = asdict(config.losses)
     total = sum(
         (terms[name] * weights[name] for name in terms),
@@ -298,32 +272,144 @@ def _loss_terms(
     return {**terms, "total": total}
 
 
-def _multistep_rollout_loss(
-    prediction: torch.Tensor,
-    target: torch.Tensor,
+def recurrent_rollout(
+    model: ResidualStateSpace,
+    dataset: ResidualDataset,
     *,
     steps: int,
-) -> torch.Tensor:
-    errors = prediction - target
-    horizon = min(steps, errors.shape[1])
-    windows = tuple(
-        torch.cumsum(errors[:, start : start + horizon], dim=1)
-        for start in range(errors.shape[1] - horizon + 1)
+    response_rate_per_s: float,
+) -> ResidualRollout:
+    """Roll forward while feeding each predicted response into the next GRU step."""
+
+    if steps < 1 or steps > dataset.affect.shape[1]:
+        raise ValueError("rollout steps must fit inside the dataset sequence")
+    position = dataset.response_position[:, 0]
+    velocity = dataset.response_velocity[:, 0]
+    hidden: torch.Tensor | None = None
+    residuals: list[torch.Tensor] = []
+    positions: list[torch.Tensor] = []
+    velocities: list[torch.Tensor] = []
+    for index in range(steps):
+        features = model.compose_features(
+            affect=dataset.affect[:, index : index + 1],
+            intensity=dataset.intensity[:, index : index + 1],
+            anchor_pose=dataset.anchor_pose[:, index : index + 1],
+            response_position=position.unsqueeze(1),
+            response_velocity=velocity.unsqueeze(1),
+            elapsed_s=dataset.elapsed_s[:, index : index + 1],
+        )
+        step_residual, hidden = model(features, hidden)
+        residual = step_residual[:, 0]
+        command = dataset.anchor_pose[:, index] + residual
+        position, velocity = _response_step(
+            command=command,
+            position=position,
+            velocity=velocity,
+            elapsed_s=dataset.elapsed_s[:, index],
+            response_rate_per_s=response_rate_per_s,
+        )
+        residuals.append(residual)
+        positions.append(position)
+        velocities.append(velocity)
+    if hidden is None:
+        raise RuntimeError("non-empty rollout did not produce recurrent state")
+    return ResidualRollout(
+        residuals=torch.stack(residuals, dim=1),
+        realized_position=torch.stack(positions, dim=1),
+        realized_velocity=torch.stack(velocities, dim=1),
+        hidden=hidden,
     )
-    return torch.mean(torch.stack(tuple(window**2 for window in windows)))
 
 
-def _realized_positions(
+def residual_objective_terms(
+    *,
+    prediction: torch.Tensor,
+    target_residual: torch.Tensor,
+    anchor_pose: torch.Tensor,
+    boundary_residual: torch.Tensor,
+    predicted_realized: torch.Tensor,
+    target_realized: torch.Tensor,
+    elapsed_s: torch.Tensor,
+    rollout_steps: int,
+) -> dict[str, torch.Tensor]:
+    """Compute independently testable command, boundary, and realized losses."""
+
+    if rollout_steps < 1 or rollout_steps > prediction.shape[1]:
+        raise ValueError("rollout_steps must fit inside the prediction sequence")
+    predicted_command = anchor_pose + prediction
+    target_command = anchor_pose + target_residual
+    return {
+        "reconstruction": torch.mean((prediction - target_residual) ** 2),
+        "multistep_rollout": torch.mean(
+            (predicted_realized[:, :rollout_steps] - target_realized[:, :rollout_steps])
+            ** 2
+        ),
+        "anchor_drift": torch.mean(
+            (
+                (predicted_command - predicted_command[:, :1])
+                - (target_command - target_command[:, :1])
+            )
+            ** 2
+        ),
+        "boundary_continuity": torch.mean((prediction[:, 0] - boundary_residual) ** 2),
+        "realized_velocity": _derivative_loss(
+            predicted_realized,
+            target_realized,
+            elapsed_s,
+            order=1,
+        ),
+        "realized_acceleration": _derivative_loss(
+            predicted_realized,
+            target_realized,
+            elapsed_s,
+            order=2,
+        ),
+        "realized_jerk": _derivative_loss(
+            predicted_realized,
+            target_realized,
+            elapsed_s,
+            order=3,
+        ),
+    }
+
+
+def _target_response_rollout(
+    dataset: ResidualDataset,
+    *,
+    steps: int,
+    response_rate_per_s: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    position = dataset.response_position[:, 0]
+    velocity = dataset.response_velocity[:, 0]
+    positions: list[torch.Tensor] = []
+    velocities: list[torch.Tensor] = []
+    for index in range(steps):
+        command = dataset.anchor_pose[:, index] + dataset.target_residual[:, index]
+        position, velocity = _response_step(
+            command=command,
+            position=position,
+            velocity=velocity,
+            elapsed_s=dataset.elapsed_s[:, index],
+            response_rate_per_s=response_rate_per_s,
+        )
+        positions.append(position)
+        velocities.append(velocity)
+    return torch.stack(positions, dim=1), torch.stack(velocities, dim=1)
+
+
+def _response_step(
     *,
     command: torch.Tensor,
-    response_position: torch.Tensor,
-    response_velocity: torch.Tensor,
+    position: torch.Tensor,
+    velocity: torch.Tensor,
     elapsed_s: torch.Tensor,
     response_rate_per_s: float,
-) -> torch.Tensor:
-    projected = response_position + response_velocity * elapsed_s
+) -> tuple[torch.Tensor, torch.Tensor]:
+    projected = position + velocity * elapsed_s
     blend = 1.0 - torch.exp(-response_rate_per_s * elapsed_s)
-    return projected + blend * (command - projected)
+    next_position = projected + blend * (command - projected)
+    next_velocity = (next_position - position) / elapsed_s
+    return next_position, next_velocity
 
 
 def _derivative_loss(
@@ -368,8 +454,19 @@ def _validate_dataset_for_model(
             raise ValueError(f"{name} width must be {width}")
     if dataset.boundary_residual.shape[1] != actuator_count:
         raise ValueError(f"boundary_residual width must be {actuator_count}")
-    if dataset.affect.shape[1] < 2:
-        raise ValueError("training sequences must contain at least two steps")
+    sequence_steps = dataset.affect.shape[1]
+    if config.losses.multistep_rollout > 0.0 and sequence_steps < config.rollout_steps:
+        raise ValueError(
+            f"multistep_rollout loss requires at least {config.rollout_steps} positions"
+        )
+    derivative_requirements = (
+        ("realized_velocity", config.losses.realized_velocity, 2),
+        ("realized_acceleration", config.losses.realized_acceleration, 3),
+        ("realized_jerk", config.losses.realized_jerk, 4),
+    )
+    for loss_name, weight, minimum in derivative_requirements:
+        if weight > 0.0 and sequence_steps < minimum:
+            raise ValueError(f"{loss_name} loss requires at least {minimum} positions")
 
 
 def _cpu_float_dataset(dataset: ResidualDataset) -> ResidualDataset:
