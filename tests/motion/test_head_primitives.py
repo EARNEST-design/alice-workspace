@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 from pathlib import Path
 
 import pytest
@@ -264,6 +265,47 @@ def test_response_infeasible_transition_is_rejected() -> None:
     )
 
     with pytest.raises(ValueError, match="controller response"):
+        _primitives().render(gesture, _state())
+
+
+@pytest.mark.parametrize(
+    ("amplitude", "limiting_derivative"),
+    [
+        pytest.param(0.1, "acceleration", id="acceleration"),
+        pytest.param(0.8, "velocity", id="velocity"),
+    ],
+)
+def test_quintic_just_over_controller_derivative_limit_is_rejected(
+    amplitude: float,
+    limiting_derivative: str,
+) -> None:
+    """Bang-bang arrival time does not bound the emitted quintic derivatives."""
+
+    parameters = load_controller_response_config(RESPONSE_PATH).actuator("head_tilt")
+    velocity_time_s = (15.0 / 8.0) * amplitude / parameters.max_velocity_per_s
+    acceleration_time_s = math.sqrt(
+        (10.0 * math.sqrt(3.0) / 3.0) * amplitude / parameters.max_acceleration_per_s2
+    )
+    limiting_time_s = max(velocity_time_s, acceleration_time_s)
+    duration_s = limiting_time_s * (1.0 - 1e-6)
+    peak_velocity = (15.0 / 8.0) * amplitude / duration_s
+    peak_acceleration = (10.0 * math.sqrt(3.0) / 3.0) * amplitude / duration_s**2
+
+    if limiting_derivative == "velocity":
+        assert parameters.max_velocity_per_s < peak_velocity
+        assert peak_acceleration < parameters.max_acceleration_per_s2
+    else:
+        assert parameters.max_acceleration_per_s2 < peak_acceleration
+        assert peak_velocity < parameters.max_velocity_per_s
+    gesture = _gesture(
+        HeadGestureKind.TILT,
+        amplitude=amplitude,
+        duration_s=duration_s,
+        hold_s=0.0,
+        recovery_s=2.0,
+    )
+
+    with pytest.raises(ValueError, match=f"peak {limiting_derivative}"):
         _primitives().render(gesture, _state())
 
 

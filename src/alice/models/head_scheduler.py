@@ -242,7 +242,12 @@ class HeadGestureScheduler:
             )
             probability = -math.expm1(-hazard_hz * self._config.decision_interval_s)
             if float(rng.random()) < probability:
-                return self._new_gesture(policy, rng, starts_ns=now_ns)
+                candidate = self._new_gesture(policy, rng, starts_ns=now_ns)
+                try:
+                    self._validate_history((*gestures, candidate))
+                except ValueError:
+                    return None
+                return candidate
         return None
 
     def record(
@@ -412,6 +417,8 @@ class HeadGestureScheduler:
         *,
         at_ns: int,
     ) -> bool:
+        if any(gesture.starts_monotonic_ns > at_ns for gesture in history):
+            return True
         if any(
             gesture.starts_monotonic_ns <= at_ns < gesture.ends_monotonic_ns
             for gesture in history
@@ -423,7 +430,7 @@ class HeadGestureScheduler:
             if gesture.ends_monotonic_ns <= at_ns
         ]
         if not prior_ends:
-            return any(gesture.starts_monotonic_ns > at_ns for gesture in history)
+            return False
         refractory_ns = round(
             self._config.global_refractory_s * _NANOSECONDS_PER_SECOND
         )

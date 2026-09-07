@@ -12,10 +12,7 @@ from alice.contracts.actuation import ActuatorTarget
 from alice.contracts.affect import MonotonicNanoseconds
 from alice.contracts.blendshapes import NonEmptyString, Sha256Hex
 from alice.contracts.motion import TargetUpdate, TargetUpdateHorizon
-from alice.motion.controller_response import (
-    ActuatorResponseParameters,
-    ControllerResponseConfig,
-)
+from alice.motion.controller_response import ControllerResponseConfig
 from alice.motion.state import EventHistoryRecord
 
 FinitePositiveFloat = Annotated[float, Field(gt=0.0, allow_inf_nan=False)]
@@ -30,6 +27,8 @@ Asymmetry = Annotated[
 ]
 _EVENT_RECORD_TYPE = "head-gesture/v1"
 _NANOSECONDS_PER_SECOND = 1_000_000_000
+_MINIMUM_JERK_PEAK_VELOCITY = 15.0 / 8.0
+_MINIMUM_JERK_PEAK_ACCELERATION = 10.0 * math.sqrt(3.0) / 3.0
 
 
 class HeadGestureKind(StrEnum):
@@ -226,12 +225,20 @@ class HeadPrimitiveGenerator:
         )
 
     def minimum_transition_s(self, actuator_name: str, distance: float) -> float:
-        """Return the controller prior's rest-to-rest time for one movement."""
+        """Return time needed to keep a quintic within controller derivatives."""
 
         if not math.isfinite(distance) or distance < 0.0:
             raise ValueError("transition distance must be finite and non-negative")
         parameters = self._controller_config.actuator(actuator_name)
-        return self._minimum_rest_to_rest_s(distance, parameters)
+        velocity_time_s = (
+            _MINIMUM_JERK_PEAK_VELOCITY * distance / parameters.max_velocity_per_s
+        )
+        acceleration_time_s = math.sqrt(
+            _MINIMUM_JERK_PEAK_ACCELERATION
+            * distance
+            / parameters.max_acceleration_per_s2
+        )
+        return max(velocity_time_s, acceleration_time_s)
 
     def _validate_inputs(
         self,
@@ -324,16 +331,25 @@ class HeadPrimitiveGenerator:
         by_actuator: dict[str, tuple[tuple[float, float, float, float], ...]],
     ) -> None:
         for actuator_name, segments in by_actuator.items():
+            parameters = self._controller_config.actuator(actuator_name)
             for starts_s, starts_at, ends_s, ends_at in segments:
                 distance = abs(ends_at - starts_at)
                 if distance == 0.0:
                     continue
                 available_s = ends_s - starts_s
-                minimum_s = self.minimum_transition_s(actuator_name, distance)
-                if available_s < minimum_s:
+                peak_velocity = _MINIMUM_JERK_PEAK_VELOCITY * distance / available_s
+                if peak_velocity > parameters.max_velocity_per_s:
                     raise ValueError(
-                        f"{actuator_name!r} transition is shorter than controller "
-                        "response"
+                        f"{actuator_name!r} transition exceeds controller response "
+                        "peak velocity"
+                    )
+                peak_acceleration = (
+                    _MINIMUM_JERK_PEAK_ACCELERATION * distance / available_s**2
+                )
+                if peak_acceleration > parameters.max_acceleration_per_s2:
+                    raise ValueError(
+                        f"{actuator_name!r} transition exceeds controller response "
+                        "peak acceleration"
                     )
 
     def _sample_offsets(
@@ -371,17 +387,3 @@ class HeadPrimitiveGenerator:
 
         clamped = max(0.0, min(1.0, phase))
         return clamped**3 * (10.0 - 15.0 * clamped + 6.0 * clamped**2)
-
-    @staticmethod
-    def _minimum_rest_to_rest_s(
-        distance: float,
-        parameters: ActuatorResponseParameters,
-    ) -> float:
-        if distance == 0.0:
-            return 0.0
-        acceleration = parameters.max_acceleration_per_s2
-        max_speed = parameters.max_velocity_per_s
-        triangular_limit = max_speed**2 / acceleration
-        if distance <= triangular_limit:
-            return 2.0 * math.sqrt(distance / acceleration)
-        return distance / max_speed + max_speed / acceleration

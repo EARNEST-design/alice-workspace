@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 import numpy as np
@@ -48,6 +49,21 @@ def _scheduler(config: HeadGestureConfig | None = None) -> HeadGestureScheduler:
         config=config or load_head_gesture_config(CONFIG_PATH),
         controller_config=load_controller_response_config(RESPONSE_PATH),
     )
+
+
+def _certain_scheduler() -> HeadGestureScheduler:
+    config = load_head_gesture_config(CONFIG_PATH)
+    gestures = tuple(
+        policy.model_copy(
+            update={
+                "base_hazard_hz": 1_000.0,
+                "min_hazard_hz": 1_000.0,
+                "max_hazard_hz": 1_000.0,
+            }
+        )
+        for policy in config.gestures
+    )
+    return _scheduler(config.model_copy(update={"gestures": gestures}))
 
 
 def _sample_sequence(seed: int) -> tuple[HeadGesture | None, ...]:
@@ -186,6 +202,30 @@ def test_non_head_history_does_not_change_head_decision() -> None:
     assert with_face == empty
 
 
+def test_mixed_past_and_future_head_history_defers_new_gesture() -> None:
+    """A past end must not hide an already accepted future head gesture."""
+
+    scheduler = _certain_scheduler()
+    past = scheduler.sample(_intent(accepted_ns=0), (), np.random.default_rng(1))
+    assert past is not None
+    future_ns = past.ends_monotonic_ns + 6_000_000_000
+    future = scheduler.sample(
+        _intent(accepted_ns=future_ns),
+        (past.as_history_record(),),
+        np.random.default_rng(2),
+    )
+    assert future is not None
+    decision_ns = future.starts_monotonic_ns - 1_000_000_000
+
+    proposed = scheduler.sample(
+        _intent(accepted_ns=decision_ns),
+        (past.as_history_record(), future.as_history_record()),
+        np.random.default_rng(3),
+    )
+
+    assert proposed is None
+
+
 def test_checked_in_config_is_an_explicit_unlearned_prior() -> None:
     """Absent labeled episodes must not be presented as learned evidence."""
 
@@ -206,10 +246,32 @@ def test_learned_claim_without_labeled_episodes_is_rejected() -> None:
         HeadGestureConfig.model_validate(document)
 
 
-def test_checked_in_parameter_extremes_are_controller_feasible() -> None:
-    """Sampling a legal maximum must still yield a renderable head gesture."""
+def test_checked_in_parameter_extremes_obey_quintic_derivative_limits() -> None:
+    """Legal extrema must independently satisfy emitted quintic kinematics."""
 
     scheduler = _scheduler()
+    response = load_controller_response_config(RESPONSE_PATH)
 
     for policy in scheduler.config.gestures:
-        scheduler.validate_policy_response(policy)
+        parameters = response.actuator(policy.actuator_name)
+        if policy.kind in {HeadGestureKind.NOD, HeadGestureKind.SHAKE}:
+            transition_s = policy.duration_s.minimum / (2 * policy.cycles.maximum)
+            distance = 2.0 * policy.amplitude.maximum
+        else:
+            transition_s = policy.duration_s.minimum
+            distance = policy.amplitude.maximum
+        peak_velocity = (15.0 / 8.0) * distance / transition_s
+        peak_acceleration = (10.0 * math.sqrt(3.0) / 3.0) * distance / transition_s**2
+        recovery_velocity = (
+            (15.0 / 8.0) * policy.amplitude.maximum / policy.recovery_s.minimum
+        )
+        recovery_acceleration = (
+            (10.0 * math.sqrt(3.0) / 3.0)
+            * policy.amplitude.maximum
+            / policy.recovery_s.minimum**2
+        )
+
+        assert peak_velocity <= parameters.max_velocity_per_s
+        assert peak_acceleration <= parameters.max_acceleration_per_s2
+        assert recovery_velocity <= parameters.max_velocity_per_s
+        assert recovery_acceleration <= parameters.max_acceleration_per_s2

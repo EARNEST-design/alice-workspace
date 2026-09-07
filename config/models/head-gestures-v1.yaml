@@ -29,7 +29,7 @@ gestures:
     refractory_s: 5.0
     recovery_time_constant_s: 1.5
     amplitude: {minimum: 0.05, maximum: 0.10}
-    duration_s: {minimum: 2.6, maximum: 3.2}
+    duration_s: {minimum: 3.1, maximum: 3.4}
     cycles: {minimum: 1, maximum: 2}
     asymmetry: {minimum: -0.25, maximum: 0.25}
     hold_s: {minimum: 0.0, maximum: 0.15}
@@ -46,7 +46,7 @@ gestures:
     refractory_s: 6.0
     recovery_time_constant_s: 1.5
     amplitude: {minimum: 0.05, maximum: 0.10}
-    duration_s: {minimum: 2.6, maximum: 3.2}
+    duration_s: {minimum: 3.1, maximum: 3.4}
     cycles: {minimum: 1, maximum: 2}
     asymmetry: {minimum: -0.25, maximum: 0.25}
     hold_s: {minimum: 0.0, maximum: 0.15}
