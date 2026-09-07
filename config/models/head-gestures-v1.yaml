@@ -1,0 +1,110 @@
+schema_version: head-gesture-config/v1
+model_id: head-gestures-v1
+scheduler_kind: configured-prior
+labeled_gesture_episodes: 0
+affect_schema_id: affect-vector/v1
+affect_dimensions: [valence, arousal, dominance]
+controller_response_model_id: maestro-response-v1
+calibration_sha256: 8ad9ad1f59dc70c47515c9a37b4531c5070c22a40ed66fb673d0e72a0d3dadb4
+controller_settings_sha256: e9695abc1888fef19d5ec4f49d396c7f53c8955335e72e241c6c2851d783d133
+cadence_hz: 10.0
+decision_interval_s: 0.5
+global_refractory_s: 0.5
+semantics:
+  yaw_actuator_name: neck_rotation
+  tilt_actuator_name: head_tilt
+  pitch_actuator_name: face_pitch
+recovery_targets:
+  - {actuator_name: neck_rotation, normalized_position: 0.0}
+  - {actuator_name: head_tilt, normalized_position: 0.0}
+  - {actuator_name: face_pitch, normalized_position: 0.0}
+gestures:
+  - kind: nod
+    actuator_name: face_pitch
+    base_hazard_hz: 0.055
+    min_hazard_hz: 0.015
+    max_hazard_hz: 0.12
+    affect_weights: [0.10, 0.35, 0.05]
+    intensity_weight: 0.20
+    refractory_s: 5.0
+    recovery_time_constant_s: 1.5
+    amplitude: {minimum: 0.05, maximum: 0.10}
+    duration_s: {minimum: 2.6, maximum: 3.2}
+    cycles: {minimum: 1, maximum: 2}
+    asymmetry: {minimum: -0.25, maximum: 0.25}
+    hold_s: {minimum: 0.0, maximum: 0.15}
+    recovery_s: {minimum: 0.7, maximum: 1.0}
+    polarity: bidirectional
+    provenance: Conservative hand-authored scheduling and parameter prior; not fitted gesture evidence.
+  - kind: shake
+    actuator_name: neck_rotation
+    base_hazard_hz: 0.045
+    min_hazard_hz: 0.01
+    max_hazard_hz: 0.10
+    affect_weights: [-0.20, 0.30, -0.05]
+    intensity_weight: 0.20
+    refractory_s: 6.0
+    recovery_time_constant_s: 1.5
+    amplitude: {minimum: 0.05, maximum: 0.10}
+    duration_s: {minimum: 2.6, maximum: 3.2}
+    cycles: {minimum: 1, maximum: 2}
+    asymmetry: {minimum: -0.25, maximum: 0.25}
+    hold_s: {minimum: 0.0, maximum: 0.15}
+    recovery_s: {minimum: 0.7, maximum: 1.0}
+    polarity: bidirectional
+    provenance: Conservative hand-authored scheduling and parameter prior; not fitted gesture evidence.
+  - kind: tilt
+    actuator_name: head_tilt
+    base_hazard_hz: 0.035
+    min_hazard_hz: 0.01
+    max_hazard_hz: 0.08
+    affect_weights: [0.15, -0.10, -0.10]
+    intensity_weight: 0.10
+    refractory_s: 6.0
+    recovery_time_constant_s: 1.8
+    amplitude: {minimum: 0.04, maximum: 0.08}
+    duration_s: {minimum: 0.7, maximum: 1.0}
+    cycles: {minimum: 1, maximum: 1}
+    asymmetry: {minimum: 0.0, maximum: 0.0}
+    hold_s: {minimum: 0.2, maximum: 0.6}
+    recovery_s: {minimum: 0.65, maximum: 0.9}
+    polarity: bidirectional
+    provenance: Conservative hand-authored prior for the known janky-at-slow-speed tilt axis; not fitted gesture evidence.
+  - kind: look_up
+    actuator_name: face_pitch
+    base_hazard_hz: 0.025
+    min_hazard_hz: 0.008
+    max_hazard_hz: 0.06
+    affect_weights: [0.10, 0.20, 0.10]
+    intensity_weight: 0.10
+    refractory_s: 7.0
+    recovery_time_constant_s: 2.0
+    amplitude: {minimum: 0.04, maximum: 0.08}
+    duration_s: {minimum: 0.65, maximum: 0.95}
+    cycles: {minimum: 1, maximum: 1}
+    asymmetry: {minimum: 0.0, maximum: 0.0}
+    hold_s: {minimum: 0.3, maximum: 0.8}
+    recovery_s: {minimum: 0.65, maximum: 0.95}
+    polarity: positive
+    provenance: Conservative semantic command convention and scheduling prior; not fitted gesture evidence.
+  - kind: look_down
+    actuator_name: face_pitch
+    base_hazard_hz: 0.025
+    min_hazard_hz: 0.008
+    max_hazard_hz: 0.06
+    affect_weights: [-0.10, -0.05, -0.10]
+    intensity_weight: 0.10
+    refractory_s: 7.0
+    recovery_time_constant_s: 2.0
+    amplitude: {minimum: 0.04, maximum: 0.08}
+    duration_s: {minimum: 0.65, maximum: 0.95}
+    cycles: {minimum: 1, maximum: 1}
+    asymmetry: {minimum: 0.0, maximum: 0.0}
+    hold_s: {minimum: 0.3, maximum: 0.8}
+    recovery_s: {minimum: 0.65, maximum: 0.95}
+    polarity: negative
+    provenance: Conservative semantic command convention and scheduling prior; not fitted gesture evidence.
+provenance: >-
+  Configured research prior with zero labeled gesture episodes. Hazards and
+  parameter distributions are not fitted human or hardware evidence and do not
+  justify a learned scheduler claim.
