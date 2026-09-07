@@ -141,6 +141,47 @@ def _controller_config() -> ControllerResponseConfig:
     )
 
 
+def test_controller_response_sha_is_canonical_and_order_sensitive() -> None:
+    """Non-canonical JSON or reordered actuators would obscure response identity."""
+
+    config = _controller_config()
+    payload = config.model_dump(mode="json")
+    reversed_keys = dict(reversed(tuple(payload.items())))
+    round_tripped = ControllerResponseConfig.model_validate(reversed_keys)
+    reordered = config.model_copy(
+        update={"actuators": tuple(reversed(config.actuators))}
+    )
+
+    assert config.response_sha256 == (
+        "d79c9c29d3d2f7bca6a39305b883d32ea44384f7492a15c7b1ef2e4a4d5e5f40"
+    )
+    assert round_tripped.response_sha256 == config.response_sha256
+    assert reordered.response_sha256 != config.response_sha256
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("max_velocity_per_s", 0.2),
+        ("max_acceleration_per_s2", 0.5),
+    ),
+)
+def test_controller_response_sha_binds_each_fitted_response_parameter(
+    field: str,
+    value: float,
+) -> None:
+    """Changing fitted dynamics must not retain the exact response identity."""
+
+    config = _controller_config()
+    changed_actuator = config.actuators[1].model_copy(update={field: value})
+    changed = config.model_copy(
+        update={"actuators": (*config.actuators[:-1], changed_actuator)}
+    )
+
+    assert changed.controller_settings_sha256 == config.controller_settings_sha256
+    assert changed.response_sha256 != config.response_sha256
+
+
 def test_fixed_seed_training_repeats_on_cpu(tmp_path: Path) -> None:
     """Using global or accelerator RNG state would change the saved weights."""
 
@@ -361,6 +402,16 @@ def test_training_records_all_objectives_and_compact_provenance(
 
     assert result.weights_path.suffix == ".safetensors"
     assert result.weights_path.is_file()
+    assert record["schema_version"] == "residual-training-record/v2"
+    assert record["training"]["controller_response_sha256"] == (
+        _controller_config().response_sha256
+    )
+    assert record["training"]["controller_settings_sha256"] == (
+        _controller_config().controller_settings_sha256
+    )
+    assert record["training"]["controller_response_sha256"] != record["training"][
+        "controller_settings_sha256"
+    ]
     assert record["artifact"]["weights_sha256"] == result.weights_sha256
     assert record["model"]["research_status"] == "unfitted-research-prior"
     assert record["model"]["provenance"] == (

@@ -125,6 +125,19 @@ class ControllerResponseConfig(BaseModel):
         encoded = json.dumps(settings, sort_keys=True, separators=(",", ":")).encode()
         return hashlib.sha256(encoded).hexdigest()
 
+    @property
+    def response_sha256(self) -> str:
+        """Hash the canonical complete response configuration."""
+
+        encoded = json.dumps(
+            self.model_dump(mode="json"),
+            allow_nan=False,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
 
 class ControllerState(BaseModel):
     """Estimated normalized output state for one semantic actuator."""

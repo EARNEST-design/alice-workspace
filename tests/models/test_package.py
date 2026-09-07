@@ -47,12 +47,14 @@ ANCHOR_CONFIG = ROOT / "config" / "models" / "procedural-motion-v1.yaml"
 
 def _identities() -> PackageIdentities:
     residual = load_residual_state_space_config(MODEL_CONFIG)
+    controller_response = load_controller_response_config(CONTROLLER_CONFIG)
     return PackageIdentities(
         affect_schema_id=residual.affect_schema_id,
         motion_model_id="streaming-affect-motion-test-v1",
         calibration_sha256=residual.calibration_sha256,
         controller_response_model_id=residual.controller_response_model_id,
         controller_settings_sha256=residual.controller_settings_sha256,
+        controller_response_sha256=controller_response.response_sha256,
     )
 
 
@@ -85,13 +87,16 @@ def _valid_inputs(
         anchor_config=load_procedural_motion_config(ANCHOR_CONFIG),
     )
     training_record = {
-        "schema_version": "residual-training-record/v1",
+        "schema_version": "residual-training-record/v2",
         "model": residual.model_dump(mode="json"),
         "training": {
             "epochs": 2,
             "learning_rate": 0.001,
             "rollout_steps": 4,
             "controller_settings_sha256": residual.controller_settings_sha256,
+            "controller_response_sha256": (
+                components.controller_response_config.response_sha256
+            ),
             "loss_weights": {
                 "reconstruction": 1.0,
                 "multistep_rollout": 0.5,
@@ -356,6 +361,89 @@ def test_embedded_controller_settings_are_bound_to_identity(tmp_path: Path) -> N
         )
 
 
+def test_exact_controller_response_is_bound_before_model_construction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Changing fitted speed alone must not retain package compatibility."""
+
+    components, metadata = _valid_inputs(tmp_path)
+    controller = components.controller_response_config
+    neck_index = next(
+        index
+        for index, actuator in enumerate(controller.actuators)
+        if actuator.actuator_name == "neck_rotation"
+    )
+    neck = controller.actuators[neck_index]
+    changed_neck = neck.model_copy(update={"max_velocity_per_s": 0.4})
+    changed_actuators = list(controller.actuators)
+    changed_actuators[neck_index] = changed_neck
+    changed_controller = controller.model_copy(
+        update={"actuators": tuple(changed_actuators)}
+    )
+    assert neck.max_velocity_per_s == 0.8
+    assert (
+        changed_controller.controller_settings_sha256
+        == controller.controller_settings_sha256
+    )
+    assert changed_controller.response_sha256 != controller.response_sha256
+    monkeypatch.setattr(package_module, "ResidualStateSpace", _fail_if_constructed)
+
+    with pytest.raises(ValueError, match="controller response identity mismatch"):
+        save_package(
+            tmp_path / "response-mismatch",
+            components.model_copy(
+                update={"controller_response_config": changed_controller}
+            ),
+            metadata,
+        )
+
+
+def test_training_response_identity_is_bound_before_model_construction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Weights trained against another response must not enter model setup."""
+
+    components, metadata = _valid_inputs(tmp_path)
+    controller = components.controller_response_config
+    changed_neck = controller.actuator("neck_rotation").model_copy(
+        update={"max_velocity_per_s": 0.7}
+    )
+    changed_controller = controller.model_copy(
+        update={
+            "actuators": tuple(
+                changed_neck
+                if actuator.actuator_name == "neck_rotation"
+                else actuator
+                for actuator in controller.actuators
+            )
+        }
+    )
+    changed_metadata = metadata.model_copy(
+        update={
+            "identities": metadata.identities.model_copy(
+                update={
+                    "controller_response_sha256": changed_controller.response_sha256
+                }
+            )
+        }
+    )
+    monkeypatch.setattr(package_module, "ResidualStateSpace", _fail_if_constructed)
+
+    with pytest.raises(
+        ValueError,
+        match="training controller response identity mismatch",
+    ):
+        save_package(
+            tmp_path / "training-response-mismatch",
+            components.model_copy(
+                update={"controller_response_config": changed_controller}
+            ),
+            changed_metadata,
+        )
+
+
 def test_identity_mismatch_is_rejected_before_model_construction(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -372,6 +460,25 @@ def test_identity_mismatch_is_rejected_before_model_construction(
 
     with pytest.raises(ValueError, match="calibration.*identity mismatch"):
         load_package(package.path, expected)
+
+
+def test_legacy_package_schema_is_rejected_before_model_construction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A v1 package cannot prove which response model trained its weights."""
+
+    package = _write_valid_package(tmp_path)
+    manifest = json.loads(package.manifest.read_text(encoding="utf-8"))
+    manifest["schema_version"] = "motion-model-package/v1"
+    package.manifest.write_text(
+        json.dumps(manifest, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(package_module, "ResidualStateSpace", _fail_if_constructed)
+
+    with pytest.raises(ValueError, match="manifest is unreadable"):
+        load_package(package.path, _identities())
 
 
 def test_modified_resolved_config_is_rejected(tmp_path: Path) -> None:

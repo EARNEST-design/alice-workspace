@@ -542,7 +542,7 @@ def _research_record(
     epochs: list[EpochLosses],
 ) -> dict[str, object]:
     return {
-        "schema_version": "residual-training-record/v1",
+        "schema_version": "residual-training-record/v2",
         "model": config.model.model_dump(mode="json"),
         "training": {
             "epochs": config.epochs,
@@ -550,6 +550,9 @@ def _research_record(
             "rollout_steps": config.rollout_steps,
             "controller_settings_sha256": (
                 config.controller_response_config.controller_settings_sha256
+            ),
+            "controller_response_sha256": (
+                config.controller_response_config.response_sha256
             ),
             "loss_weights": asdict(config.losses),
         },
