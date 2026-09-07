@@ -1,0 +1,95 @@
+schema_version: controller-response-config/v1
+model_id: maestro-response-v1
+hardware_id: alice-face-v1
+calibration_sha256: 8ad9ad1f59dc70c47515c9a37b4531c5070c22a40ed66fb673d0e72a0d3dadb4
+model_kind: piecewise-acceleration-speed-limited
+provenance: Unfitted normalized simulation priors pending held-out fitting against Phase 2 controller traces; not measured response evidence.
+actuators:
+  - actuator_name: neck_rotation
+    firmware_speed_setting: 20
+    firmware_acceleration_setting: 25
+    speed_mode: controller-limited
+    acceleration_mode: controller-limited
+    max_velocity_per_s: 0.8
+    max_acceleration_per_s2: 2.0
+    provenance: Unfitted response prior; not a measured mechanical guarantee.
+  - actuator_name: head_tilt
+    firmware_speed_setting: 25
+    firmware_acceleration_setting: 25
+    speed_mode: controller-limited
+    acceleration_mode: controller-limited
+    max_velocity_per_s: 0.8
+    max_acceleration_per_s2: 2.0
+    provenance: Unfitted response prior; not a measured mechanical guarantee.
+  - actuator_name: face_pitch
+    firmware_speed_setting: 25
+    firmware_acceleration_setting: 25
+    speed_mode: controller-limited
+    acceleration_mode: controller-limited
+    max_velocity_per_s: 0.8
+    max_acceleration_per_s2: 2.0
+    provenance: Unfitted response prior; not a measured mechanical guarantee.
+  - actuator_name: lower_eyelids
+    firmware_speed_setting: 0
+    firmware_acceleration_setting: 0
+    speed_mode: zero-setting-response-estimate
+    acceleration_mode: zero-setting-response-estimate
+    max_velocity_per_s: 2.0
+    max_acceleration_per_s2: 8.0
+    provenance: Setting zero removes the controller limit; finite servo response is estimated.
+  - actuator_name: upper_eyelids
+    firmware_speed_setting: 0
+    firmware_acceleration_setting: 0
+    speed_mode: zero-setting-response-estimate
+    acceleration_mode: zero-setting-response-estimate
+    max_velocity_per_s: 2.0
+    max_acceleration_per_s2: 8.0
+    provenance: Setting zero removes the controller limit; finite servo response is estimated.
+  - actuator_name: forehead_frown
+    firmware_speed_setting: 0
+    firmware_acceleration_setting: 0
+    speed_mode: zero-setting-response-estimate
+    acceleration_mode: zero-setting-response-estimate
+    max_velocity_per_s: 2.0
+    max_acceleration_per_s2: 8.0
+    provenance: Setting zero removes the controller limit; finite servo response is estimated.
+  - actuator_name: mouth_open
+    firmware_speed_setting: 0
+    firmware_acceleration_setting: 11
+    speed_mode: zero-setting-response-estimate
+    acceleration_mode: controller-limited
+    max_velocity_per_s: 2.0
+    max_acceleration_per_s2: 4.0
+    provenance: Setting zero removes the speed limit; finite servo response is estimated.
+  - actuator_name: right_eye_horizontal
+    firmware_speed_setting: 50
+    firmware_acceleration_setting: 10
+    speed_mode: controller-limited
+    acceleration_mode: controller-limited
+    max_velocity_per_s: 1.5
+    max_acceleration_per_s2: 4.0
+    provenance: Unfitted response prior; not a measured mechanical guarantee.
+  - actuator_name: left_mouth_corner
+    firmware_speed_setting: 50
+    firmware_acceleration_setting: 10
+    speed_mode: controller-limited
+    acceleration_mode: controller-limited
+    max_velocity_per_s: 1.5
+    max_acceleration_per_s2: 4.0
+    provenance: Unfitted response prior; not a measured mechanical guarantee.
+  - actuator_name: left_eye_horizontal
+    firmware_speed_setting: 50
+    firmware_acceleration_setting: 10
+    speed_mode: controller-limited
+    acceleration_mode: controller-limited
+    max_velocity_per_s: 1.5
+    max_acceleration_per_s2: 4.0
+    provenance: Unfitted response prior; not a measured mechanical guarantee.
+  - actuator_name: right_mouth_corner
+    firmware_speed_setting: 50
+    firmware_acceleration_setting: 10
+    speed_mode: controller-limited
+    acceleration_mode: controller-limited
+    max_velocity_per_s: 1.5
+    max_acceleration_per_s2: 4.0
+    provenance: Unfitted response prior; not a measured mechanical guarantee.
