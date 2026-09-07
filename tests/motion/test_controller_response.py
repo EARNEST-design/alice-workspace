@@ -104,8 +104,8 @@ def test_response_limits_acceleration_and_speed() -> None:
     assert first.position > 0.0
 
 
-def test_velocity_away_from_target_does_not_create_non_monotone_motion() -> None:
-    """Retaining opposite velocity could move away before correcting course."""
+def test_target_reversal_brakes_without_instantaneous_velocity_change() -> None:
+    """Discarding away-directed velocity would violate the acceleration limit."""
 
     observed = _model().predict(
         _state(0.0, velocity=-0.8),
@@ -113,8 +113,80 @@ def test_velocity_away_from_target_does_not_create_non_monotone_motion() -> None
         elapsed_s=0.02,
     )
 
-    assert 0.0 <= observed.position <= 0.5
-    assert observed.velocity >= 0.0
+    assert observed.position == pytest.approx(-0.0156)
+    assert observed.velocity == pytest.approx(-0.76)
+
+
+def test_response_cannot_arrive_before_accelerate_cruise_brake_minimum() -> None:
+    """Cruising through the braking interval would fabricate early arrival."""
+
+    model = _model()
+
+    before_minimum = model.predict(_state(0.0), _update(1.0), elapsed_s=1.64)
+    at_minimum = model.predict(_state(0.0), _update(1.0), elapsed_s=1.65)
+
+    assert before_minimum.position < 1.0
+    assert before_minimum.velocity == pytest.approx(0.02)
+    assert at_minimum.position == pytest.approx(1.0)
+    assert at_minimum.velocity == pytest.approx(0.0)
+
+
+def test_arrival_step_respects_configured_acceleration() -> None:
+    """Clamping arrival velocity to zero could exceed allowed deceleration."""
+
+    model = _model()
+    state = _state(0.84, velocity=0.8)
+    elapsed_s = 0.2
+
+    observed = model.predict(state, _update(1.0), elapsed_s=elapsed_s)
+
+    allowed_velocity_delta = (
+        model.config.actuator("neck_rotation").max_acceleration_per_s2
+        * elapsed_s
+    )
+    assert abs(observed.velocity - state.velocity) <= allowed_velocity_delta
+    assert observed.position == pytest.approx(0.96)
+    assert observed.velocity == pytest.approx(0.4)
+
+
+def test_response_rejects_state_that_cannot_stop_before_target() -> None:
+    """No predictor can preserve both limits and target bounds from this state."""
+
+    with pytest.raises(ValueError, match="stopping distance"):
+        _model().predict(
+            _state(0.95, velocity=0.8),
+            _update(1.0),
+            elapsed_s=0.02,
+        )
+
+
+def test_response_rejects_state_above_configured_speed() -> None:
+    """Clamping an over-speed input would hide an invalid controller state."""
+
+    model = _model()
+    over_limit = math.nextafter(
+        model.config.actuator("neck_rotation").max_velocity_per_s,
+        math.inf,
+    )
+
+    with pytest.raises(ValueError, match="velocity exceeds"):
+        model.predict(
+            _state(0.0, velocity=over_limit),
+            _update(1.0),
+            elapsed_s=0.02,
+        )
+
+
+def test_repeated_small_steps_cross_braking_boundary_without_false_rejection() -> None:
+    """Floating-point noise at the braking switch must not reject valid rollout."""
+
+    model = _model()
+    state = _state(0.0)
+    for _ in range(83):
+        state = model.predict(state, _update(1.0), elapsed_s=0.02)
+
+    assert state.position == pytest.approx(1.0)
+    assert state.velocity == pytest.approx(0.0)
 
 
 def test_zero_elapsed_time_preserves_the_complete_state() -> None:

@@ -19,6 +19,7 @@ NormalizedPosition = Annotated[
     float,
     Field(ge=-1.0, le=1.0, allow_inf_nan=False),
 ]
+_KINEMATIC_TOLERANCE = 1e-12
 
 
 class ControllerLimitMode(StrEnum):
@@ -132,7 +133,7 @@ class ControllerResponse:
         update: TargetUpdate,
         elapsed_s: float,
     ) -> ControllerState:
-        """Advance one acceleration/cruise segment, clamped at its target."""
+        """Advance an exact accelerate/cruise/brake trajectory toward target."""
 
         if not math.isfinite(elapsed_s) or elapsed_s < 0.0:
             raise ValueError("elapsed_s must be finite and non-negative")
@@ -149,48 +150,99 @@ class ControllerResponse:
             raise ValueError(
                 f"target update does not contain actuator {state.actuator_name!r}"
             )
+        target_position = matching_targets[0].normalized_position
+        if abs(state.velocity) > parameters.max_velocity_per_s:
+            raise ValueError(
+                f"state velocity exceeds configured limit for "
+                f"{state.actuator_name!r}"
+            )
         if elapsed_s == 0.0:
             return state
-        target_position = matching_targets[0].normalized_position
         distance = target_position - state.position
         if distance == 0.0:
-            return state.model_copy(update={"velocity": 0.0})
+            if state.velocity != 0.0:
+                raise ValueError("state velocity exceeds available stopping distance")
+            return state
 
         direction = math.copysign(1.0, distance)
         remaining = abs(distance)
-        # A reported velocity away from the new target is not extrapolated: this
-        # abstraction models only the monotone segment toward the active target.
-        initial_speed = max(0.0, direction * state.velocity)
-        initial_speed = min(initial_speed, parameters.max_velocity_per_s)
-        braking_speed = math.sqrt(
-            2.0 * parameters.max_acceleration_per_s2 * remaining
+        initial_speed = direction * state.velocity
+        acceleration_limit = parameters.max_acceleration_per_s2
+        stopping_distance = (
+            initial_speed**2 / (2.0 * acceleration_limit)
+            if initial_speed > 0.0
+            else 0.0
         )
-        desired_speed = min(parameters.max_velocity_per_s, braking_speed)
+        if stopping_distance > remaining + _KINEMATIC_TOLERANCE:
+            raise ValueError("state velocity exceeds available stopping distance")
+        trajectory_distance = max(remaining, stopping_distance)
 
-        speed_delta = desired_speed - initial_speed
-        transition_s = min(
-            elapsed_s,
-            abs(speed_delta) / parameters.max_acceleration_per_s2,
+        segments = self._trajectory_segments(
+            distance=trajectory_distance,
+            initial_speed=initial_speed,
+            max_speed=parameters.max_velocity_per_s,
+            acceleration=acceleration_limit,
         )
-        acceleration = math.copysign(
-            parameters.max_acceleration_per_s2,
-            speed_delta,
-        )
-        transitioned_speed = initial_speed + acceleration * transition_s
-        traveled = (
-            initial_speed * transition_s
-            + 0.5 * acceleration * transition_s**2
-            + desired_speed * (elapsed_s - transition_s)
-        )
+        arrival_s = sum(duration for duration, _ in segments)
+        if elapsed_s >= arrival_s:
+            return state.model_copy(
+                update={"position": target_position, "velocity": 0.0}
+            )
 
-        if traveled >= remaining:
-            next_position = target_position
-            next_velocity = 0.0
-        else:
-            next_position = state.position + direction * traveled
-            next_velocity = direction * transitioned_speed
+        traveled = 0.0
+        speed = initial_speed
+        time_left = elapsed_s
+        for duration, acceleration in segments:
+            segment_s = min(time_left, duration)
+            traveled += speed * segment_s + 0.5 * acceleration * segment_s**2
+            speed += acceleration * segment_s
+            time_left -= segment_s
+            if time_left <= 0.0:
+                break
+
+        next_position = state.position + direction * traveled
+        next_velocity = direction * speed
         return state.model_copy(
             update={"position": next_position, "velocity": next_velocity}
+        )
+
+    @staticmethod
+    def _trajectory_segments(
+        *,
+        distance: float,
+        initial_speed: float,
+        max_speed: float,
+        acceleration: float,
+    ) -> tuple[tuple[float, float], ...]:
+        """Return time/acceleration segments ending at rest on the target."""
+
+        stopping_distance = (
+            initial_speed**2 / (2.0 * acceleration)
+            if initial_speed > 0.0
+            else 0.0
+        )
+        if stopping_distance == distance:
+            return ((initial_speed / acceleration, -acceleration),)
+
+        unconstrained_peak = math.sqrt(
+            acceleration * distance + 0.5 * initial_speed**2
+        )
+        peak_speed = min(max_speed, unconstrained_peak)
+        acceleration_s = (peak_speed - initial_speed) / acceleration
+        acceleration_distance = (
+            peak_speed**2 - initial_speed**2
+        ) / (2.0 * acceleration)
+        braking_s = peak_speed / acceleration
+        braking_distance = peak_speed**2 / (2.0 * acceleration)
+        cruise_distance = max(
+            0.0,
+            distance - acceleration_distance - braking_distance,
+        )
+        cruise_s = cruise_distance / peak_speed
+        return (
+            (acceleration_s, acceleration),
+            (cruise_s, 0.0),
+            (braking_s, -acceleration),
         )
 
 
