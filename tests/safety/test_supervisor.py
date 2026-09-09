@@ -1011,3 +1011,101 @@ def test_preflight_identity_mismatch_fails_closed(
     assert result.fault is not None
     assert result.fault.code == "controller-identity-mismatch"
     assert supervisor.state is RunState.FAULTED
+
+
+def test_explicit_measured_start_uses_actual_position_in_motion_limits(manifest, clock):
+    from alice.contracts.actuation import ActuatorTarget
+
+    limits = make_supervisor(manifest, clock).limits
+    supervisor = SafetySupervisor(
+        manifest=manifest, clock=clock, limits=limits, allow_measured_start=True
+    )
+    observed = tuple(
+        ActuatorTarget(
+            actuator_name=a.name,
+            normalized_position=-0.9 if a.name == "mouth_open" else 0,
+        )
+        for a in manifest.actuators
+    )
+    evidence = passing_preflight(manifest).model_copy(
+        update={"home_verified": False, "observed_targets": observed}
+    )
+    assert supervisor.preflight(evidence).accepted
+    assert supervisor.arm(approval(clock)).accepted
+    assert supervisor.start().accepted
+    assert supervisor.committed_targets["mouth_open"] == -0.9
+    clock.advance(250_000_000)
+    assert supervisor.authorize(request(manifest, clock, position=-0.89)).authorized
+
+
+@pytest.mark.parametrize(
+    "case", ["not-enabled", "missing-channel", "duplicate", "home-contradiction"]
+)
+def test_measured_start_rejects_incomplete_or_unauthorized_evidence(
+    manifest, clock, case
+):
+    from alice.contracts.actuation import ActuatorTarget
+
+    supervisor = SafetySupervisor(
+        manifest=manifest,
+        clock=clock,
+        limits=make_supervisor(manifest, clock).limits,
+        allow_measured_start=case != "not-enabled",
+    )
+    observed = tuple(
+        ActuatorTarget(actuator_name=a.name, normalized_position=-0.1)
+        for a in manifest.actuators
+    )
+    if case == "missing-channel":
+        observed = observed[:-1]
+    if case == "duplicate":
+        observed += observed[:1]
+    evidence = passing_preflight(manifest).model_copy(
+        update={
+            "home_verified": case == "home-contradiction",
+            "observed_targets": observed,
+        }
+    )
+    assert not supervisor.preflight(evidence).accepted
+
+
+@pytest.mark.parametrize("phase", ["armed-abort", "stale-start"])
+def test_measured_start_recovery_never_assumes_home_before_start(
+    manifest, clock, phase
+):
+    from alice.contracts.actuation import ActuatorTarget
+
+    supervisor = SafetySupervisor(
+        manifest=manifest,
+        clock=clock,
+        limits=make_supervisor(manifest, clock).limits,
+        allow_measured_start=True,
+    )
+    observed = tuple(
+        ActuatorTarget(
+            actuator_name=a.name,
+            normalized_position=-0.9 if a.name == "mouth_open" else 0,
+        )
+        for a in manifest.actuators
+    )
+    evidence = passing_preflight(manifest).model_copy(
+        update={"home_verified": False, "observed_targets": observed}
+    )
+    assert supervisor.preflight(evidence).accepted
+    assert supervisor.arm(approval(clock)).accepted
+    if phase == "armed-abort":
+        clock.advance(250_000_000)
+        result = supervisor.abort(AbortReason.OPERATOR_REQUEST)
+    else:
+        clock.advance(21_000_000_000)
+        result = supervisor.start()
+    assert supervisor.committed_targets["mouth_open"] == -0.9
+    if result.recovery_request is not None:
+        jaw = next(
+            t
+            for t in result.recovery_request.targets
+            if t.actuator_name == "mouth_open"
+        )
+        assert (
+            abs(jaw.normalized_position - (-0.9)) <= supervisor.limits.max_step + 1e-9
+        )

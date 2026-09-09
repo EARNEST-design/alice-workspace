@@ -73,6 +73,7 @@ class PreflightEvidence(BaseModel):
     controller_error_codes: tuple[Annotated[int, Field(ge=0)], ...]
     home_verified: bool
     observed_monotonic_ns: Annotated[int, Field(ge=0)]
+    observed_targets: tuple[ActuatorTarget, ...] = ()
 
 
 class OperatorApproval(BaseModel):
@@ -151,10 +152,12 @@ class SafetySupervisor:
         manifest: HardwareManifest,
         limits: SafetyLimits,
         clock: Callable[[], int],
+        allow_measured_start: bool = False,
     ) -> None:
         self._manifest = manifest
         self._limits = limits
         self._clock = clock
+        self._allow_measured_start = allow_measured_start
         self._permit_registry = _PermitRegistry()
         self._state = RunState.DISARMED
         self._fault: SafetyFault | None = None
@@ -280,6 +283,18 @@ class SafetySupervisor:
             for actuator in self._manifest.actuators
         }
         self._last_acknowledged_ns = self._preflight.observed_monotonic_ns
+        assert self._preflight is not None
+        self._committed_targets = (
+            {
+                t.actuator_name: t.normalized_position
+                for t in self._preflight.observed_targets
+            }
+            if self._preflight.observed_targets
+            else {actuator.name: 0.0 for actuator in self._manifest.actuators}
+        )
+        self._committed_velocities = {
+            actuator.name: 0.0 for actuator in self._manifest.actuators
+        }
         self._state = RunState.ARMED
         return TransitionResult(accepted=True, state=self._state)
 
@@ -295,12 +310,6 @@ class SafetySupervisor:
             actuator.name: now_ns for actuator in self._manifest.actuators
         }
         self._last_acknowledged_ns = now_ns
-        self._committed_targets = {
-            actuator.name: 0.0 for actuator in self._manifest.actuators
-        }
-        self._committed_velocities = {
-            actuator.name: 0.0 for actuator in self._manifest.actuators
-        }
         return TransitionResult(accepted=True, state=self._state)
 
     def authorize(self, request: PoseRequest) -> AuthorizationDecision:
@@ -554,7 +563,25 @@ class SafetySupervisor:
             return "competing-process", "a competing actuator process was detected"
         if evidence.controller_error_codes:
             return "controller-error", "controller error register is non-zero"
-        if not evidence.home_verified:
+        if evidence.observed_targets:
+            if not self._allow_measured_start:
+                return "measured-start-disabled", "this runner requires Home startup"
+            names = [t.actuator_name for t in evidence.observed_targets]
+            if len(names) != len(set(names)) or set(names) != {
+                a.name for a in self._manifest.actuators
+            }:
+                return (
+                    "invalid-start-targets",
+                    "measured start must cover every actuator once",
+                )
+            if evidence.home_verified and any(
+                t.normalized_position != 0 for t in evidence.observed_targets
+            ):
+                return (
+                    "contradictory-start-targets",
+                    "Home conflicts with observed targets",
+                )
+        elif not evidence.home_verified:
             return "home-not-verified", "reviewed Home positions were not verified"
         return None
 

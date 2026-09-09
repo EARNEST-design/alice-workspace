@@ -135,8 +135,7 @@ to report an empty-support conclusion if the support config becomes nonempty.
 The preview animates requested speech aperture and shows composed actuator
 proposals underneath. Seeking updates those values from the audio time; channels
 not yet introduced by a sparse expression are blank. This is a software timing
-test. The raw proposals need a bounded physical trajectory and guarded speech
-executor before they can be used on Alice's jaw. Measurements and unresolved
+test. The raw proposals feed the bounded mouth-only trial executor described below. Measurements and unresolved
 hardware integration are recorded in
 `docs/experiments/2026-09-09-speech-streaming-replay.md` and
 `hardware/speech-timing.md`.
@@ -161,3 +160,82 @@ Physical timing unknowns live in `hardware/speech-timing.md`.
 
 See [ADR 0007](architecture/0007-local-speech-and-affect-synchronization.md) for
 the buffering, ownership and interface decisions.
+
+## Attended mouth-only hardware trial
+
+The reviewed procedure is `hardware/bringup/mouth-speech-trial-v1.md`. The source
+manifest wires all 11 semantic servo names; this initial trial physically writes
+only `mouth_open` on channel 6. Other motion channels remain selectable in the
+proposal router for later reviewed trials. The CLI does not expose an option
+to enable extra physical channels.
+
+Prepare a retained, device-free trial bundle:
+
+```bash
+uv run --extra speech alice-jaw-trial \
+  --recording artifacts/speech/azelma-sync-reviewed/neutral-priors-only \
+  --expression artifacts/speech/azelma-sync-reviewed/neutral-priors-only/expression.json \
+  --config config/speech/jaw-trial-v1.json \
+  --output artifacts/speech/jaw-trial-review
+```
+
+For a fresh output directory, add `--play` for real audio with mock actuators.
+Add `--enable-hardware` to run the operator-requested attended physical trial.
+The operator's standing powered setup and master-switch access replace repeated
+readiness prompts. The runner checks hardware automatically, initializes disabled
+jaw PWM at Home when needed, or starts from a stable measured in-range output.
+The clip runs once, then returns to Home. Faults stop authority and audio without
+automatic recovery. Successful completion closes serial and leaves power control
+to the operator; no OFF acknowledgment is required.
+
+The new short trial explicitly retains the unknown current margin of the
+recorded 6 V / 1 A supply. The user-approved full-range profile is limited to the jaw. Artifacts retain source code, dependencies, exact input hashes, config,
+procedure, requested/acknowledged commands, audio clock frames and cleanup status.
+No camera or microphone is opened.
+
+## Streaming next step
+
+The requested next architecture is incremental LLM clauses plus incremental
+Pocket TTS PCM, so playback starts before either the LLM response or TTS audio
+is complete. The installed Pocket TTS 3.1.0 exposes `generate_audio_stream`.
+ADR 0009 records the queue, playback-clock and emotion-cue design. The current
+hardware trial still replays a retained WAV; chunked synthesis is not implemented
+yet.
+
+## Camera-verified mouth calibration
+
+Use `config/speech/sync-hardware-v1.json` when preparing Alice speech. It sets
+full-open RMS to 0.06 and the mouth range to -1…+1. The original 0.15 RMS plus
+narrower range and trajectory smoothing stayed below neutral on the hardware.
+The full range is 4608–5440 quarter-microseconds around Home 5059.
+
+```bash
+uv run --extra speech alice-speak \
+  --plan config/speech/alice-sync-test.json \
+  --sync-config config/speech/sync-hardware-v1.json \
+  --output artifacts/speech/new-sync
+uv run --extra speech alice-jaw-trial \
+  --recording artifacts/speech/new-sync \
+  --config config/speech/jaw-speech-lead-v1.json \
+  --output artifacts/speech/new-sync-hardware --enable-hardware \
+  --stream-targets --fast-jaw-response
+```
+
+Azelma's camera-observed trial crossed neutral (-1 to +0.576) during speech;
+lip gap varied from 7.6 to 32.7 pixels. These are visible travel measurements,
+not a precise acoustic-to-mechanical lag estimate. The observer used Alice's
+C525 only. Her mouthUpperUpLeft/Right scores were informative; MediaPipe's nominal
+jawOpen stayed near zero even during the visibly successful full-range check.
+
+The fast hardware command above streams channel 6 targets while the servo moves,
+using independent audio playback and host send timestamps. `--fast-jaw-response`
+temporarily sets Maestro jaw speed/acceleration to 0/0 and restores the reviewed
+0/11 profile after normal Home confirmation. Zero means unlimited in this controller; software
+trajectory limits remain active. Omit that flag to retain the firmware ramp.
+The run manifest records the override and restoration outcome. No persistent
+controller configuration is changed.
+
+`jaw-speech-lead-v1.json` additionally advances mouth aperture by 100 ms to
+compensate software/servo response. Emotion cues stay at the current audio sample.
+The default and `jaw-speech-fast-v1.json` use zero lead. With incremental TTS,
+this calls for a short PCM lookahead buffer, not full-utterance buffering.

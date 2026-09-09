@@ -26,7 +26,9 @@ segment-relative cues, not word alignments. Short clause segments give the LLM
 useful emphasis boundaries without predicting TTS speed. Explicit pauses become
 silence in PCM. The LLM does not generate motor targets or audio timestamps.
 
-Pre-synthesize a bounded utterance before playback. This costs initial latency
+The implemented baseline pre-synthesizes a bounded utterance before playback.
+ADR 0009 records the operator-requested replacement with incremental LLM and
+PCM streaming; that next path is not implemented yet. This costs initial latency
 but supplies deterministic sample offsets, prevents generation stalls during
 playback, and makes cancellation and replay straightforward. Incremental TTS and
 forced phoneme alignment are future optimizations of these same boundaries.

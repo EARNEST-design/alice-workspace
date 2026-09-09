@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import Annotated, Protocol
+from typing import Annotated, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -60,6 +60,17 @@ class MaestroPreflightSnapshot(BaseModel):
     observed_monotonic_ns: Annotated[int, Field(ge=0)]
 
 
+class MaestroStreamReceipt(BaseModel):
+    """A completed serial write plus current PWM observation, never APPLIED."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    state: Literal["sent"] = "sent"
+    target_qus: int
+    observed_qus: int
+    sent_monotonic_ns: int
+    reported_monotonic_ns: int
+
+
 class _TransportFailure(RuntimeError):
     def __init__(
         self,
@@ -91,7 +102,8 @@ class MaestroAdapter:
 
     Construction is disconnected, but this class is not an in-process security
     boundary. Application and experiment code must use the reviewed staged
-    hardware-identification composition instead of instantiating it directly.
+    hardware-identification or mouth-only speech composition instead of
+    instantiating it directly.
     """
 
     def __init__(
@@ -128,6 +140,7 @@ class MaestroAdapter:
         self._sleeper = sleeper
         self._transport: SerialTransport | None = None
         self._poisoned = False
+        self.jaw_response_override: dict[str, object] | None = None
 
     @property
     def identity(self) -> AdapterIdentity:
@@ -268,6 +281,164 @@ class MaestroAdapter:
             observed_monotonic_ns=self._clock(),
         )
 
+    def initialize_disabled_jaw_home(
+        self, explicit_enable_token: str
+    ) -> MaestroPreflightSnapshot:
+        """Enable the fixed speech jaw at Home before supervisor startup.
+
+        This is a narrowly scoped startup command under explicit hardware
+        enablement, not a normal trajectory permit. Disabled PWM says nothing
+        about mechanical pose; do not claim a bounded velocity for this first
+        enable. The attended speech root records it separately from playback.
+        """
+        if explicit_enable_token != self._enable_token:
+            raise MaestroConnectionError("explicit enable token does not match")
+        definitions = self._manifest.actuators
+        if (
+            self._manifest.hardware_id != "alice-jaw-speech-trial-v1"
+            or len(definitions) != 1
+            or definitions[0].name != "mouth_open"
+            or definitions[0].channel != 6
+            or definitions[0].home_qus != 5059
+        ):
+            raise MaestroConnectionError("initialization requires the fixed jaw scope")
+        before = self.read_only_preflight(("mouth_open",))
+        if before.controller_error_register or before.positions_qus["mouth_open"] != 0:
+            raise MaestroConnectionError(
+                "jaw initialization requires disabled, error-free output"
+            )
+        try:
+            self._write_all(encode_set_target(6, 5059))
+            self._wait_for_target(
+                actuator_name="mouth_open", channel=6, target_qus=5059
+            )
+            self._sleeper(0.25)
+            after = self.read_only_preflight(("mouth_open",))
+            if (
+                after.controller_error_register
+                or after.positions_qus["mouth_open"] != 5059
+            ):
+                raise MaestroConnectionError(
+                    "jaw initialization output/error check failed"
+                )
+            return after
+        except BaseException as exc:
+            self._poison_transport()
+            if isinstance(exc, (_TransportFailure, MaestroConnectionError)):
+                raise MaestroConnectionError(
+                    f"jaw initialization failed: {exc}"
+                ) from exc
+            raise
+
+    def stream_jaw_target(
+        self, explicit_enable_token: str, request: PoseRequest
+    ) -> MaestroStreamReceipt:
+        """Speech-only target streaming; observe PWM without waiting for arrival.
+
+        The trusted speech stream bounds target kinematics before each call.
+        This method enforces the fixed channel, calibration, expiry and token.
+        The settled-output apply/permit API remains unchanged for other callers.
+        """
+        if explicit_enable_token != self._enable_token:
+            raise MaestroConnectionError("explicit enable token does not match")
+        if (
+            self._manifest.hardware_id != "alice-jaw-speech-trial-v1"
+            or len(self._manifest.actuators) != 1
+            or self._manifest.actuators[0].name != "mouth_open"
+            or self._manifest.actuators[0].channel != 6
+            or len(request.targets) != 1
+            or request.targets[0].actuator_name != "mouth_open"
+        ):
+            raise MaestroConnectionError("streaming requires the fixed jaw scope")
+        self._manifest.validate_request(request, now_monotonic_ns=self._clock())
+        if self._transport is None or self._poisoned:
+            raise MaestroConnectionError("streaming adapter is not open")
+        target = self._manifest.actuator("mouth_open").target_qus(
+            request.targets[0].normalized_position
+        )
+        try:
+            payload = encode_set_target(6, target)
+            # This is the host write-start timestamp, not readback completion or
+            # measured physical motion. The planner reserves this 2 ms window.
+            sent_ns = self._clock()
+            if not 0 <= sent_ns - request.issued_monotonic_ns <= 2_000_000:
+                raise MaestroConnectionError("streaming dispatch deadline missed")
+            self._write_all(payload)
+            self._write_all(encode_get_errors())
+            errors = parse_error_register(self._read_exact(2))
+            self._write_all(encode_get_position(6))
+            observed = parse_position(self._read_exact(2))
+            definition = self._manifest.actuator("mouth_open")
+            if (
+                errors
+                or not definition.software_min_qus
+                <= observed
+                <= definition.software_max_qus
+            ):
+                raise MaestroConnectionError(
+                    f"streaming controller error={errors}; output={observed}"
+                )
+            return MaestroStreamReceipt(
+                target_qus=target,
+                observed_qus=observed,
+                sent_monotonic_ns=sent_ns,
+                reported_monotonic_ns=self._clock(),
+            )
+        except BaseException:
+            self._poison_transport()
+            raise
+
+    def enable_fast_jaw_response(self, explicit_enable_token: str) -> None:
+        """Temporarily remove channel 6 firmware ramping, preserving EEPROM.
+
+        The reviewed Alice profile is speed 0 / acceleration 11. Restore that
+        profile at normal completion; faults record non-restoration.
+        Software trajectory bounds remain the speech stream's responsibility.
+        """
+        if explicit_enable_token != self._enable_token:
+            raise MaestroConnectionError("explicit enable token does not match")
+        definitions = self._manifest.actuators
+        if (
+            self._manifest.hardware_id != "alice-jaw-speech-trial-v1"
+            or len(definitions) != 1
+            or definitions[0].name != "mouth_open"
+            or definitions[0].channel != 6
+            or definitions[0].home_qus != 5059
+            or self.jaw_response_override is not None
+        ):
+            raise MaestroConnectionError("fast response requires the fixed jaw scope")
+        before = self.read_only_preflight(("mouth_open",))
+        if (
+            before.controller_error_register
+            or before.positions_qus["mouth_open"] != 5059
+        ):
+            raise MaestroConnectionError("fast response requires error-free jaw Home")
+        self.jaw_response_override = {
+            "channel": 6,
+            "speed": 0,
+            "acceleration": 0,
+            "restore_speed": 0,
+            "restore_acceleration": 11,
+            "persistent_settings_changed": False,
+            "status": "requested",
+        }
+        try:
+            self._set_jaw_response(acceleration=0)
+            self.jaw_response_override["status"] = "active"
+        except BaseException:
+            self._poison_transport()
+            raise
+
+    def _set_jaw_response(self, *, acceleration: int) -> None:
+        # Pololu compact protocol: Set Speed 0x87 / Set Acceleration 0x89.
+        # These fixed runtime commands never set a position or write EEPROM.
+        self._write_all(bytes([0x87, 6, 0, 0]))
+        self._write_all(bytes([0x89, 6, acceleration, 0]))
+        self._write_all(encode_get_errors())
+        errors = parse_error_register(self._read_exact(2))
+        if errors:
+            raise MaestroConnectionError(f"jaw response controller error={errors}")
+
     def fileno(self) -> int:
         """Return the opened transport fd for minimal post-fork detachment."""
 
@@ -404,8 +575,31 @@ class MaestroAdapter:
             ),
         )
 
+    def restore_jaw_response(self) -> None:
+        """Restore the reviewed profile on the serial-owner thread at completion.
+
+        Never call this from watchdog/fault cleanup: it performs serial I/O.
+        """
+        if self.jaw_response_override is None:
+            return
+        if self.jaw_response_override["status"] != "active":
+            raise MaestroConnectionError("jaw response override is no longer active")
+        try:
+            self._set_jaw_response(acceleration=11)
+            self.jaw_response_override["status"] = "restored"
+        except BaseException:
+            self.jaw_response_override["status"] = "restoration-failed"
+            self._poison_transport()
+            raise
+
     def close(self) -> None:
+        # Watchdog may call this while the serial owner is in a transaction.
+        # Detach only: adding restoration writes/reads here corrupts framing.
         transport, self._transport = self._transport, None
+        if self.jaw_response_override is not None and self.jaw_response_override[
+            "status"
+        ] in ("requested", "active"):
+            self.jaw_response_override["status"] = "not-restored-close"
         if transport is not None:
             try:
                 transport.close()
@@ -416,6 +610,10 @@ class MaestroAdapter:
         """Make an ambiguous serial session permanently unusable."""
 
         self._poisoned = True
+        if self.jaw_response_override is not None and self.jaw_response_override[
+            "status"
+        ] in ("requested", "active"):
+            self.jaw_response_override["status"] = "not-restored-transport-fault"
         transport, self._transport = self._transport, None
         if transport is not None:
             try:

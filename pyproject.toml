@@ -28,6 +28,7 @@ ml = [
 
 [project.scripts]
 alice-speak = "alice.speech.cli:main"
+alice-jaw-trial = "alice.experiments.jaw_trial_cli:main"
 alice-camera = "alice.perception.cli:main"
 alice-passive-capture = "alice.experiments.passive_capture:main"
 alice-hardware-preflight = "alice.experiments.hardware_cli:main"

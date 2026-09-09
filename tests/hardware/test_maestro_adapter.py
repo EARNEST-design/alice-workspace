@@ -491,3 +491,296 @@ def test_close_is_idempotent_and_apply_requires_open(
 
     assert fake.closed is True
     assert instance.is_open is False
+
+
+def test_disabled_jaw_initialization_writes_only_its_calibrated_home(manifest):
+    from alice.experiments.jaw_trial_cli import scoped_manifest
+
+    home = (5059).to_bytes(2, "little")
+    fake = FakeSerial(reads=(b"\0\0", b"\0\0", home, b"\0\0", home))
+    instance = adapter(scoped_manifest(manifest), fake)
+    instance.open(ENABLE)
+    snapshot = instance.initialize_disabled_jaw_home(ENABLE)
+    assert snapshot.positions_qus == {"mouth_open": 5059}
+    assert bytes(fake.written) == (
+        encode_get_errors()
+        + encode_get_position(6)
+        + encode_set_target(6, 5059)
+        + encode_get_position(6)
+        + encode_get_errors()
+        + encode_get_position(6)
+    )
+
+
+@pytest.mark.parametrize(
+    "case", ["full-manifest", "wrong-token", "nonzero", "error", "short-read"]
+)
+def test_jaw_initialization_rejects_invalid_scope_state_or_token(manifest, case):
+    from alice.experiments.jaw_trial_cli import scoped_manifest
+
+    document = manifest if case == "full-manifest" else scoped_manifest(manifest)
+    reads = (
+        ()
+        if case == "short-read"
+        else (
+            (1 if case == "error" else 0).to_bytes(2, "little"),
+            (5000 if case == "nonzero" else 0).to_bytes(2, "little"),
+        )
+    )
+    fake = FakeSerial(reads=reads)
+    instance = adapter(document, fake)
+    instance.open(ENABLE)
+    with pytest.raises(MaestroConnectionError):
+        instance.initialize_disabled_jaw_home(
+            "wrong" if case == "wrong-token" else ENABLE
+        )
+    assert encode_set_target(6, 5059) not in bytes(fake.written)
+
+
+def test_jaw_initialization_fault_after_write_poisons_transport(manifest):
+    from alice.experiments.jaw_trial_cli import scoped_manifest
+
+    home = (5059).to_bytes(2, "little")
+    fake = FakeSerial(reads=(b"\0\0", b"\0\0", home, b"\1\0", home))
+    instance = adapter(scoped_manifest(manifest), fake)
+    instance.open(ENABLE)
+    with pytest.raises(MaestroConnectionError, match="error"):
+        instance.initialize_disabled_jaw_home(ENABLE)
+    assert instance.is_poisoned
+    assert fake.closed
+
+
+def test_jaw_startup_can_observe_disabled_pwm_until_first_controller_update(manifest):
+    from alice.experiments.jaw_trial_cli import scoped_manifest
+
+    home = (5059).to_bytes(2, "little")
+    fake = FakeSerial(reads=(b"\0\0", b"\0\0", b"\0\0", home, b"\0\0", home))
+    instance = adapter(scoped_manifest(manifest), fake)
+    instance.open(ENABLE)
+    snapshot = instance.initialize_disabled_jaw_home(ENABLE)
+    assert snapshot.positions_qus["mouth_open"] == 5059
+    assert bytes(fake.written).count(encode_set_target(6, 5059)) == 1
+
+
+def test_jaw_initialization_cancel_poisons_transport(manifest, monkeypatch):
+    from alice.experiments.jaw_trial_cli import scoped_manifest
+
+    home = (5059).to_bytes(2, "little")
+    fake = FakeSerial(reads=(b"\0\0", b"\0\0", home))
+    instance = adapter(scoped_manifest(manifest), fake)
+    instance.open(ENABLE)
+
+    def interrupt(seconds):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(instance, "_sleeper", interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        instance.initialize_disabled_jaw_home(ENABLE)
+    assert instance.is_poisoned
+    assert fake.closed
+
+
+def test_streaming_jaw_send_records_current_output_without_waiting_for_target(manifest):
+    from alice.experiments.jaw_trial_cli import scoped_manifest
+
+    scope = scoped_manifest(manifest)
+    fake = FakeSerial(reads=(b"\0\0", (5059).to_bytes(2, "little")))
+    instance = adapter(scope, fake)
+    instance.open(ENABLE)
+    command = request(
+        scope, targets=({"actuator_name": "mouth_open", "normalized_position": 1.0},)
+    )
+    receipt = instance.stream_jaw_target(ENABLE, command)
+    assert receipt.target_qus == 5440
+    assert receipt.observed_qus == 5059
+    assert receipt.state == "sent"
+    assert bytes(fake.written) == encode_set_target(
+        6, 5440
+    ) + encode_get_errors() + encode_get_position(6)
+
+
+def test_streaming_jaw_cannot_write_another_axis(manifest):
+    fake = FakeSerial()
+    instance = adapter(manifest, fake)
+    instance.open(ENABLE)
+    with pytest.raises(MaestroConnectionError):
+        instance.stream_jaw_target(
+            ENABLE,
+            request(
+                manifest,
+                targets=({"actuator_name": "head_tilt", "normalized_position": 0.1},),
+            ),
+        )
+    assert not fake.written
+
+
+@pytest.mark.parametrize("observed,errors", [(0, 0), (5059, 1), (6000, 0)])
+def test_streaming_jaw_controller_fault_closes_transport(manifest, observed, errors):
+    from alice.experiments.jaw_trial_cli import scoped_manifest
+
+    scope = scoped_manifest(manifest)
+    fake = FakeSerial(
+        reads=(errors.to_bytes(2, "little"), observed.to_bytes(2, "little"))
+    )
+    instance = adapter(scope, fake)
+    instance.open(ENABLE)
+    with pytest.raises(MaestroConnectionError):
+        instance.stream_jaw_target(ENABLE, request(scope))
+    assert instance.is_poisoned
+    assert fake.closed
+
+
+def test_stream_rejects_late_dispatch_before_writing(manifest):
+    from alice.experiments.jaw_trial_cli import scoped_manifest
+
+    scope = scoped_manifest(manifest)
+    fake = FakeSerial()
+    instance = adapter(scope, fake)
+    instance.open(ENABLE)
+    command = request(scope).model_copy(
+        update={"issued_monotonic_ns": 0, "expires_monotonic_ns": 500_000_000}
+    )
+    instance._clock = lambda: 3_000_000
+    with pytest.raises(MaestroConnectionError, match="dispatch"):
+        instance.stream_jaw_target(ENABLE, command)
+    assert not fake.written
+
+
+def test_stream_send_timestamp_excludes_readback_latency(manifest):
+    from alice.experiments.jaw_trial_cli import scoped_manifest
+
+    scope = scoped_manifest(manifest)
+    now = [1500]
+
+    class SlowRead(FakeSerial):
+        def read(self, size):
+            now[0] += 20_000_000
+            return super().read(size)
+
+    fake = SlowRead(reads=(b"\0\0", (5059).to_bytes(2, "little")))
+    instance = adapter(scope, fake)
+    instance._clock = lambda: now[0]
+    instance.open(ENABLE)
+    receipt = instance.stream_jaw_target(ENABLE, request(scope))
+    assert receipt.sent_monotonic_ns == 1500
+    assert receipt.reported_monotonic_ns == 40_001_500
+
+
+def test_fast_jaw_dynamics_only_changes_channel_six_and_restores_explicitly(manifest):
+    from alice.experiments.jaw_trial_cli import scoped_manifest
+
+    fake = FakeSerial(reads=(b"\0\0", (5059).to_bytes(2, "little"), b"\0\0", b"\0\0"))
+    instance = adapter(scoped_manifest(manifest), fake)
+    instance.open(ENABLE)
+    instance.enable_fast_jaw_response(ENABLE)
+    instance.restore_jaw_response()
+    instance.close()
+    assert bytes(fake.written) == bytes(
+        [
+            0xA1,
+            0x90,
+            6,  # errors and Home before changing dynamics
+            0x87,
+            6,
+            0,
+            0,
+            0x89,
+            6,
+            0,
+            0,
+            0xA1,  # fastest runtime response
+            0x87,
+            6,
+            0,
+            0,
+            0x89,
+            6,
+            11,
+            0,
+            0xA1,  # restore stored profile
+        ]
+    )
+    assert instance.jaw_response_override["status"] == "restored"
+
+
+@pytest.mark.parametrize(
+    "wrong_scope,wrong_token,position",
+    [(True, False, 5059), (False, True, 5059), (False, False, 5440)],
+)
+def test_fast_jaw_dynamics_rejects_wrong_scope_token_or_nonhome(
+    manifest, wrong_scope, wrong_token, position
+):
+    from alice.experiments.jaw_trial_cli import scoped_manifest
+
+    fake = FakeSerial(reads=(b"\0\0", position.to_bytes(2, "little")))
+    instance = adapter(manifest if wrong_scope else scoped_manifest(manifest), fake)
+    instance.open(ENABLE)
+    with pytest.raises(MaestroConnectionError):
+        instance.enable_fast_jaw_response("wrong" if wrong_token else ENABLE)
+    assert b"\x87" not in fake.written and b"\x89" not in fake.written
+
+
+def test_fast_jaw_dynamics_marks_failed_restoration_and_closes(manifest):
+    from alice.experiments.jaw_trial_cli import scoped_manifest
+
+    fake = FakeSerial(reads=(b"\0\0", (5059).to_bytes(2, "little"), b"\0\0"))
+    instance = adapter(scoped_manifest(manifest), fake)
+    instance.open(ENABLE)
+    instance.enable_fast_jaw_response(ENABLE)
+    with pytest.raises(Exception, match="read"):
+        instance.restore_jaw_response()
+    assert fake.closed
+    assert instance.jaw_response_override["status"] == "restoration-failed"
+
+
+def test_watchdog_close_during_stream_read_sends_no_restoration_commands(manifest):
+    import threading
+
+    from alice.experiments.jaw_trial_cli import scoped_manifest
+
+    entered, release = threading.Event(), threading.Event()
+    failures = []
+
+    class BlockingRead(FakeSerial):
+        block = False
+
+        def read(self, size):
+            if self.block and threading.current_thread().name == "serial-owner":
+                entered.set()
+                assert release.wait(2)
+            return super().read(size)
+
+    scope = scoped_manifest(manifest)
+    fake = BlockingRead(
+        reads=(
+            b"\0\0",
+            (5059).to_bytes(2, "little"),
+            b"\0\0",
+            b"\0\0",
+            (5059).to_bytes(2, "little"),
+        )
+    )
+    instance = adapter(scope, fake)
+    instance.open(ENABLE)
+    instance.enable_fast_jaw_response(ENABLE)
+    fake.block = True
+
+    def send():
+        try:
+            instance.stream_jaw_target(ENABLE, request(scope))
+        except BaseException as exc:
+            failures.append(exc)
+
+    worker = threading.Thread(target=send, name="serial-owner")
+    worker.start()
+    try:
+        assert entered.wait(2)
+        before_close = bytes(fake.written)
+        instance.close()
+        assert bytes(fake.written) == before_close
+        assert instance.jaw_response_override["status"] == "not-restored-close"
+    finally:
+        release.set()
+        worker.join(2)
+    assert not worker.is_alive()
+    assert fake.closed

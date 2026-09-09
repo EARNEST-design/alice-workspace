@@ -68,7 +68,9 @@ class ControllerOutputSample(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     actuator_name: NonEmptyString
-    observed_qus: Annotated[int, Field(gt=0)]
+    # Zero is a real Maestro observation: PWM is disabled. It cannot match a
+    # positive target, but must be retainable while waiting for initial enable.
+    observed_qus: Annotated[int, Field(ge=0)]
     target_qus: Annotated[int, Field(gt=0)]
     observed_monotonic_ns: MonotonicNanoseconds
 

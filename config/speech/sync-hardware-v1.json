@@ -1,0 +1,13 @@
+{
+  "schema_version": "speech-sync/v1",
+  "cadence_hz": 50,
+  "noise_gate_rms": 0.01,
+  "full_open_rms": 0.06,
+  "attack_s": 0.03,
+  "release_s": 0.06,
+  "tail_s": 0.3,
+  "max_duration_s": 120.0,
+  "closed_position": -1.0,
+  "open_position": 1.0,
+  "expression_jaw_weight": 0.15
+}

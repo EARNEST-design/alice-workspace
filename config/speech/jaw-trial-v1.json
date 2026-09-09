@@ -1,0 +1,14 @@
+{
+  "schema_version": "jaw-speech-trial/v1",
+  "closed_position": -1.0,
+  "open_position": 0.6,
+  "max_step": 0.1,
+  "max_rate_per_s": 2.0,
+  "max_acceleration_per_s2": 4.0,
+  "command_interval_s": 0.04,
+  "max_gap_s": 0.25,
+  "source_timeout_s": 0.25,
+  "phase_timeout_s": 8,
+  "max_audio_s": 10.0,
+  "max_run_s": 25.0
+}
