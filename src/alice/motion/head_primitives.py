@@ -181,7 +181,7 @@ class HeadPrimitiveGenerator:
         gesture: HeadGesture,
         state: TargetUpdate,
     ) -> TargetUpdateHorizon:
-        """Render from the exact boundary state to exact recovery targets."""
+        """Render ordinary recovery to the starting pose, or explicit RETURN targets."""
 
         positions, recovery = self._validate_inputs(gesture, state)
         total_s = gesture.duration_s + gesture.hold_s + gesture.recovery_s
@@ -334,14 +334,15 @@ class HeadPrimitiveGenerator:
             target.actuator_name: target.normalized_position
             for target in gesture.recovery_targets
         }
+        if gesture.initial_targets and gesture.initial_targets != state.targets:
+            raise ValueError("head primitive state differs from its captured pose")
         if gesture.kind is not HeadGestureKind.RETURN:
-            recovery.update(
-                {
-                    name: positions[name]
-                    for name in names
-                    if name != expected_actuator
-                }
-            )
+            if (
+                gesture.initial_targets
+                and gesture.recovery_targets != gesture.initial_targets
+            ):
+                raise ValueError("head gesture recovery differs from its captured pose")
+            recovery = dict(positions)
         return positions, recovery
 
     def _gesture_segments(

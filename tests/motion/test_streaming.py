@@ -36,7 +36,7 @@ from alice.motion.face_events import (
     FaceEventState,
     load_face_event_config,
 )
-from alice.motion.head_primitives import HeadGesture, HeadGestureKind
+from alice.motion.head_primitives import HeadGesture
 from alice.motion.intent_filter import FilteredIntent, SupportStatus
 from alice.motion.procedural import ProceduralMotionGenerator
 from alice.motion.state import (
@@ -173,7 +173,7 @@ def test_state_accepts_array_backed_numpy_rng_for_portable_replay() -> None:
     assert runtime.replan(_intent(), restored, 0) == runtime.replan(_intent(), state, 0)
 
 
-def test_moving_blink_falls_back_atomically_to_controller_feasible_anchor() -> None:
+def test_moving_blink_projects_accepted_phase_without_leaking_speculation() -> None:
     """An event target inside stopping distance must not leak attempted state."""
 
     moving_position = -0.4664151512
@@ -284,26 +284,36 @@ def test_moving_blink_falls_back_atomically_to_controller_feasible_anchor() -> N
             elapsed_s=0.2,
         )
 
+    incoming = dump_state(state)
+    ambient_numpy = np.random.get_state()
+    ambient_torch = torch.random.get_rng_state().clone()
+    speculative = face.sample(
+        _intent(accepted_ns=generated_ns), state, np.random.default_rng(7), 10.0
+    )
+    assert any(event.starts_monotonic_ns > generated_ns for event in speculative)
     plan = composer.plan(
         _intent(accepted_ns=generated_ns),
         state,
-        horizon_s=1.0,
+        horizon_s=10.0,
         prefix_duration_s=0.4,
         generated_monotonic_ns=generated_ns,
     )
 
-    expected = response.predict(
-        moving,
-        ProductionCandidateComposer._update(0.2, {"upper_eyelids": 0.0}),
-        elapsed_s=0.2,
-    )
+    # At t=1.2 the accepted blink reaches its peak, inside stopping distance.
+    # Projection must brake to rest instead of dropping the blink and reversing.
+    acceleration = controller_config.actuator("upper_eyelids").max_acceleration_per_s2
+    expected_stop = moving_position - moving_velocity**2 / (2.0 * acceleration)
     first_fallback = next(
         target
         for target in plan.proposal.horizon.updates[1].targets
         if target.actuator_name == "upper_eyelids"
     )
     assert plan.proposal.support_status == "fallback"
-    assert first_fallback.normalized_position == pytest.approx(expected.position)
+    assert first_fallback.normalized_position == pytest.approx(expected_stop)
+    assert face.state_from(plan.boundary_state).history == (blink,)
+    assert dump_state(state) == incoming
+    assert np.array_equal(np.random.get_state()[1], ambient_numpy[1])
+    assert torch.equal(torch.random.get_rng_state(), ambient_torch)
     assert plan.boundary_state.numpy_rng_state == state.numpy_rng_state
     assert plan.boundary_state.latent_vector == state.latent_vector
     assert plan.boundary_state.torch_rng_state == state.torch_rng_state
@@ -313,9 +323,7 @@ def test_moving_blink_falls_back_atomically_to_controller_feasible_anchor() -> N
     )
 
 
-def test_nod_preserves_residual_displacement_on_inactive_head_axis(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_nod_preserves_residual_displacement_on_inactive_head_axis() -> None:
     """Starting a nod must not turn residual yaw into an implicit head reset."""
 
     controller_config = load_controller_response_config(CONTROLLER_CONFIG_PATH)
@@ -333,8 +341,18 @@ def test_nod_preserves_residual_displacement_on_inactive_head_axis(
         config=load_face_event_config(FACE_CONFIG_PATH),
         controller_config=controller_config,
     )
+    head_config = load_head_gesture_config(HEAD_CONFIG_PATH)
+    certain_nod = head_config.gestures[0].model_copy(
+        update={
+            "base_hazard_hz": 1_000.0,
+            "min_hazard_hz": 1_000.0,
+            "max_hazard_hz": 1_000.0,
+        }
+    )
     head = HeadGestureScheduler(
-        config=load_head_gesture_config(HEAD_CONFIG_PATH),
+        config=head_config.model_copy(
+            update={"gestures": (certain_nod, *head_config.gestures[1:])}
+        ),
         controller_config=controller_config,
     )
     composer = ProductionCandidateComposer(
@@ -390,29 +408,8 @@ def test_nod_preserves_residual_displacement_on_inactive_head_axis(
     assert residual_yaw != 0.0
     state_values = residual_plan.boundary_state.model_dump()
     accepted_targets = state_values["last_accepted_target"]["targets"]
-    state_values["last_accepted_target"]["targets"] = tuple(
-        reversed(accepted_targets)
-    )
+    state_values["last_accepted_target"]["targets"] = tuple(reversed(accepted_targets))
     residual_state = GeneratorState.model_validate(state_values)
-    policy = head.config.policy(HeadGestureKind.NOD)
-    nod = HeadGesture(
-        schema_version="head-gesture/v1",
-        gesture_id="nod-after-residual",
-        model_id=head.config.model_id,
-        model_sha256=head.model_sha256,
-        kind=HeadGestureKind.NOD,
-        starts_monotonic_ns=1_000_000_000,
-        actuator_name=policy.actuator_name,
-        amplitude=policy.amplitude.minimum,
-        duration_s=policy.duration_s.minimum,
-        cycles=policy.cycles.minimum,
-        asymmetry=policy.asymmetry.minimum,
-        hold_s=policy.hold_s.minimum,
-        recovery_s=policy.recovery_s.minimum,
-        recovery_targets=head.config.recovery_targets,
-    )
-    monkeypatch.setattr(head, "sample", lambda *args, **kwargs: nod)
-
     gesture_plan = composer.plan(
         intent.model_copy(update={"accepted_monotonic_ns": 1_000_000_000}),
         residual_state,
@@ -1083,3 +1080,161 @@ def test_restore_rejects_invalid_procedural_continuation(corruption: str) -> Non
         del continuation["applied_variation"]["mouth_open"]
     with pytest.raises(ValueError):
         GeneratorState.model_validate(payload)
+
+
+def _event_composer_fixture() -> tuple[
+    ProductionCandidateComposer,
+    FaceEventGenerator,
+    HeadGestureScheduler,
+    GeneratorState,
+]:
+    controller = load_controller_response_config(CONTROLLER_CONFIG_PATH)
+    anchor = load_procedural_motion_config(CONFIG_PATH)
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(71)
+        residual = ResidualStateSpace(
+            load_residual_state_space_config(RESIDUAL_CONFIG_PATH)
+        )
+    with torch.no_grad():
+        for parameter in residual.parameters():
+            parameter.zero_()
+    face = FaceEventGenerator(
+        config=load_face_event_config(FACE_CONFIG_PATH), controller_config=controller
+    )
+    head = HeadGestureScheduler(
+        config=load_head_gesture_config(HEAD_CONFIG_PATH), controller_config=controller
+    )
+    composer = ProductionCandidateComposer(
+        anchor_planner=AnchorPlanner(config=anchor),
+        residual_model=residual,
+        face_events=face,
+        head_scheduler=head,
+        controller_response=ControllerResponse(config=controller),
+    )
+    state = _state(anchor).model_copy(
+        update={
+            "event_history": (),
+            "torch_rng_state": tuple(int(v) for v in torch.random.get_rng_state()),
+        }
+    )
+    return composer, face, head, state
+
+
+@pytest.mark.parametrize("status", [SupportStatus.STALE, SupportStatus.FALLBACK])
+def test_conservative_composer_completes_blink_and_cancels_future_events(
+    status: SupportStatus,
+) -> None:
+    """Conservative replans must preserve accepted phase and persist cancellation."""
+    composer, face, _, initial = _event_composer_fixture()
+    events = face.sample(_intent(), initial, np.random.default_rng(3), 10.0)
+    blink = events[0]
+    assert blink.kind is FaceEventKind.BLINK
+    assert blink.starts_monotonic_ns == 200_000_000
+    state = initial.model_copy(update={"monotonic_ns": 400_000_000})
+    state = (
+        face.state_from(state)
+        .advance(
+            events,
+            monotonic_ns=state.monotonic_ns,
+            planned_through_ns=10_000_000_000,
+        )
+        .to_generator_state(state)
+    )
+    original = dump_state(state)
+    future_ids = {
+        e.event_id for e in events if e.starts_monotonic_ns > state.monotonic_ns
+    }
+    assert future_ids
+    previous = state
+    observed = []
+    for _ in range(5):
+        intent = _intent(accepted_ns=state.monotonic_ns).model_copy(
+            update={"support_status": status}
+        )
+        plan = composer.plan(
+            intent, state, 1.0, 0.4, generated_monotonic_ns=state.monotonic_ns
+        )
+        replay = composer.plan(
+            intent,
+            load_state(dump_state(state)),
+            1.0,
+            0.4,
+            generated_monotonic_ns=state.monotonic_ns,
+        )
+        assert replay == plan
+        state = plan.boundary_state
+        saved = face.state_from(state)
+        assert blink in saved.history
+        assert not future_ids & {e.event_id for e in saved.history}
+        assert saved.planned_through_ns == state.monotonic_ns
+        assert state.numpy_rng_state == previous.numpy_rng_state
+        assert state.latent_vector == previous.latent_vector
+        assert state.torch_rng_state == previous.torch_rng_state
+        observed.append(
+            next(
+                t.normalized_position
+                for t in state.last_accepted_target.targets
+                if t.actuator_name == "upper_eyelids"
+            )
+        )
+    assert min(observed) < -0.1
+    assert observed[-1] > min(observed)
+    assert dump_state(previous) == original
+    resumed = composer.plan(
+        _intent(accepted_ns=state.monotonic_ns),
+        state,
+        10.0,
+        0.4,
+        generated_monotonic_ns=state.monotonic_ns,
+    )
+    assert not future_ids & {
+        e.event_id for e in face.state_from(resumed.boundary_state).history
+    }
+
+
+def test_conservative_composer_preserves_head_recovery_and_cancels_future() -> None:
+    """Suppressing the active primitive would prematurely abandon its recovery."""
+    composer, _, head, state = _event_composer_fixture()
+    active = head.sample(_intent(), (), np.random.default_rng(25))
+    assert active is not None
+    future = head.sample(
+        _intent(accepted_ns=20_000_000_000), (), np.random.default_rng(25)
+    )
+    assert future is not None
+    history = head.record(head.record((), active), future)
+    state = state.model_copy(
+        update={"event_history": history, "monotonic_ns": 400_000_000}
+    )
+    positions = []
+    while state.monotonic_ns < active.ends_monotonic_ns + 2_000_000_000:
+        intent = _intent(accepted_ns=state.monotonic_ns).model_copy(
+            update={"support_status": SupportStatus.STALE}
+        )
+        plan = composer.plan(
+            intent, state, 1.0, 0.4, generated_monotonic_ns=state.monotonic_ns
+        )
+        replay = composer.plan(
+            intent,
+            load_state(dump_state(state)),
+            1.0,
+            0.4,
+            generated_monotonic_ns=state.monotonic_ns,
+        )
+        assert replay == plan
+        state = plan.boundary_state
+        saved = [
+            HeadGesture.from_history_record(r)
+            for r in state.event_history
+            if r.event_type == "head-gesture/v1"
+        ]
+        assert active in saved
+        assert future not in saved
+        positions.append(
+            next(
+                t.normalized_position
+                for t in state.last_accepted_target.targets
+                if t.actuator_name == active.actuator_name
+            )
+        )
+    assert max(abs(position) for position in positions) > 0.01
+    assert positions[-1] == pytest.approx(0.0, abs=1e-8)

@@ -229,20 +229,27 @@ class ProductionCandidateComposer:
             else self._anchor.plan(intent, state.last_accepted_target, horizon_s)
         )
         face_state = self._face.state_from(state)
-        sampled_face = (
-            ()
-            if conservative
-            else self._face.sample(intent, face_state, rng, horizon_s)
-        )
+        if conservative:
+            face_state = face_state.cancel_future()
+            sampled_face = tuple(
+                event
+                for event in face_state.history
+                if event.ends_monotonic_ns > generated_monotonic_ns
+            )
+        else:
+            sampled_face = self._face.sample(intent, face_state, rng, horizon_s)
         history = self._head.compact_history(
             state.event_history, at_ns=generated_monotonic_ns
         )
 
-        active_head = (
-            None
-            if conservative
-            else self._active_head(history, generated_monotonic_ns)
-        )
+        if conservative:
+            history = tuple(
+                record
+                for record in history
+                if record.event_type != "head-gesture/v1"
+                or record.started_monotonic_ns <= generated_monotonic_ns
+            )
+        active_head = self._active_head(history, generated_monotonic_ns)
         if (
             not conservative
             and active_head is None
@@ -250,27 +257,28 @@ class ProductionCandidateComposer:
                 history, generated_monotonic_ns=generated_monotonic_ns
             )
         ):
+            accepted_positions = self._positions(state.last_accepted_target)
+            accepted_head_pose = TargetUpdate(
+                offset_s=0.0,
+                targets=tuple(
+                    ActuatorTarget(
+                        actuator_name=name,
+                        normalized_position=accepted_positions[name],
+                    )
+                    for name in self._head.config.semantics.actuator_names
+                ),
+            )
             active_head = self._head.sample(
                 intent,
                 history,
                 rng,
                 generated_monotonic_ns=generated_monotonic_ns,
+                accepted_pose=accepted_head_pose,
             )
             history = self._head.record_decision(
                 history, generated_monotonic_ns=generated_monotonic_ns
             )
             if active_head is not None:
-                accepted_positions = self._positions(state.last_accepted_target)
-                head_targets = tuple(
-                    ActuatorTarget(
-                        actuator_name=actuator_name,
-                        normalized_position=accepted_positions[actuator_name],
-                    )
-                    for actuator_name in self._head.config.semantics.actuator_names
-                )
-                active_head = active_head.model_copy(
-                    update={"initial_targets": head_targets}
-                )
                 history = self._head.record(history, active_head)
 
         head_horizon = None
@@ -437,18 +445,14 @@ class ProductionCandidateComposer:
                 else tuple(float(v) for v in boundary_hidden.reshape(-1))
             ),
             numpy_rng_state=(
-                state.numpy_rng_state
-                if conservative
-                else rng.bit_generator.state
+                state.numpy_rng_state if conservative else rng.bit_generator.state
             ),
             event_history=history,
             monotonic_ns=ends_ns,
         )
         next_state = GeneratorState.model_validate(state_values)
         planned_through_ns = (
-            max(face_state.planned_through_ns, ends_ns)
-            if conservative
-            else generated_monotonic_ns + round(horizon_s * 1e9)
+            ends_ns if conservative else generated_monotonic_ns + round(horizon_s * 1e9)
         )
         advanced_face = face_state.advance(
             sampled_face,

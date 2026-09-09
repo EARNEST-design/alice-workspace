@@ -10,6 +10,8 @@ import pytest
 import yaml  # type: ignore[import-untyped]
 from pydantic import ValidationError
 
+from alice.contracts.actuation import ActuatorTarget
+from alice.contracts.motion import TargetUpdate
 from alice.models.head_scheduler import (
     HeadGestureConfig,
     HeadGestureScheduler,
@@ -294,3 +296,55 @@ def test_checked_in_parameter_extremes_obey_quintic_derivative_limits() -> None:
         assert peak_acceleration <= parameters.max_acceleration_per_s2
         assert recovery_velocity <= parameters.max_velocity_per_s
         assert recovery_acceleration <= parameters.max_acceleration_per_s2
+
+
+@pytest.mark.parametrize("position", [0.0, 0.01])
+def test_seed25_shake_recovers_to_accepted_pose_and_restores_history(
+    position: float,
+) -> None:
+    """Configured neutral recovery must not erase drift on the active axis."""
+    scheduler = _scheduler()
+    pose = TargetUpdate(
+        offset_s=0.0,
+        targets=tuple(
+            ActuatorTarget(actuator_name=name, normalized_position=position)
+            for name in scheduler.config.semantics.actuator_names
+        ),
+    )
+    gesture = scheduler.sample(
+        _intent(),
+        (),
+        np.random.default_rng(25),
+        accepted_pose=pose,
+    )
+    assert gesture is not None
+    assert gesture.kind is HeadGestureKind.SHAKE
+    assert gesture.initial_targets == pose.targets
+    assert gesture.recovery_targets == pose.targets
+    horizon = scheduler.primitives.render(gesture, pose)
+    assert horizon.updates[-1].targets == pose.targets
+    assert any(update.targets != pose.targets for update in horizon.updates)
+    history = scheduler.record((), gesture)
+    restored = HeadGesture.from_history_record(history[0])
+    assert scheduler.record(history, restored) == history
+    assert scheduler.primitives.render(restored, pose) == horizon
+    assert (
+        scheduler.sample(
+            _intent(), history, np.random.default_rng(25), accepted_pose=pose
+        )
+        is None
+    )
+
+
+def test_head_history_rejects_recovery_different_from_captured_pose() -> None:
+    """A changed recovery payload must not silently replay another trajectory."""
+    scheduler = _scheduler()
+    gesture = scheduler.sample(_intent(), (), np.random.default_rng(25))
+    assert gesture is not None
+    wrong = tuple(
+        t.model_copy(update={"normalized_position": 0.01})
+        for t in gesture.recovery_targets
+    )
+    altered = gesture.model_copy(update={"initial_targets": wrong})
+    with pytest.raises(ValueError, match="recovery"):
+        scheduler.record((), altered)

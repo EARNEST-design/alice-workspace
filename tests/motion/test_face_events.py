@@ -468,3 +468,42 @@ def test_face_event_rejects_uncoupled_target_values() -> None:
                 ),
             ),
         )
+
+
+@pytest.mark.parametrize("status", [SupportStatus.STALE, SupportStatus.FALLBACK])
+def test_fallback_does_not_schedule_new_face_events(status: SupportStatus) -> None:
+    """Unsupported intent must not consume RNG or create fresh events."""
+    generator = _generator()
+    state = generator.state_from(_generic_state())
+    intent = _intent().model_copy(update={"support_status": status})
+    rng = np.random.default_rng(3)
+    before = rng.bit_generator.state
+    assert generator.sample(intent, state, rng, 10.0) == ()
+    assert rng.bit_generator.state == before
+
+
+@pytest.mark.parametrize("status", [SupportStatus.STALE, SupportStatus.FALLBACK])
+def test_fallback_returns_active_blink_without_future_events(
+    status: SupportStatus,
+) -> None:
+    """Dropping the active envelope or replaying a future event breaks recovery."""
+    generator = _generator()
+    blink = _blink(generator)
+    future = blink.model_copy(
+        update={
+            "event_id": "future-blink",
+            "starts_monotonic_ns": 8_000_000_000,
+        }
+    )
+    state = generator.state_from(_generic_state(now_ns=1_400_000_000)).advance(
+        (blink, future),
+        monotonic_ns=1_400_000_000,
+        planned_through_ns=10_000_000_000,
+    )
+    intent = _intent(accepted_ns=1_400_000_000).model_copy(
+        update={"support_status": status}
+    )
+    rng = np.random.default_rng(3)
+    before = rng.bit_generator.state
+    assert generator.sample(intent, state, rng, 10.0) == (blink,)
+    assert rng.bit_generator.state == before

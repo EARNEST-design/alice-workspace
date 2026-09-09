@@ -19,7 +19,7 @@ from alice.motion.controller_response import (
     ActuatorResponseParameters,
     ControllerResponseConfig,
 )
-from alice.motion.intent_filter import FilteredIntent
+from alice.motion.intent_filter import FilteredIntent, SupportStatus
 from alice.motion.state import EventHistoryRecord, GeneratorState
 
 FiniteFloat = Annotated[float, Field(allow_inf_nan=False)]
@@ -239,6 +239,20 @@ class FaceEventState(BaseModel):
             raise ValueError("face event begins beyond planned horizon coverage")
         return self
 
+    def cancel_future(self) -> FaceEventState:
+        """Discard uncommitted events and reopen planning at the accepted boundary."""
+
+        return self.model_copy(
+            update={
+                "history": tuple(
+                    event
+                    for event in self.history
+                    if event.starts_monotonic_ns <= self.monotonic_ns
+                ),
+                "planned_through_ns": self.monotonic_ns,
+            }
+        )
+
     def advance(
         self,
         events: tuple[FaceEvent, ...],
@@ -457,12 +471,24 @@ class FaceEventGenerator:
         rng: np.random.Generator,
         horizon_s: float,
     ) -> tuple[FaceEvent, ...]:
-        """Sample or reuse events in an absolute overlapping finite horizon."""
+        """Sample overlapping events, or return only active events when unsupported.
+
+        Conservative callers persist cancellation with ``state.cancel_future()``
+        before advancing the accepted boundary; sampling never mutates its input.
+        """
 
         typed_state = (
             self.state_from(state) if isinstance(state, GeneratorState) else state
         )
         self._validate_inputs(intent, typed_state, rng=rng, horizon_s=horizon_s)
+        if intent.support_status in {SupportStatus.STALE, SupportStatus.FALLBACK}:
+            return tuple(
+                event
+                for event in typed_state.history
+                if event.starts_monotonic_ns
+                <= typed_state.monotonic_ns
+                < event.ends_monotonic_ns
+            )
         horizon_ns = round(horizon_s * _NANOSECONDS_PER_SECOND)
         horizon_end_ns = typed_state.monotonic_ns + horizon_ns
         existing = tuple(

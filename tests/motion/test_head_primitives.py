@@ -131,7 +131,7 @@ def test_nod_from_non_neutral_pose_preserves_inactive_axes_across_windows() -> N
 
     state = _state(neck_rotation=0.01, head_tilt=0.0, face_pitch=0.02)
     gesture = _gesture(HeadGestureKind.NOD, duration_s=3.2).model_copy(
-        update={"initial_targets": state.targets}
+        update={"initial_targets": state.targets, "recovery_targets": state.targets}
     )
     first = _primitives().render_window(gesture, window_start_ns=0, horizon_s=0.4)
     second = _primitives().render_window(
@@ -150,7 +150,7 @@ def test_nod_from_non_neutral_pose_preserves_inactive_axes_across_windows() -> N
         target.actuator_name: target.normalized_position
         for target in full.updates[-1].targets
     }
-    assert final_positions["face_pitch"] == 0.0
+    assert final_positions["face_pitch"] == 0.02
     assert first.updates[-1].targets == second.updates[0].targets
     expected = next(update for update in full.updates if update.offset_s == 0.6)
     resumed = min(second.updates, key=lambda update: abs(update.offset_s - 0.2))
@@ -359,3 +359,29 @@ def test_non_oscillatory_gesture_rejects_unused_cycle_or_asymmetry(
         _gesture(kind, cycles=2)
     with pytest.raises(ValidationError, match="non-oscillatory"):
         _gesture(kind, asymmetry=0.2)
+
+
+@pytest.mark.parametrize("kind", [HeadGestureKind.NOD, HeadGestureKind.SHAKE])
+def test_ordinary_primitive_recovers_active_axis_to_input_pose(
+    kind: HeadGestureKind,
+) -> None:
+    """Only an explicit RETURN may reset an ordinary gesture's active axis."""
+    pose = _state(neck_rotation=0.01, head_tilt=0.01, face_pitch=0.01)
+    horizon = _primitives().render(_gesture(kind), pose)
+    assert horizon.updates[-1].targets == pose.targets
+
+
+@pytest.mark.parametrize("corruption", ["initial", "recovery"])
+def test_bound_primitive_rejects_inconsistent_pose(corruption: str) -> None:
+    """Rendering must not disagree with a recorded gesture's captured pose."""
+    pose = _state(neck_rotation=0.01, head_tilt=0.01, face_pitch=0.01)
+    gesture = _gesture(HeadGestureKind.NOD, recovery_targets=pose.targets).model_copy(
+        update={"initial_targets": pose.targets}
+    )
+    if corruption == "initial":
+        render_pose = _state()
+    else:
+        render_pose = pose
+        gesture = gesture.model_copy(update={"recovery_targets": _state().targets})
+    with pytest.raises(ValueError, match="captured pose"):
+        _primitives().render(gesture, render_pose)

@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from alice.contracts.actuation import ActuatorTarget
 from alice.contracts.blendshapes import NonEmptyString, Sha256Hex
+from alice.contracts.motion import TargetUpdate
 from alice.motion.controller_response import ControllerResponseConfig
 from alice.motion.head_primitives import (
     HeadAxisSemantics,
@@ -218,12 +219,28 @@ class HeadGestureScheduler:
         rng: np.random.Generator,
         *,
         generated_monotonic_ns: int | None = None,
+        accepted_pose: TargetUpdate | None = None,
     ) -> HeadGesture | None:
-        """Sample one bounded gesture while honoring absolute accepted history."""
+        """Capture a head pose and sample one bounded gesture from accepted history.
+
+        Callers without a pose explicitly use the configured neutral pose.
+        Streaming callers pass the complete accepted semantic head pose.
+        """
 
         self._validate_intent(intent)
         if not isinstance(rng, np.random.Generator):
             raise TypeError("rng must be a NumPy Generator")
+        pose = accepted_pose or TargetUpdate(
+            offset_s=0.0, targets=self._config.recovery_targets
+        )
+        if (
+            pose.offset_s != 0.0
+            or tuple(target.actuator_name for target in pose.targets)
+            != self._config.semantics.actuator_names
+        ):
+            raise ValueError(
+                "accepted head pose must contain ordered semantic axes at zero"
+            )
         gestures = self._head_history(history)
         self._validate_history(gestures)
         now_ns = (
@@ -251,7 +268,9 @@ class HeadGestureScheduler:
             )
             probability = -math.expm1(-hazard_hz * self._config.decision_interval_s)
             if float(rng.random()) < probability:
-                candidate = self._new_gesture(policy, rng, starts_ns=now_ns)
+                candidate = self._new_gesture(
+                    policy, rng, starts_ns=now_ns, accepted_pose=pose
+                )
                 try:
                     self._validate_history((*gestures, candidate))
                 except ValueError:
@@ -483,8 +502,15 @@ class HeadGestureScheduler:
             raise ValueError("persisted head gesture polarity violates policy")
         if policy.polarity == "negative" and gesture.amplitude > 0.0:
             raise ValueError("persisted head gesture polarity violates policy")
-        if gesture.recovery_targets != self._config.recovery_targets:
-            raise ValueError("persisted head gesture recovery targets changed")
+        names = tuple(target.actuator_name for target in gesture.initial_targets)
+        if names != self._config.semantics.actuator_names:
+            raise ValueError(
+                "persisted head gesture recovery is missing its accepted pose"
+            )
+        if gesture.recovery_targets != gesture.initial_targets:
+            raise ValueError(
+                "persisted head gesture recovery differs from accepted pose"
+            )
 
     def _inside_global_refractory(
         self,
@@ -533,6 +559,7 @@ class HeadGestureScheduler:
         rng: np.random.Generator,
         *,
         starts_ns: int,
+        accepted_pose: TargetUpdate,
     ) -> HeadGesture:
         amplitude = self._sample_float(policy.amplitude, rng)
         if policy.polarity == "negative":
@@ -574,7 +601,8 @@ class HeadGestureScheduler:
             asymmetry=asymmetry,
             hold_s=hold_s,
             recovery_s=recovery_s,
-            recovery_targets=self._config.recovery_targets,
+            recovery_targets=accepted_pose.targets,
+            initial_targets=accepted_pose.targets,
         )
 
     @staticmethod
