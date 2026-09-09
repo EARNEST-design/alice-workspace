@@ -326,3 +326,47 @@ def test_blink_and_gaze_timers_are_coupled_and_respect_refractory_windows() -> N
             gaze_windows[1:],
         )
     ) >= generator.config.gaze.refractory_s
+
+
+def test_continuation_crosses_blink_onset_and_release_without_restarting() -> None:
+    """Replanning an active closure must retain its peak, release, and next timer."""
+
+    planner, generator = _generator()
+    _, continuation = generator.step_continuation(
+        _intent(), _state(planner), 47, 1.0,
+        prefix_duration_s=0.4, generated_monotonic_ns=GENERATED_NS,
+        continuation=None,
+    )
+    # Exact onset at 10.6 s, peak from 10.8–11.4 s, end at 11.8 s.
+    continuation = continuation.model_copy(update={
+        "blink": continuation.blink.model_copy(update={
+            "starts_monotonic_ns": GENERATED_NS + 600_000_000,
+            "amplitude": 0.5,
+        }),
+        "applied_variation": dict.fromkeys(planner.config.semantic_actuator_names, 0.0),
+    })
+    state = _state(planner)
+    proposal, boundary = generator.step_continuation(
+        _intent(), state, 47, 20.0,
+        prefix_duration_s=0.4,
+        generated_monotonic_ns=GENERATED_NS + 400_000_000,
+        continuation=continuation,
+    )
+    assert _position(proposal.horizon.updates[1], "lower_eyelids") == 0.0
+    assert _position(proposal.horizon.updates[2], "lower_eyelids") == -0.5
+    assert boundary.blink == continuation.blink
+    assert boundary.monotonic_ns == GENERATED_NS + 800_000_000
+    assert boundary.numpy_rng_state == continuation.numpy_rng_state
+    state = proposal.horizon.updates[2].model_copy(update={"offset_s": 0.0})
+    # Continue through release while regularly persisting the continuation.
+    for now_ns in (10_800_000_000, 11_200_000_000, 11_600_000_000):
+        restored = type(boundary).model_validate_json(boundary.model_dump_json())
+        proposal, boundary = generator.step_continuation(
+            _intent(), state, 47, 1.0,
+            prefix_duration_s=0.4, generated_monotonic_ns=now_ns,
+            continuation=restored,
+        )
+        assert proposal.horizon.updates[0] == state
+        state = proposal.horizon.updates[2].model_copy(update={"offset_s": 0.0})
+    assert _position(state, "lower_eyelids") == pytest.approx(0.0, abs=1e-12)
+    assert boundary.blink.starts_monotonic_ns >= 14_300_000_000

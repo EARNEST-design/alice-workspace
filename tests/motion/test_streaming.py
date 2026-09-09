@@ -817,3 +817,269 @@ def test_replan_rejects_candidate_that_does_not_cover_the_prefix() -> None:
 
     with pytest.raises(ValueError, match="does not cover accepted prefix"):
         short_runtime.replan(_intent(), state, 0)
+
+
+def test_short_prefix_stream_retains_blink_and_gaze_timers() -> None:
+    """Restarting relative timers at each prefix permanently starves eye events."""
+
+    runtime, config = _runtime()
+    state = _state(config)
+    eye_names = {
+        "upper_eyelids",
+        "lower_eyelids",
+        "right_eye_horizontal",
+        "left_eye_horizontal",
+    }
+    moved = set()
+    for _ in range(150):
+        prefix, state = runtime.replan(
+            _intent(accepted_ns=state.monotonic_ns), state, state.monotonic_ns
+        )
+        moved.update(
+            target.actuator_name
+            for update in prefix.updates
+            for target in update.targets
+            if abs(target.normalized_position) > 1e-9
+        )
+    assert eye_names <= moved
+
+
+class _SparseProposalGenerator:
+    """Complete initial pose followed by independently changing channels."""
+
+    def step(
+        self,
+        intent: FilteredIntent,
+        state: TargetUpdate,
+        seed: int,
+        horizon_s: float,
+        *,
+        generated_monotonic_ns: int,
+    ) -> MotionProposal:
+        config = load_procedural_motion_config(CONFIG_PATH)
+        proposal = ProceduralMotionGenerator(
+            config=config, anchor_planner=AnchorPlanner(config=config)
+        ).step(
+            intent,
+            state,
+            seed,
+            horizon_s,
+            generated_monotonic_ns=generated_monotonic_ns,
+        )
+        return proposal.model_copy(
+            update={
+                "horizon": TargetUpdateHorizon(
+                    schema_version="target-update-horizon/v1",
+                    updates=(
+                        state,
+                        TargetUpdate(
+                            offset_s=0.2,
+                            targets=(
+                                ActuatorTarget(
+                                    actuator_name="mouth_open",
+                                    normalized_position=0.1,
+                                ),
+                            ),
+                        ),
+                        TargetUpdate(
+                            offset_s=0.4,
+                            targets=(
+                                ActuatorTarget(
+                                    actuator_name="neck_rotation",
+                                    normalized_position=0.2,
+                                ),
+                            ),
+                        ),
+                    ),
+                )
+            }
+        )
+
+
+class _SparseCandidate:
+    """Supply a valid boundary independently of the procedural adapter."""
+
+    def plan(
+        self,
+        intent: FilteredIntent,
+        state: GeneratorState,
+        horizon_s: float,
+        prefix_duration_s: float,
+        *,
+        generated_monotonic_ns: int,
+    ) -> CandidatePlan:
+        proposal = _SparseProposalGenerator().step(
+            intent,
+            state.last_accepted_target,
+            1,
+            horizon_s,
+            generated_monotonic_ns=generated_monotonic_ns,
+        )
+        boundary = TargetUpdate(
+            offset_s=0.0,
+            targets=tuple(
+                target.model_copy(
+                    update={
+                        "normalized_position": {
+                            "mouth_open": 0.1,
+                            "neck_rotation": 0.2,
+                        }.get(target.actuator_name, target.normalized_position)
+                    }
+                )
+                for target in state.last_accepted_target.targets
+            ),
+        )
+        values = state.model_dump()
+        values.update(
+            last_accepted_target=boundary,
+            filtered_intent=intent,
+            monotonic_ns=generated_monotonic_ns + round(prefix_duration_s * 1e9),
+        )
+        return CandidatePlan(
+            proposal=proposal, boundary_state=GeneratorState.model_validate(values)
+        )
+
+
+@pytest.mark.parametrize("through_adapter", [False, True])
+def test_sparse_prefix_accumulates_all_accepted_targets(through_adapter: bool) -> None:
+    """Treating the last sparse delta as a pose loses earlier accepted targets."""
+
+    _, config = _runtime()
+    initial = _state(config)
+    runtime = StreamingMotionGenerator(
+        generator=(
+            ProceduralCandidateGenerator(generator=_SparseProposalGenerator())
+            if through_adapter
+            else _SparseCandidate()
+        ),
+        horizon_s=0.4,
+        prefix_duration_s=0.4,
+    )
+    _, boundary = runtime.replan(_intent(), initial, 0)
+    expected = {
+        target.actuator_name: target.normalized_position
+        for target in initial.last_accepted_target.targets
+    }
+    expected.update(mouth_open=0.1, neck_rotation=0.2)
+    assert {
+        target.actuator_name: target.normalized_position
+        for target in boundary.last_accepted_target.targets
+    } == expected
+    assert load_state(dump_state(boundary)) == boundary
+
+
+def test_procedural_prefixes_follow_uninterrupted_drift_and_events() -> None:
+    """Resampling drift or restarting event clocks changes the absolute trajectory."""
+
+    runtime, config = _runtime()
+    initial = _state(config)
+    generator = ProceduralCandidateGenerator(
+        generator=ProceduralMotionGenerator(
+            config=config,
+            anchor_planner=AnchorPlanner(config=config),
+        )
+    )
+    reference = generator.plan(
+        _intent(),
+        initial,
+        12.0,
+        0.4,
+        generated_monotonic_ns=0,
+    )
+    expected = {
+        round(update.offset_s * 1e9): update
+        for update in reference.proposal.horizon.updates
+    }
+    state = initial
+    for _ in range(30):
+        prefix, state = runtime.replan(
+            _intent(accepted_ns=state.monotonic_ns),
+            state,
+            state.monotonic_ns,
+        )
+        for update in prefix.updates:
+            reference_update = expected[
+                prefix.starts_at_ns + round(update.offset_s * 1e9)
+            ]
+            assert {t.actuator_name: t.normalized_position for t in update.targets} == (
+                pytest.approx(
+                    {
+                        t.actuator_name: t.normalized_position
+                        for t in reference_update.targets
+                    },
+                    abs=1e-12,
+                )
+            )
+
+
+def test_procedural_lookahead_and_restore_preserve_intent_transitions() -> None:
+    """Speculative events or process-local state must not affect accepted replay."""
+
+    short, config = _runtime()
+    generator = ProceduralCandidateGenerator(
+        generator=ProceduralMotionGenerator(
+            config=config,
+            anchor_planner=AnchorPlanner(config=config),
+        )
+    )
+    long = StreamingMotionGenerator(
+        generator=generator, horizon_s=12.0, prefix_duration_s=0.4
+    )
+    direct_state = _state(config)
+    restored_state = load_state(dump_state(direct_state))
+    for index in range(40):
+        intent = _intent(accepted_ns=direct_state.monotonic_ns).model_copy(
+            update={
+                "support_status": SupportStatus.FALLBACK
+                if 12 <= index < 17
+                else SupportStatus.SUPPORTED,
+                "intensity": 0.2 if index >= 17 else 0.7,
+            }
+        )
+        before = dump_state(restored_state)
+        generator.plan(
+            intent,
+            restored_state,
+            24.0,
+            0.4,
+            generated_monotonic_ns=restored_state.monotonic_ns,
+        )
+        assert dump_state(restored_state) == before
+        direct_prefix, direct_state = short.replan(
+            intent,
+            direct_state,
+            direct_state.monotonic_ns,
+        )
+        restored_prefix, restored_state = long.replan(
+            intent,
+            restored_state,
+            restored_state.monotonic_ns,
+        )
+        assert restored_prefix.updates == direct_prefix.updates
+        assert restored_state == direct_state
+        restored_state = load_state(dump_state(restored_state))
+
+
+@pytest.mark.parametrize(
+    "corruption", ["future_boundary", "ended_event", "phase", "rng", "channels"]
+)
+def test_restore_rejects_invalid_procedural_continuation(corruption: str) -> None:
+    """Invalid persisted schedule data must fail before motion generation."""
+
+    runtime, config = _runtime()
+    _, boundary = runtime.replan(_intent(), _state(config), 0)
+    payload = boundary.model_dump()
+    continuation = payload["procedural_continuation"]
+    if corruption == "future_boundary":
+        continuation["monotonic_ns"] += 1
+    elif corruption == "ended_event":
+        continuation["monotonic_ns"] = 20_000_000_000
+        payload["monotonic_ns"] = 20_000_000_000
+    elif corruption == "phase":
+        continuation["drift"]["head_tilt"] = ((0.1, float("nan")),)
+    elif corruption == "rng":
+        continuation["numpy_rng_state"] = {"bit_generator": "PCG64"}
+    else:
+        del continuation["applied_variation"]["mouth_open"]
+    with pytest.raises(ValueError):
+        GeneratorState.model_validate(payload)

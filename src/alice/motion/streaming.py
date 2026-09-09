@@ -22,6 +22,7 @@ from alice.motion.controller_response import ControllerResponse, ControllerState
 from alice.motion.face_events import FaceEvent, FaceEventGenerator
 from alice.motion.head_primitives import HeadGesture
 from alice.motion.intent_filter import FilteredIntent
+from alice.motion.procedural import ProceduralMotionGenerator
 from alice.motion.state import EventHistoryRecord, GeneratorState
 
 
@@ -78,14 +79,30 @@ class ProceduralCandidateGenerator:
         generated_monotonic_ns: int,
     ) -> CandidatePlan:
         rng = _restore_numpy_rng(state.numpy_rng_state)
-        seed = int(rng.integers(0, np.iinfo(np.int64).max))
-        proposal = self._generator.step(
-            intent,
-            state.last_accepted_target,
-            seed,
-            horizon_s,
-            generated_monotonic_ns=generated_monotonic_ns,
+        continuation = state.procedural_continuation
+        seed = (
+            continuation.seed
+            if continuation is not None
+            else int(rng.integers(0, np.iinfo(np.int64).max))
         )
+        if isinstance(self._generator, ProceduralMotionGenerator):
+            proposal, continuation = self._generator.step_continuation(
+                intent,
+                state.last_accepted_target,
+                seed,
+                horizon_s,
+                prefix_duration_s=prefix_duration_s,
+                generated_monotonic_ns=generated_monotonic_ns,
+                continuation=continuation,
+            )
+        else:
+            proposal = self._generator.step(
+                intent,
+                state.last_accepted_target,
+                seed,
+                horizon_s,
+                generated_monotonic_ns=generated_monotonic_ns,
+            )
         accepted_updates = tuple(
             update
             for update in proposal.horizon.updates
@@ -94,7 +111,9 @@ class ProceduralCandidateGenerator:
         if not accepted_updates:
             raise ValueError("candidate has no updates inside the accepted prefix")
 
-        boundary_target = accepted_updates[-1].model_copy(update={"offset_s": 0.0})
+        boundary_target = _accumulate_targets(
+            state.last_accepted_target, accepted_updates
+        )
         ends_at_ns = generated_monotonic_ns + round(prefix_duration_s * 1_000_000_000)
         state_values = state.model_dump()
         state_values.update(
@@ -102,6 +121,7 @@ class ProceduralCandidateGenerator:
                 "last_accepted_target": boundary_target,
                 "filtered_intent": intent,
                 "numpy_rng_state": rng.bit_generator.state,
+                "procedural_continuation": continuation,
                 "monotonic_ns": ends_at_ns,
             }
         )
@@ -700,7 +720,9 @@ class StreamingMotionGenerator:
             raise ValueError("candidate boundary time does not match prefix end")
         if boundary.filtered_intent != intent:
             raise ValueError("candidate boundary did not retain filtered intent")
-        expected_target = accepted_updates[-1].model_copy(update={"offset_s": 0.0})
+        expected_target = _accumulate_targets(
+            previous.last_accepted_target, accepted_updates
+        )
         if cls._positions(boundary.last_accepted_target) != cls._positions(
             expected_target
         ):
@@ -723,6 +745,18 @@ class StreamingMotionGenerator:
         for label, boundary_value, expected_value in identities:
             if boundary_value != expected_value:
                 raise ValueError(f"candidate boundary {label} changed")
+
+
+def _accumulate_targets(
+    initial: TargetUpdate, updates: tuple[TargetUpdate, ...]
+) -> TargetUpdate:
+    positions = {target.actuator_name: target for target in initial.targets}
+    for update in updates:
+        positions.update({target.actuator_name: target for target in update.targets})
+    return TargetUpdate(
+        offset_s=0.0,
+        targets=tuple(positions.values()),
+    )
 
 
 def _restore_numpy_rng(state: Mapping[str, object]) -> np.random.Generator:

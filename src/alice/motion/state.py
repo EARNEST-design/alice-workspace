@@ -49,6 +49,66 @@ class EventHistoryRecord(BaseModel):
         return self
 
 
+class ProceduralEvent(BaseModel):
+    """One active or next procedural event on the absolute monotonic clock."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    starts_monotonic_ns: MonotonicNanoseconds
+    transition_in_s: Annotated[float, Field(gt=0, allow_inf_nan=False)]
+    hold_s: Annotated[float, Field(gt=0, allow_inf_nan=False)]
+    transition_out_s: Annotated[float, Field(gt=0, allow_inf_nan=False)]
+    amplitude: Annotated[float, Field(ge=-1, le=1, allow_inf_nan=False)]
+
+    @property
+    def ends_monotonic_ns(self) -> int:
+        return self.starts_monotonic_ns + round(
+            (self.transition_in_s + self.hold_s + self.transition_out_s) * 1e9
+        )
+
+
+class ProceduralContinuation(BaseModel):
+    """Accepted procedural phase and scheduler state, excluding future lookahead."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    seed: Annotated[int, Field(ge=0)]
+    epoch_monotonic_ns: MonotonicNanoseconds
+    monotonic_ns: MonotonicNanoseconds
+    drift: dict[
+        str,
+        tuple[
+            tuple[
+                Annotated[float, Field(gt=0, allow_inf_nan=False)],
+                FiniteFloat,
+            ],
+            ...,
+        ],
+    ]
+    blink: ProceduralEvent
+    gaze: ProceduralEvent
+    numpy_rng_state: dict[str, JsonValue]
+    applied_variation: dict[str, FiniteFloat]
+
+    @model_validator(mode="after")
+    def validate_schedule(self) -> ProceduralContinuation:
+        if self.epoch_monotonic_ns > self.monotonic_ns:
+            raise ValueError("procedural epoch cannot postdate its boundary")
+        for event in (self.blink, self.gaze):
+            if event.starts_monotonic_ns < self.epoch_monotonic_ns:
+                raise ValueError("procedural event cannot predate its epoch")
+            if event.ends_monotonic_ns <= self.monotonic_ns:
+                raise ValueError("procedural pending event already ended")
+        if any(not components for components in self.drift.values()):
+            raise ValueError("procedural drift requires frequency/phase components")
+        try:
+            rng = np.random.default_rng()
+            rng.bit_generator.state = self.numpy_rng_state
+        except (TypeError, ValueError, KeyError) as error:
+            raise ValueError("invalid procedural RNG state") from error
+        return self
+
+
 class GeneratorState(BaseModel):
     """Complete replay state at the end of one accepted motion prefix."""
 
@@ -63,6 +123,7 @@ class GeneratorState(BaseModel):
     numpy_rng_state: dict[str, JsonValue]
     torch_rng_state: tuple[TorchRngByte, ...]
     event_history: tuple[EventHistoryRecord, ...]
+    procedural_continuation: ProceduralContinuation | None = None
     model_id: NonEmptyString
     model_sha256: Sha256Hex
     calibration_sha256: Sha256Hex
@@ -98,6 +159,14 @@ class GeneratorState(BaseModel):
             )
         if self.filtered_intent.accepted_monotonic_ns > self.monotonic_ns:
             raise ValueError("filtered intent cannot postdate generator state")
+        if self.procedural_continuation is not None:
+            continuation = self.procedural_continuation
+            if continuation.monotonic_ns != self.monotonic_ns:
+                raise ValueError("procedural continuation must match state boundary")
+            if set(continuation.applied_variation) != accepted_names:
+                raise ValueError("procedural variation must cover accepted actuators")
+            if not set(continuation.drift) <= accepted_names:
+                raise ValueError("procedural drift contains unknown actuators")
         if not self.numpy_rng_state:
             raise ValueError("NumPy RNG state must not be empty")
         if not self.torch_rng_state:
