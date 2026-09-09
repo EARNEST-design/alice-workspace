@@ -16,6 +16,7 @@ from alice.models.residual_state_space import (
     ResidualStateSpace,
     ResidualStateSpaceConfig,
 )
+from alice.models.training_response import bounded_euler_backend
 from alice.motion.controller_response import ControllerResponseConfig
 
 DatasetSplit = Literal["train", "validation", "test"]
@@ -419,6 +420,17 @@ def _response_step(
     elapsed_s: torch.Tensor,
     controller_response_config: ControllerResponseConfig,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    """Execute bounded-euler-surrogate/v1, an unfitted research approximation.
+
+    Desired velocity is distance/dt clamped by per-axis speed; velocity change is
+    acceleration-limited. Advance by updated velocity times dt, cap displacement
+    at remaining distance, clamp position to [-1, 1], and zero velocity when the
+    selected displacement reaches the target. This is partition-sensitive Euler
+    integration, not ControllerResponse.predict or independent zero-mode logic.
+    Changing these rules requires a new backend ID. Inputs retain dtype, device,
+    and autograd; the training entry point supplies CPU float32 dataset tensors.
+    """
+
     velocities = position.new_tensor(
         [a.max_velocity_per_s for a in controller_response_config.actuators]
     )
@@ -542,7 +554,7 @@ def _research_record(
     epochs: list[EpochLosses],
 ) -> dict[str, object]:
     return {
-        "schema_version": "residual-training-record/v2",
+        "schema_version": "residual-training-record/v3",
         "model": config.model.model_dump(mode="json"),
         "training": {
             "epochs": config.epochs,
@@ -554,6 +566,9 @@ def _research_record(
             "controller_response_sha256": (
                 config.controller_response_config.response_sha256
             ),
+            "response_backend": bounded_euler_backend(
+                config.controller_response_config
+            ).model_dump(mode="json"),
             "loss_weights": asdict(config.losses),
         },
         "run": {

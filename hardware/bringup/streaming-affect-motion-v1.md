@@ -19,7 +19,7 @@ send Set Target, or move Alice.
   copied record or use the CLI device arguments as an identity override.
 - Install the repository environment with its software-model dependencies:
   `uv sync --extra ml`.
-- Select one immutable `motion-model-package/v2` directory. Do not point the
+- Select one immutable `motion-model-package/v3` directory. Do not point the
   command at a package being trained, updated, or copied.
 
 ## Read-only command

@@ -10,6 +10,9 @@ import pytest
 import torch
 from safetensors.torch import load_file
 
+from alice.contracts.actuation import ActuatorTarget
+from alice.contracts.motion import TargetUpdate
+from alice.models.package import ResidualTrainingRecord
 from alice.models.residual_state_space import (
     ResidualStateSpace,
     ResidualStateSpaceConfig,
@@ -17,12 +20,15 @@ from alice.models.residual_state_space import (
 from alice.motion.controller_response import (
     ActuatorResponseParameters,
     ControllerLimitMode,
+    ControllerResponse,
     ControllerResponseConfig,
+    ControllerState,
 )
 from alice.training.residual import (
     ResidualDataset,
     ResidualLossWeights,
     ResidualTrainingConfig,
+    _response_step,
     recurrent_rollout,
     residual_objective_terms,
     train_residual,
@@ -402,16 +408,37 @@ def test_training_records_all_objectives_and_compact_provenance(
 
     assert result.weights_path.suffix == ".safetensors"
     assert result.weights_path.is_file()
-    assert record["schema_version"] == "residual-training-record/v2"
+    assert record["schema_version"] == "residual-training-record/v3"
+    assert record["training"]["response_backend"] == {
+        "schema_version": "training-response-backend/v1",
+        "backend_id": "bounded-euler-surrogate/v1",
+        "source_controller_response_sha256": _controller_config().response_sha256,
+        "actuators": [
+            {
+                "actuator_name": "mouth_open",
+                "max_velocity_per_s": 1.2,
+                "max_acceleration_per_s2": 4.0,
+            },
+            {
+                "actuator_name": "neck_rotation",
+                "max_velocity_per_s": 0.4,
+                "max_acceleration_per_s2": 1.0,
+            },
+        ],
+    }
+    assert (
+        ResidualTrainingRecord.model_validate(record).model_dump(mode="json") == record
+    )
     assert record["training"]["controller_response_sha256"] == (
         _controller_config().response_sha256
     )
     assert record["training"]["controller_settings_sha256"] == (
         _controller_config().controller_settings_sha256
     )
-    assert record["training"]["controller_response_sha256"] != record["training"][
-        "controller_settings_sha256"
-    ]
+    assert (
+        record["training"]["controller_response_sha256"]
+        != record["training"]["controller_settings_sha256"]
+    )
     assert record["artifact"]["weights_sha256"] == result.weights_sha256
     assert record["model"]["research_status"] == "unfitted-research-prior"
     assert record["model"]["provenance"] == (
@@ -461,3 +488,78 @@ assert not any(name.startswith('alice.hardware') for name in sys.modules)
     )
 
     assert completed.returncode == 0, completed.stderr
+
+
+def test_surrogate_differs_from_reference_and_is_partition_sensitive() -> None:
+    """Resolved limits do not imply reference dynamics or partition invariance."""
+
+    config = _controller_config()
+    command = torch.full((1, 2), 0.5, dtype=torch.float64)
+    initial = torch.zeros_like(command)
+    position, velocity = _response_step(
+        command=command,
+        position=initial,
+        velocity=initial,
+        elapsed_s=torch.tensor([[0.2]], dtype=torch.float64),
+        controller_response_config=config,
+    )
+    reference = ControllerResponse(config=config)
+    predicted = [
+        reference.predict(
+            ControllerState(
+                schema_version="controller-state/v1",
+                actuator_name=a.actuator_name,
+                calibration_sha256=config.calibration_sha256,
+                position=0.0,
+                velocity=0.0,
+            ),
+            TargetUpdate(
+                offset_s=0.0,
+                targets=(
+                    ActuatorTarget(
+                        actuator_name=a.actuator_name, normalized_position=0.5
+                    ),
+                ),
+            ),
+            elapsed_s=0.2,
+        )
+        for a in config.actuators
+    ]
+    assert position.tolist()[0] == pytest.approx([0.16, 0.04])
+    assert [state.position for state in predicted] == pytest.approx([0.08, 0.02])
+    assert velocity.tolist()[0] == pytest.approx(
+        [state.velocity for state in predicted]
+    )
+    partitioned_position, partitioned_velocity = initial, initial
+    for _ in range(2):
+        partitioned_position, partitioned_velocity = _response_step(
+            command=command,
+            position=partitioned_position,
+            velocity=partitioned_velocity,
+            elapsed_s=torch.tensor([[0.1]], dtype=torch.float64),
+            controller_response_config=config,
+        )
+    assert partitioned_position.tolist()[0] == pytest.approx([0.12, 0.03])
+    assert not torch.allclose(partitioned_position, position)
+
+
+def test_bounded_euler_surrogate_preserves_finite_nonzero_command_gradients() -> None:
+    command = torch.tensor(
+        [[0.03125, 0.015625]], dtype=torch.float64, requires_grad=True
+    )
+    initial = torch.zeros_like(command)
+    position, velocity = _response_step(
+        command=command,
+        position=initial,
+        velocity=initial,
+        elapsed_s=torch.tensor([[0.25]], dtype=torch.float64),
+        controller_response_config=_controller_config(),
+    )
+    assert position.dtype == velocity.dtype == command.dtype
+    assert position.device == velocity.device == command.device
+    assert position.grad_fn is not None and velocity.grad_fn is not None
+    (position.square().sum() + velocity.square().sum()).backward()
+    assert command.grad is not None
+    assert torch.isfinite(command.grad).all()
+    assert torch.all(command.grad != 0)
+    torch.testing.assert_close(command.grad, 2 * command)

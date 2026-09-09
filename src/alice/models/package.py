@@ -35,6 +35,10 @@ from alice.models.residual_state_space import (
     ResidualStateSpace,
     ResidualStateSpaceConfig,
 )
+from alice.models.training_response import (
+    TrainingResponseBackend,
+    bounded_euler_backend,
+)
 from alice.motion.anchors import AnchorPlanner, ProceduralMotionConfig
 from alice.motion.controller_response import (
     ActuatorResponseParameters,
@@ -140,7 +144,17 @@ class ResidualTrainingSettings(BaseModel):
     rollout_steps: Annotated[StrictInt, Field(ge=2, le=_MAX_ROLLOUT_STEPS)]
     controller_settings_sha256: Sha256Hex
     controller_response_sha256: Sha256Hex
+    response_backend: TrainingResponseBackend
     loss_weights: ResidualTrainingLossWeights
+
+    @model_validator(mode="after")
+    def validate_backend_source(self) -> Self:
+        if (
+            self.response_backend.source_controller_response_sha256
+            != self.controller_response_sha256
+        ):
+            raise ValueError("training response backend source identity mismatch")
+        return self
 
 
 class ResidualTrainingRun(BaseModel):
@@ -210,11 +224,11 @@ class ResidualEpochRecord(BaseModel):
 
 
 class ResidualTrainingRecord(BaseModel):
-    """Strict scalar/reference-only form of `residual-training-record/v2`."""
+    """Strict scalar/reference-only form of `residual-training-record/v3`."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal["residual-training-record/v2"]
+    schema_version: Literal["residual-training-record/v3"]
     model: ResidualStateSpaceConfig
     training: ResidualTrainingSettings
     run: ResidualTrainingRun
@@ -260,7 +274,7 @@ class MotionModelMetadata(BaseModel):
 class _PackageManifest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal["motion-model-package/v2"]
+    schema_version: Literal["motion-model-package/v3"]
     identities: PackageIdentities
     weights: Literal["weights/residual.safetensors"]
     configs: dict[NonEmptyString, NonEmptyString]
@@ -343,9 +357,7 @@ def save_package(
     training_record = _validate_training_record(
         metadata.training_record,
         residual_config=components.residual_config,
-        controller_response_sha256=(
-            components.controller_response_config.response_sha256
-        ),
+        controller_response_config=components.controller_response_config,
         weights_sha256=weights_sha256,
         seed_policy=metadata.seed_policy,
     )
@@ -391,7 +403,7 @@ def save_package(
             for relative_path in sorted(artifact_bytes)
         }
         manifest = _PackageManifest(
-            schema_version="motion-model-package/v2",
+            schema_version="motion-model-package/v3",
             identities=metadata.identities,
             weights="weights/residual.safetensors",
             configs=dict(_CONFIG_PATHS),
@@ -504,9 +516,7 @@ def load_package_snapshot(
         _decode_json(artifacts[_CONFIG_PATHS["anchor"]], label="anchor config")
     )
     face_event_config = FaceEventConfig.model_validate(
-        _decode_json(
-            artifacts[_CONFIG_PATHS["face_events"]], label="face-event config"
-        )
+        _decode_json(artifacts[_CONFIG_PATHS["face_events"]], label="face-event config")
     )
     head_gesture_config = HeadGestureConfig.model_validate(
         _decode_json(
@@ -532,7 +542,7 @@ def load_package_snapshot(
     training_record = _validate_training_record(
         _decode_json(artifacts[_TRAINING_RECORD_PATH], label="training record"),
         residual_config=residual_config,
-        controller_response_sha256=controller_config.response_sha256,
+        controller_response_config=controller_config,
         weights_sha256=manifest.checksums[_WEIGHTS_PATH],
         seed_policy=manifest.seed_policy,
     )
@@ -825,7 +835,7 @@ def _validate_training_record(
     record: ResidualTrainingRecord | Mapping[str, object],
     *,
     residual_config: ResidualStateSpaceConfig,
-    controller_response_sha256: str,
+    controller_response_config: ControllerResponseConfig,
     weights_sha256: str,
     seed_policy: SeedPolicy,
 ) -> ResidualTrainingRecord:
@@ -851,9 +861,13 @@ def _validate_training_record(
         raise ValueError("training controller settings identity mismatch")
     if (
         validated.training.controller_response_sha256
-        != controller_response_sha256
+        != controller_response_config.response_sha256
     ):
         raise ValueError("training controller response identity mismatch")
+    if validated.training.response_backend != bounded_euler_backend(
+        controller_response_config
+    ):
+        raise ValueError("training response backend identity or parameters mismatch")
     if validated.artifact.weights_sha256 != weights_sha256:
         raise ValueError("training record weights checksum mismatch")
     return validated

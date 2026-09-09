@@ -30,6 +30,7 @@ from alice.models.residual_state_space import (
     ResidualStateSpace,
     load_residual_state_space_config,
 )
+from alice.models.training_response import bounded_euler_backend
 from alice.motion.anchors import load_procedural_motion_config
 from alice.motion.controller_response import load_controller_response_config
 from alice.motion.face_events import load_face_event_config
@@ -87,7 +88,7 @@ def _valid_inputs(
         anchor_config=load_procedural_motion_config(ANCHOR_CONFIG),
     )
     training_record = {
-        "schema_version": "residual-training-record/v2",
+        "schema_version": "residual-training-record/v3",
         "model": residual.model_dump(mode="json"),
         "training": {
             "epochs": 2,
@@ -97,6 +98,9 @@ def _valid_inputs(
             "controller_response_sha256": (
                 components.controller_response_config.response_sha256
             ),
+            "response_backend": bounded_euler_backend(
+                components.controller_response_config
+            ).model_dump(mode="json"),
             "loss_weights": {
                 "reconstruction": 1.0,
                 "multistep_rollout": 0.5,
@@ -249,12 +253,8 @@ def test_loaded_composer_replans_deterministically_with_complete_state(
     previous_ends_ns = 0
 
     for _ in range(25):
-        direct = runtime.replan(
-            intent, direct_state, direct_state.monotonic_ns
-        )
-        replay = runtime.replan(
-            intent, replay_state, replay_state.monotonic_ns
-        )
+        direct = runtime.replan(intent, direct_state, direct_state.monotonic_ns)
+        replay = runtime.replan(intent, replay_state, replay_state.monotonic_ns)
 
         assert direct == replay
         prefix, direct_state = direct
@@ -314,6 +314,7 @@ def test_non_finite_weights_are_rejected(tmp_path: Path, operation: str) -> None
     if operation == "save":
         with pytest.raises(ValueError, match="finite"):
             save_package(tmp_path / "bad", components, metadata)
+        assert not (tmp_path / "bad").exists()
         return
     other = tmp_path / "other"
     other.mkdir()
@@ -413,9 +414,7 @@ def test_training_response_identity_is_bound_before_model_construction(
     changed_controller = controller.model_copy(
         update={
             "actuators": tuple(
-                changed_neck
-                if actuator.actuator_name == "neck_rotation"
-                else actuator
+                changed_neck if actuator.actuator_name == "neck_rotation" else actuator
                 for actuator in controller.actuators
             )
         }
@@ -462,15 +461,17 @@ def test_identity_mismatch_is_rejected_before_model_construction(
         load_package(package.path, expected)
 
 
+@pytest.mark.parametrize("version", ["v1", "v2"])
 def test_legacy_package_schema_is_rejected_before_model_construction(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    version: str,
 ) -> None:
-    """A v1 package cannot prove which response model trained its weights."""
+    """Legacy packages cannot prove which numerical backend trained their weights."""
 
     package = _write_valid_package(tmp_path)
     manifest = json.loads(package.manifest.read_text(encoding="utf-8"))
-    manifest["schema_version"] = "motion-model-package/v1"
+    manifest["schema_version"] = f"motion-model-package/{version}"
     package.manifest.write_text(
         json.dumps(manifest, sort_keys=True) + "\n",
         encoding="utf-8",
@@ -513,6 +514,7 @@ def test_package_contains_only_declared_offline_artifacts(tmp_path: Path) -> Non
     }
 
     manifest = json.loads(package.manifest.read_text(encoding="utf-8"))
+    assert manifest["schema_version"] == "motion-model-package/v3"
     assert set(manifest["checksums"]) == relative_files - {"manifest.json"}
     assert manifest["metrics_reference"].startswith("metrics://")
     assert manifest["seed_policy"]["runtime_seed_source"] == (
@@ -856,3 +858,175 @@ def test_load_rejects_undeclared_fifo(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="non-regular|undeclared"):
         load_package(package.path, _identities())
+
+
+def test_missing_training_backend_is_rejected_at_save_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    components, metadata = _valid_inputs(tmp_path)
+    record = metadata.training_record.model_dump(mode="python")
+    record["training"].pop("response_backend", None)
+    unchecked = metadata.model_copy(update={"training_record": record})
+    monkeypatch.setattr(package_module, "ResidualStateSpace", _fail_if_constructed)
+    destination = tmp_path / "missing-backend"
+    with pytest.raises(ValueError, match="training record"):
+        save_package(destination, components, unchecked)
+    assert not destination.exists()
+
+
+@pytest.mark.parametrize("operation", ["save", "load"])
+@pytest.mark.parametrize(
+    "case",
+    [
+        "missing",
+        "unknown-id",
+        "unknown-schema",
+        "source-hash",
+        "speed",
+        "acceleration",
+        "reordered",
+        "missing-actuator",
+        "extra-actuator",
+        "duplicate-actuator",
+        "unknown-field",
+        "unknown-actuator-field",
+        "nonfinite",
+        "zero",
+        "numeric-string",
+        "legacy-v1",
+        "legacy-v2",
+    ],
+)
+def test_training_backend_provenance_fails_closed_before_construction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+    case: str,
+) -> None:
+    components, metadata = _valid_inputs(tmp_path)
+    package = (
+        save_package(tmp_path / "package", components, metadata)
+        if operation == "load"
+        else None
+    )
+    record = metadata.training_record.model_dump(mode="json")
+    backend = record["training"]["response_backend"]
+    if case == "missing":
+        del record["training"]["response_backend"]
+    elif case == "unknown-id":
+        backend["backend_id"] = "maestro-response-v1"
+    elif case == "unknown-schema":
+        backend["schema_version"] = "training-response-backend/v2"
+    elif case == "source-hash":
+        backend["source_controller_response_sha256"] = "f" * 64
+    elif case in {"speed", "acceleration"}:
+        key = "max_velocity_per_s" if case == "speed" else "max_acceleration_per_s2"
+        backend["actuators"][0][key] *= 0.75
+    elif case == "reordered":
+        backend["actuators"].reverse()
+    elif case == "missing-actuator":
+        backend["actuators"].pop()
+    elif case == "extra-actuator":
+        extra = dict(backend["actuators"][0], actuator_name="unlisted_axis")
+        backend["actuators"].append(extra)
+    elif case == "duplicate-actuator":
+        backend["actuators"].append(backend["actuators"][0])
+    elif case == "unknown-field":
+        backend["claim"] = "reference parity"
+    elif case == "unknown-actuator-field":
+        backend["actuators"][0]["hidden_rate"] = 1.0
+    elif case in {"nonfinite", "zero", "numeric-string"}:
+        backend["actuators"][0]["max_velocity_per_s"] = {
+            "nonfinite": float("nan"),
+            "zero": 0.0,
+            "numeric-string": "1.0",
+        }[case]
+    else:
+        record["schema_version"] = (
+            f"residual-training-record/{case.removeprefix('legacy-')}"
+        )
+
+    # These are valid strict records, but still incompatible with packaged limits.
+    if case in {
+        "speed",
+        "acceleration",
+        "reordered",
+        "missing-actuator",
+        "extra-actuator",
+    }:
+        record = package_module.ResidualTrainingRecord.model_validate(
+            record
+        ).model_dump(mode="json")
+    monkeypatch.setattr(package_module, "ResidualStateSpace", _fail_if_constructed)
+    if operation == "save":
+        unchecked = metadata.model_copy(update={"training_record": record})
+        destination = tmp_path / "rejected"
+        with pytest.raises(ValueError, match="training (record|response backend)"):
+            save_package(destination, components, unchecked)
+        assert not destination.exists()
+    else:
+        assert package is not None
+        package.training_record.write_text(json.dumps(record) + "\n")
+        manifest = json.loads(package.manifest.read_text())
+        manifest["checksums"]["records/training.json"] = hashlib.sha256(
+            package.training_record.read_bytes()
+        ).hexdigest()
+        package.manifest.write_text(json.dumps(manifest) + "\n")
+        with pytest.raises(ValueError, match="training (record|response backend)"):
+            load_package(package.path, _identities())
+
+
+@pytest.mark.parametrize("case", ["extra-head-dimension", "unknown-face-actuator"])
+def test_normally_valid_components_still_require_package_compatibility(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+) -> None:
+    components, metadata = _valid_inputs(tmp_path)
+    if case == "extra-head-dimension":
+        raw = components.head_gesture_config.model_dump(mode="json")
+        raw["affect_dimensions"].append("additional_dimension")
+        for gesture in raw["gestures"]:
+            gesture["affect_weights"].append(0.0)
+        changed = package_module.HeadGestureConfig.model_validate(raw)
+        components = components.model_copy(update={"head_gesture_config": changed})
+        message = "affect dimensions"
+    else:
+        raw = components.face_event_config.model_dump(mode="json")
+        raw["events"][0]["actuator_names"][0] = "unknown_face_actuator"
+        changed = package_module.FaceEventConfig.model_validate(raw)
+        components = components.model_copy(update={"face_event_config": changed})
+        message = "face-event actuator identities"
+    monkeypatch.setattr(package_module, "ResidualStateSpace", _fail_if_constructed)
+    destination = tmp_path / "incompatible"
+    with pytest.raises(ValueError, match=message):
+        save_package(destination, components, metadata)
+    assert not destination.exists()
+
+
+def test_unchecked_nested_backend_is_revalidated_on_save(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    components, metadata = _valid_inputs(tmp_path)
+    record = metadata.training_record
+    backend = record.training.response_backend.model_copy(
+        update={"backend_id": "maestro-response-v1"}
+    )
+    unchecked = metadata.model_copy(
+        update={
+            "training_record": record.model_copy(
+                update={
+                    "training": record.training.model_copy(
+                        update={"response_backend": backend}
+                    )
+                }
+            )
+        }
+    )
+    monkeypatch.setattr(package_module, "ResidualStateSpace", _fail_if_constructed)
+    destination = tmp_path / "unchecked-backend"
+    with pytest.raises(ValueError, match="training record"):
+        save_package(destination, components, unchecked)
+    assert not destination.exists()
