@@ -13,6 +13,11 @@ Model and voice loading are explicit, lazy operations. Cache them for subsequent
 utterances. First setup may download weights; subsequent offline runs must fail
 clearly if any required artifact is missing. No text goes to an inference service.
 
+The operator selected **Azelma** on 2026-09-09 after hearing local Fantine,
+Éponine and Azelma auditions. Use Azelma when a plan omits a voice and in the
+checked-in demos; preserve explicit voice choices in existing plans. It is the
+upstream VCTK p303 preset, not a custom clone or a claim about speaker age.
+
 An upstream LLM can emit a versioned `SpeechPlan`: source identity, seed, preset
 voice, and ordered text segments. Each segment contains continuous valence,
 arousal, dominance and intensity cues at normalized progress positions. Resolve

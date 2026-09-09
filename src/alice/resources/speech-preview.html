@@ -9,6 +9,7 @@ main{max-width:960px;margin:auto;padding:40px 24px}h1{font-weight:550;margin:0;f
 .grid{display:grid;grid-template-columns:1fr 1fr;gap:30px}svg{width:100%;height:260px}
 audio{width:100%}progress{width:100%;accent-color:#7ed9c3}label{display:flex;justify-content:space-between;margin-top:18px}
 #text{font-size:22px;min-height:70px}#clock{font-variant-numeric:tabular-nums}small{color:#a6b0b7}
+.target{display:grid;grid-template-columns:1fr 2fr 4em;align-items:center;gap:16px;padding:5px 0}.target output{text-align:right;font-variant-numeric:tabular-nums}.target meter{width:100%}
 @media(max-width:600px){.grid{grid-template-columns:1fr}main{padding:24px 16px}}
 </style>
 <main><div class="eyebrow">Alice / local speech</div><h1>Voice, mouth & affect</h1>
@@ -18,7 +19,7 @@ audio{width:100%}progress{width:100%;accent-color:#7ed9c3}label{display:flex;jus
 <ellipse cx="110" cy="92" rx="20" ry="12" fill="#bce8df"/><ellipse cx="190" cy="92" rx="20" ry="12" fill="#bce8df"/>
 <path d="M142 115 L136 145 L157 145" fill="none" stroke="#72919e" stroke-width="3"/>
 <ellipse id="mouth" cx="150" cy="183" rx="36" ry="3" fill="#0b1016" stroke="#7ed9c3" stroke-width="2"/>
-</svg><small>Jaw preview only. Brows, eyes and head require a supplied expression proposal.</small></div>
+</svg><small>Speech aperture preview. Composed actuator proposals appear below.</small></div>
 <div><div class="eyebrow">Requested affect · VAD</div>
 <label>Valence <span id="v-value"></span></label><progress id="v" max="2"></progress>
 <label>Arousal <span id="a-value"></span></label><progress id="a" max="2"></progress>
@@ -26,15 +27,27 @@ audio{width:100%}progress{width:100%;accent-color:#7ed9c3}label{display:flex;jus
 <label>Intensity <span id="i-value"></span></label><progress id="i" max="1"></progress>
 <p class="muted" id="clock">0.00 s</p></div></section>
 <section><p id="text"></p><audio id="audio" controls preload="metadata" src="data:audio/wav;base64,__AUDIO_BASE64__"></audio></section>
+<section><div class="eyebrow">Composed motion proposals</div><p class="muted" id="expression-mode"></p><div id="targets"></div><small>Normalized target positions, −1 to +1. These values are proposals before hardware validation, not measured motion. Pausing freezes this trace.</small></section>
 <small>Aperture follows the waveform envelope. Affect cues are clause-relative requests, not measured emotion or phoneme alignment. No actuator commands are sent.</small></main>
 <script type="application/json" id="speech-data">__SPEECH_DATA__</script>
 <script>
 const data=JSON.parse(document.getElementById('speech-data').textContent);
 const audio=document.getElementById('audio'), frames=data.timeline.frames, spans=data.timeline.spans;
+document.getElementById('expression-mode').textContent=data.expression_mode==='supplied-proposal'?'Speech blended with a supplied expression trace. Its support and provenance belong to the source experiment.':'Speech with neutral expression fallback. No trained affect mapping is active.';
+const targetRows=new Map();
+for(const update of data.timeline.motion)for(const target of update.targets){
+ if(targetRows.has(target.actuator_name))continue;
+ const row=document.createElement('div');row.className='target';
+ const label=document.createElement('span');label.textContent=target.actuator_name.replaceAll('_',' ');
+ const meter=document.createElement('meter');meter.min=-1;meter.max=1;meter.value=0;meter.setAttribute('aria-label',label.textContent);
+ const value=document.createElement('output');row.append(label,meter,value);document.getElementById('targets').append(row);targetRows.set(target.actuator_name,{meter,value});
+}
 function draw(){
  const sample=Math.min(data.timeline.sample_count,Math.floor(audio.currentTime*data.timeline.sample_rate));
  let lo=0,hi=frames.length;while(lo+1<hi){const m=(lo+hi)>>1;if(frames[m].sample_index<=sample)lo=m;else hi=m;}
  const f=frames[lo];document.getElementById('mouth').setAttribute('ry',3+27*(audio.paused?0:f.mouth_aperture));
+ for(const row of targetRows.values()){row.meter.hidden=true;row.value.textContent='—';}
+ for(const target of data.timeline.motion[lo].targets){const row=targetRows.get(target.actuator_name);row.meter.hidden=false;row.meter.value=target.normalized_position;row.value.textContent=target.normalized_position.toFixed(3);}
  ['v','a','d'].forEach((id,j)=>{document.getElementById(id).value=f.vector[j]+1;document.getElementById(id+'-value').textContent=f.vector[j].toFixed(2)});
  document.getElementById('i').value=f.intensity;document.getElementById('i-value').textContent=f.intensity.toFixed(2);
  document.getElementById('clock').textContent=audio.currentTime.toFixed(2)+' s / '+(data.timeline.sample_count/data.timeline.sample_rate).toFixed(2)+' s';

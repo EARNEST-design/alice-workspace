@@ -48,7 +48,7 @@ class SpeechPlan(BaseModel):
     utterance_id: Text
     source_id: Text
     seed: int = Field(default=0, ge=0, le=2**32 - 1)
-    voice: Voice = "alba"
+    voice: Voice = "azelma"
     segments: tuple[SpeechSegment, ...] = Field(min_length=1, max_length=32)
 
     @model_validator(mode="after")

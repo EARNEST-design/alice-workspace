@@ -114,7 +114,7 @@
       "type": "integer"
     },
     "voice": {
-      "default": "alba",
+      "default": "azelma",
       "enum": [
         "alba",
         "marius",

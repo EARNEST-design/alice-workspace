@@ -2,7 +2,7 @@
   "schema_version": "speech-plan/v1",
   "utterance_id": "alice-introduction-v1",
   "source_id": "operator-authored-demo",
-  "voice": "alba",
+  "voice": "azelma",
   "seed": 7,
   "segments": [
     {

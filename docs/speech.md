@@ -2,7 +2,9 @@
 
 Implementation lives in the existing `streaming-affect-motion` worktree.
 Pocket TTS **3.1.0**, model **english_2026-01**, runs on CPU. The default voice is
-the supplied **alba** preset. No remote inference or voice cloning is used.
+the supplied **azelma** preset, selected by the operator after a local voice
+audition. Explicit voice choices in existing plans are preserved. No remote
+inference or voice cloning is used.
 
 ## Run locally
 
@@ -112,6 +114,32 @@ remain with the expression source. Trailing silence releases speech ownership.
 The default preview has no supplied expression: it demonstrates requested affect
 and jaw timing with an explicitly labeled neutral expression fallback. The ML
 support set remains empty until the separate evidence/training work fills it.
+
+## Azelma speech and streaming-engine replay
+
+The operator-selected Azelma demo is `config/speech/alice-sync-test.json`. It has
+one short utterance and changing affect cues. To reproduce the software trial:
+
+```bash
+HF_HUB_OFFLINE=1 uv run --extra speech python tests/motion/render_speech_replay.py \
+  artifacts/speech/my-azelma-replay
+```
+
+This repository QA utility reuses the completed streaming-engine test fixture;
+it requires the development dependencies. It renders two previews on the same
+audio clock: the current empty-support pipeline, which stays neutral, and a
+separately labeled neutral procedural blink/gaze demo with zero residual weights.
+The latter does not use speech affect to select movements. The utility refuses
+to report an empty-support conclusion if the support config becomes nonempty.
+
+The preview animates requested speech aperture and shows composed actuator
+proposals underneath. Seeking updates those values from the audio time; channels
+not yet introduced by a sparse expression are blank. This is a software timing
+test. The raw proposals need a bounded physical trajectory and guarded speech
+executor before they can be used on Alice's jaw. Measurements and unresolved
+hardware integration are recorded in
+`docs/experiments/2026-09-09-speech-streaming-replay.md` and
+`hardware/speech-timing.md`.
 
 ## Artifacts and validation
 

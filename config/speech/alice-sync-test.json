@@ -1,0 +1,18 @@
+{
+  "schema_version": "speech-plan/v1",
+  "utterance_id": "alice-azelma-sync-test-v1",
+  "source_id": "assistant-authored-operator-requested-sync-test",
+  "voice": "azelma",
+  "seed": 7,
+  "segments": [
+    {
+      "text": "Hello, I am Alice. It is lovely to meet you. Shall we try speaking together?",
+      "cues": [
+        {"progress": 0.0, "vector": [0.3, 0.1, 0.0], "intensity": 0.5},
+        {"progress": 0.5, "vector": [0.7, 0.3, 0.1], "intensity": 0.7},
+        {"progress": 1.0, "vector": [0.2, -0.1, 0.0], "intensity": 0.3}
+      ],
+      "pause_after_s": 0.0
+    }
+  ]
+}

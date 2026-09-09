@@ -2,9 +2,40 @@ import hashlib
 import json
 import wave
 
+import numpy as np
+import pytest
 from test_timeline import SyntheticVoice, plan
 
 from alice.speech.cli import main
+from alice.speech.timeline import AudioClip
+
+
+@pytest.mark.parametrize("voice,expected", [(None, "azelma"), ("fantine", "fantine")])
+def test_cli_uses_alice_voice_by_default_and_preserves_explicit_choice(
+    tmp_path, monkeypatch, voice, expected
+):
+    import alice.speech.cli as cli
+
+    calls = []
+
+    class VoiceSpy:
+        identity = {"backend": "synthetic-test"}
+
+        def synthesize(self, text, *, voice, seed):
+            calls.append((text, voice, seed))
+            return AudioClip(np.zeros(200, dtype=np.float32), 1000)
+
+    monkeypatch.setattr(cli, "PocketSynthesizer", lambda **kwargs: VoiceSpy())
+    source = tmp_path / "plan.json"
+    document = plan().model_dump(mode="json")
+    document.pop("voice")
+    if voice is not None:
+        document["voice"] = voice
+    source.write_text(json.dumps(document))
+    output = tmp_path / "result"
+    assert main(["--plan", str(source), "--output", str(output)]) == 0
+    assert calls == [("Hello.", expected, 7)]
+    assert json.loads((output / "manifest.json").read_text())["voice"] == expected
 
 
 def test_cli_exports_real_audio_timeline_schema_and_manifest(tmp_path, monkeypatch):

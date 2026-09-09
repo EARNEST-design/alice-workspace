@@ -65,7 +65,11 @@ def write_artifacts(
     for name, value in payloads.items():
         (output / name).write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
     template = files("alice.resources").joinpath("speech-preview.html").read_text()
-    data = {"plan": payloads["plan.json"], "timeline": timeline}
+    data = {
+        "plan": payloads["plan.json"],
+        "timeline": timeline,
+        "expression_mode": "supplied-proposal" if expression else "neutral-fallback",
+    }
     safe_data = json.dumps(data).replace("<", "\\u003c").replace("&", "\\u0026")
     preview = template.replace("__SPEECH_DATA__", safe_data).replace(
         "__AUDIO_BASE64__",
