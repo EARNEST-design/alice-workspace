@@ -1,0 +1,19 @@
+services:
+  speech:
+    build:
+      context: ../..
+      dockerfile: infra/speech/Dockerfile
+      network: host
+    image: alice-speech:local
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs: [/tmp]
+    network_mode: none
+    environment:
+      HF_HUB_OFFLINE: "1"
+    volumes:
+      - ${ALICE_HF_CACHE:-${HOME}/.cache/huggingface}:/cache/huggingface:ro
+      - ../../config/speech:/plans:ro
+      - ../../artifacts/speech:/output
+    command: [--offline, --plan, /plans/alice-introduction.json, --output, /output/container-introduction]

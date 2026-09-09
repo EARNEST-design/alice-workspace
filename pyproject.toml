@@ -17,12 +17,17 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+speech = [
+  "pocket-tts==3.1.0",
+  "sounddevice==0.5.6",
+]
 ml = [
   "safetensors>=0.8.0",
   "torch>=2.14.0",
 ]
 
 [project.scripts]
+alice-speak = "alice.speech.cli:main"
 alice-camera = "alice.perception.cli:main"
 alice-passive-capture = "alice.experiments.passive_capture:main"
 alice-hardware-preflight = "alice.experiments.hardware_cli:main"

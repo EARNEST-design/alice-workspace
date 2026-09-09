@@ -21,6 +21,10 @@ Do not energize or move hardware until the wiring map, mechanical travel limits,
 
 ## Layout
 
+Local CPU speech, audio-aligned mouth proposals and future LLM affect cues are
+available through `alice-speak`. See [the speech runbook](docs/speech.md) and
+`config/speech/alice-introduction.json` for a playable hardware-free example.
+
 - `agents/`: specialized agent charters
 - `docs/discovery/`: evidence and open questions
 - `docs/architecture/`: decisions and system design

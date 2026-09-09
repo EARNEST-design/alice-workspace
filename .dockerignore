@@ -1,0 +1,10 @@
+.git
+.venv
+.worktrees
+.codex
+artifacts
+data
+checkpoints
+hardware/calibration/local
+.env*
+__pycache__

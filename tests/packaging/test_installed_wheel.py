@@ -76,6 +76,12 @@ def test_built_wheel_runs_entry_points_without_repository_files(
         cwd=outside_repository,
         env=clean_env,
     )
+    speech_help = _run(
+        str(environment / "bin" / "alice-speak"),
+        "--help",
+        cwd=outside_repository,
+        env=clean_env,
+    )
     probe = _run(
         str(environment / "bin" / "python"),
         "-c",
@@ -99,6 +105,7 @@ def test_built_wheel_runs_entry_points_without_repository_files(
     assert "Phase 2 hardware" in hardware_help
     assert "Guarded Phase 2" in hardware_run_help
     assert "read-only streaming motion readiness" in readiness_help
+    assert "Local speech and synchronized mock motion" in speech_help
     assert "['opencv-contrib-python']" in probe
     assert "# Passive Blendshape Conclusion" in probe
     assert "# Actuator-identification conclusion" in probe
@@ -132,3 +139,6 @@ def test_built_wheel_keeps_ml_dependencies_behind_optional_extra(
         )
         assert matching
         assert all("extra == 'ml'" in requirement for requirement in matching)
+    pocket = tuple(r for r in requirements if r.startswith("pocket-tts"))
+    assert pocket
+    assert all("extra == 'speech'" in requirement for requirement in pocket)
