@@ -21,7 +21,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="alice-speak", description="Local speech and synchronized mock motion"
     )
-    parser.add_argument("--plan", type=Path, required=True, help="speech-plan/v1 JSON")
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--plan", type=Path, help="speech-plan/v1 JSON")
+    source.add_argument(
+        "--clauses", type=Path, help="Incremental speech-clause/v1 JSONL"
+    )
     parser.add_argument("--output", type=Path, required=True, help="New run directory")
     parser.add_argument("--sync-config", type=Path)
     parser.add_argument(
@@ -33,8 +37,29 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--play", action="store_true", help="Play speakers; motion remains mock"
     )
+    parser.add_argument(
+        "--expression-mode",
+        choices=("authored", "learned-fallback"),
+        default="learned-fallback",
+        help="Incremental expression source",
+    )
+    parser.add_argument("--config-root", type=Path, default=Path("config"))
     args = parser.parse_args(argv)
     try:
+        if args.clauses:
+            if args.expression or args.sync_config:
+                raise ValueError(
+                    "incremental mode uses --config-root sync and expression policy"
+                )
+            from alice.speech.stream_cli import run_stream
+
+            return run_stream(
+                args.clauses,
+                args.output,
+                config_root=args.config_root,
+                mode=args.expression_mode,
+                play=args.play,
+            )
         plan = SpeechPlan.model_validate_json(args.plan.read_text())
         config = (
             SpeechSyncConfig.model_validate_json(args.sync_config.read_text())

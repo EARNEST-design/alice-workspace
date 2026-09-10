@@ -1,0 +1,9 @@
+{
+  "schema_version": "authored-expression/v1",
+  "valence_threshold": 0.2,
+  "anchor_scale": 0.5,
+  "transition_s": 1.6,
+  "positive_anchor": "smile_open",
+  "negative_anchor": "frown_closed",
+  "provenance": "Authored demonstration policy over hardware/expression-presets.md anchors. Affect signs are author choices, not fitted emotion labels or empirical support coordinates. Blink/gaze use the existing configured research priors."
+}

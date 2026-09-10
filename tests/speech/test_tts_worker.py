@@ -115,3 +115,20 @@ def test_warm_worker_keeps_seeded_pcm_equal_and_reports_errors():
             await worker.close()
 
     asyncio.run(check())
+
+
+def test_live_but_stalled_native_generator_is_killed_on_progress_timeout():
+    async def check():
+        context = mp.get_context("spawn")
+        gate, produced = context.Event(), context.Value("i", 0)
+        worker = PocketTtsWorker(
+            backend=FakeBackend(gate, produced), chunk_timeout_s=0.1
+        )
+        try:
+            with pytest.raises(RuntimeError, match="progress timeout"):
+                _ = [chunk async for chunk in worker.stream(clause())]
+            assert not worker.is_alive
+        finally:
+            await worker.close()
+
+    asyncio.run(check())

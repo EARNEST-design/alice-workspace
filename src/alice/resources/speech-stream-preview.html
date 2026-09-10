@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Alice · Incremental speech and expression replay</title>
+<style>
+:root{color-scheme:dark;font:16px/1.5 system-ui;color:#e8e6e1;background:#151b20}body{margin:0}
+main{max-width:960px;margin:auto;padding:40px 24px}h1{font-weight:550;margin:0;font-size:36px}
+.eyebrow{color:#7ed9c3;letter-spacing:.14em;font-size:12px;text-transform:uppercase}
+.muted{color:#a6b0b7}section{background:#1e282f;border:1px solid #35444e;border-radius:16px;padding:24px;margin:24px 0}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:30px}svg{width:100%;height:260px}
+audio{width:100%}progress{width:100%;accent-color:#7ed9c3}label{display:flex;justify-content:space-between;margin-top:18px}
+#text{font-size:22px;min-height:70px}#clock{font-variant-numeric:tabular-nums}small{color:#a6b0b7}
+.target{display:grid;grid-template-columns:1fr 2fr 4em;align-items:center;gap:16px;padding:5px 0}.target output{text-align:right;font-variant-numeric:tabular-nums}.target meter{width:100%}
+@media(max-width:600px){.grid{grid-template-columns:1fr}main{padding:24px 16px}}
+</style>
+<main><div class="eyebrow">Alice / local speech</div><h1>Voice, mouth & affect</h1>
+<p class="muted">Retained incremental audio with composed software motion. Mouth leads by 100 ms; affect follows the audible clause.</p>
+<section class="grid"><div><svg viewBox="0 0 300 260" role="img" aria-label="Animated robot face">
+<rect x="55" y="15" width="190" height="225" rx="70" fill="#2b3d47" stroke="#72919e" stroke-width="2"/>
+<ellipse id="eye-left" cx="110" cy="92" rx="20" ry="12" fill="#bce8df"/><ellipse id="eye-right" cx="190" cy="92" rx="20" ry="12" fill="#bce8df"/>
+<path d="M142 115 L136 145 L157 145" fill="none" stroke="#72919e" stroke-width="3"/>
+<ellipse id="mouth" cx="150" cy="183" rx="36" ry="3" fill="#0b1016" stroke="#7ed9c3" stroke-width="2"/>
+<path id="corners" d="M110 183 Q150 183 190 183" fill="none" stroke="#7ed9c3" stroke-width="3"/>
+</svg><small>Speech aperture preview. Composed actuator proposals appear below.</small></div>
+<div><div class="eyebrow">Requested affect · VAD</div>
+<label>Valence <span id="v-value"></span></label><progress id="v" max="2"></progress>
+<label>Arousal <span id="a-value"></span></label><progress id="a" max="2"></progress>
+<label>Dominance <span id="d-value"></span></label><progress id="d" max="2"></progress>
+<label>Intensity <span id="i-value"></span></label><progress id="i" max="1"></progress>
+<p class="muted" id="clock">0.00 s</p></div></section>
+<section><p id="text"></p><audio id="audio" controls preload="metadata" src="data:audio/wav;base64,__AUDIO_BASE64__"></audio></section>
+<section><div class="eyebrow">Composed motion proposals</div><p class="muted" id="expression-mode"></p><div id="targets"></div><small>Normalized target positions, −1 to +1. These values are proposals before hardware validation, not measured motion. Pausing freezes this trace.</small></section>
+<small>Aperture follows the waveform envelope. Affect cues are clause-relative requests, not measured emotion or phoneme alignment. No actuator commands are sent.</small></main>
+<script type="application/json" id="speech-data">__SPEECH_DATA__</script>
+<script>
+const data=JSON.parse(document.getElementById('speech-data').textContent);
+const audio=document.getElementById('audio'), frames=data.timeline.frames, spans=data.timeline.spans;
+document.getElementById('expression-mode').textContent=data.expression_mode==='authored-expression/v1'?'Authored smile/frown policy and procedural blinks. No trained emotion model or physical acceptance is claimed.':'Unfitted neutral fallback. No demonstrated affect support is available.';
+const targetRows=new Map();
+for(const update of data.timeline.motion)for(const target of update.targets){
+ if(targetRows.has(target.actuator_name))continue;
+ const row=document.createElement('div');row.className='target';
+ const label=document.createElement('span');label.textContent=target.actuator_name.replaceAll('_',' ');
+ const meter=document.createElement('meter');meter.min=-1;meter.max=1;meter.value=0;meter.setAttribute('aria-label',label.textContent);
+ const value=document.createElement('output');row.append(label,meter,value);document.getElementById('targets').append(row);targetRows.set(target.actuator_name,{meter,value});
+}
+function draw(){
+ const sample=Math.min(data.timeline.sample_count,Math.floor(audio.currentTime*data.timeline.sample_rate));
+ let lo=0,hi=frames.length;while(lo+1<hi){const m=(lo+hi)>>1;if(frames[m].sample_index<=sample)lo=m;else hi=m;}
+ const f=frames[lo];document.getElementById('mouth').setAttribute('ry',3+27*(audio.paused?0:f.mouth_aperture));
+ for(const row of targetRows.values()){row.meter.hidden=true;row.value.textContent='—';}
+ for(const target of data.timeline.motion[lo].targets){const row=targetRows.get(target.actuator_name);row.meter.hidden=false;row.meter.value=target.normalized_position;row.value.textContent=target.normalized_position.toFixed(3);}
+ const pose=Object.fromEntries(data.timeline.motion[lo].targets.map(t=>[t.actuator_name,t.normalized_position]));
+ const eyelid=pose.upper_eyelids||0;
+ ['eye-left','eye-right'].forEach(id=>document.getElementById(id).setAttribute('ry',Math.max(1,12*(1+2*eyelid))));
+ const smile=((pose.left_mouth_corner||0)-(pose.right_mouth_corner||0))/2;
+ document.getElementById('corners').setAttribute('d',`M110 ${183-25*smile} Q150 ${183+25*smile} 190 ${183-25*smile}`);
+ ['v','a','d'].forEach((id,j)=>{document.getElementById(id).value=f.vector[j]+1;document.getElementById(id+'-value').textContent=f.vector[j].toFixed(2)});
+ document.getElementById('i').value=f.intensity;document.getElementById('i-value').textContent=f.intensity.toFixed(2);
+ document.getElementById('clock').textContent=audio.currentTime.toFixed(2)+' s / '+(data.timeline.sample_count/data.timeline.sample_rate).toFixed(2)+' s';
+ const span=spans.find(s=>sample>=s.start_sample&&sample<s.end_sample);
+ document.getElementById('text').textContent=span?data.plan.segments[span.segment_index].text:(sample===0?data.plan.segments[0].text:'');
+ requestAnimationFrame(draw);
+}draw();
+</script></html>

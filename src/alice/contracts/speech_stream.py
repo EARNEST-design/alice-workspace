@@ -1,6 +1,6 @@
 """Provider-independent, immutable committed clauses for one bounded response."""
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import Literal
 
@@ -52,7 +52,7 @@ class ClauseSequence:
             raise ValueError("source closed without end_of_response")
 
 
-async def jsonl_clauses(path: Path) -> AsyncIterator[SpeechClause]:
+async def jsonl_clauses(path: Path) -> AsyncGenerator[SpeechClause, None]:
     """Read a local fixture on demand; no whole-response JSON or eager parsing."""
     with path.open() as source:
         for line in source:

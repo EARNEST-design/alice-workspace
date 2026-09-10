@@ -71,16 +71,29 @@ class SoundDevicePlayback:
             if result == "stop":
                 raise sd.CallbackStop
 
-        stream = await asyncio.to_thread(
-            sd.OutputStream,
-            samplerate=timeline.sample_rate,
-            channels=1,
-            dtype="float32",
-            callback=callback,
-            blocksize=round(timeline.sample_rate * 0.02),
+        creation = asyncio.create_task(
+            asyncio.to_thread(
+                sd.OutputStream,
+                samplerate=timeline.sample_rate,
+                channels=1,
+                dtype="float32",
+                callback=callback,
+                blocksize=round(timeline.sample_rate * 0.02),
+            )
         )
         try:
-            await asyncio.to_thread(stream.start)
+            stream = await asyncio.shield(creation)
+        except asyncio.CancelledError:
+            stream = await creation
+            await asyncio.to_thread(stream.close)
+            raise
+        try:
+            starting = asyncio.create_task(asyncio.to_thread(stream.start))
+            try:
+                await asyncio.shield(starting)
+            except asyncio.CancelledError:
+                await starting
+                raise
             last_sample = -1
             while stream.active:
                 if cancel.is_set():
@@ -90,7 +103,15 @@ class SoundDevicePlayback:
                 sample = player.sample_position(float(stream.time))
                 if sample is not None and sample < timeline.generated_samples:
                     metrics["played_samples"] = sample
-                    if sample - last_sample >= round(timeline.sample_rate * 0.02):
+                    if last_sample < 0 or sample - last_sample >= round(
+                        timeline.sample_rate * 0.02
+                    ):
+                        if last_sample < 0:
+                            onset = time.monotonic() - sample / timeline.sample_rate
+                            metrics["dac_onset_monotonic_s"] = onset
+                            start = metrics.get("started_monotonic_s")
+                            if isinstance(start, (int, float)):
+                                metrics["first_audio_latency_s"] = onset - start
                         await emit(timeline.led_frame(sample))
                         last_sample = sample
                 await asyncio.sleep(0.002)

@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import os
+import queue
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
+from functools import partial
+from importlib import import_module
 from importlib.metadata import version
+from types import SimpleNamespace
 from typing import Any, get_args
 
 import numpy as np
@@ -25,8 +29,13 @@ class PocketSynthesizer:
     We restore those settings, but concurrent ML should run in another process.
     """
 
-    def __init__(self, *, offline: bool = False) -> None:
+    def __init__(
+        self, *, offline: bool = False, stream_queue_capacity: int | None = None
+    ) -> None:
+        if stream_queue_capacity is not None and not 1 <= stream_queue_capacity <= 32:
+            raise ValueError("invalid internal speech queue capacity")
         self._offline = offline
+        self._stream_queue_capacity = stream_queue_capacity
         self._model: Any = None
         self._voices: dict[str, Any] = {}
         self._identity = {
@@ -89,6 +98,27 @@ class PocketSynthesizer:
                     from pocket_tts import TTSModel  # type: ignore[import-untyped]
 
                     torch.set_num_threads(2)
+                    if self._stream_queue_capacity is not None:
+                        if version("pocket-tts") != "3.1.0":
+                            raise RuntimeError(
+                                "bounded queue adapter requires Pocket TTS 3.1.0"
+                            )
+                        # 3.1.0 creates unbounded latent/result queues internally.
+                        # Scope the factory to that module in the owned worker;
+                        # never replace Python's global queue.Queue.
+                        module = import_module("pocket_tts.models.tts_model")
+                        setattr(
+                            module,
+                            "queue",
+                            SimpleNamespace(
+                                Queue=partial(
+                                    queue.Queue, maxsize=self._stream_queue_capacity
+                                )
+                            ),
+                        )
+                        self._identity["stream_queue_capacity"] = str(
+                            self._stream_queue_capacity
+                        )
                     if self._model is None:
                         self._model = TTSModel.load_model(language="english_2026-01")
                         self._identity["package_version"] = version("pocket-tts")

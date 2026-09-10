@@ -117,6 +117,9 @@ class GeneratorState(BaseModel):
     schema_version: Literal["generator-state/v1"]
     last_accepted_target: TargetUpdate
     last_reported_pose: TargetUpdate
+    # Persistent anchor trajectory before residuals and transient event overlays.
+    # Keeping it distinct prevents every replan from absorbing the same blink.
+    composed_anchor_target: TargetUpdate | None = None
     estimated_velocity: tuple[ActuatorVelocity, ...]
     filtered_intent: FilteredIntent
     latent_vector: tuple[FiniteFloat, ...]
@@ -147,6 +150,12 @@ class GeneratorState(BaseModel):
         accepted_names = {
             target.actuator_name for target in self.last_accepted_target.targets
         }
+        if self.composed_anchor_target is not None and (
+            self.composed_anchor_target.offset_s != 0.0
+            or {t.actuator_name for t in self.composed_anchor_target.targets}
+            != accepted_names
+        ):
+            raise ValueError("composed anchor must cover the complete boundary pose")
         reported_names = {
             target.actuator_name for target in self.last_reported_pose.targets
         }

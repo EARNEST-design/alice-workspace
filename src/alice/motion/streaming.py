@@ -223,10 +223,11 @@ class ProductionCandidateComposer:
         except RuntimeError as error:
             raise ValueError("invalid Torch RNG state") from error
         fallback_intent = intent.support_status.value in {"fallback", "stale"}
+        anchor_state = state.composed_anchor_target or state.last_accepted_target
         anchor = (
-            self._anchor.plan_neutral(state.last_accepted_target, horizon_s)
+            self._anchor.plan_neutral(anchor_state, horizon_s)
             if fallback_intent
-            else self._anchor.plan(intent, state.last_accepted_target, horizon_s)
+            else self._anchor.plan(intent, anchor_state, horizon_s)
         )
         face_state = self._face.state_from(state)
         if conservative:
@@ -313,6 +314,7 @@ class ProductionCandidateComposer:
         updates: list[TargetUpdate] = []
         previous_s = 0.0
         boundary_hidden = hidden
+        boundary_anchor = anchor_state
         boundary_velocities = {
             name: item.velocity for name, item in response_states.items()
         }
@@ -400,6 +402,7 @@ class ProductionCandidateComposer:
                     )
                 )
                 if base.offset_s <= prefix_duration_s:
+                    boundary_anchor = base.model_copy(update={"offset_s": 0.0})
                     boundary_hidden = hidden.clone()
                     boundary_velocities = {
                         name: item.velocity for name, item in response_states.items()
@@ -434,6 +437,7 @@ class ProductionCandidateComposer:
         state_values.update(
             last_accepted_target=boundary,
             last_reported_pose=boundary,
+            composed_anchor_target=boundary_anchor,
             estimated_velocity=tuple(
                 {"actuator_name": name, "velocity_per_s": boundary_velocities[name]}
                 for name in self._residual.config.actuator_names

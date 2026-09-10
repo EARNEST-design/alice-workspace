@@ -72,12 +72,26 @@ class SpeechStreamSession:
         last_sample = 0
         self.metrics = {
             "outcome": "running",
+            "started_monotonic_s": started,
             "mouth_lead_s": 0.1,
             "prebuffer_s": self.prebuffer_s,
             "underflows": 0,
             "first_audio_latency_s": None,
             "first_pcm_latency_s": None,
         }
+
+        def invalidate_audio() -> None:
+            if self.ring is not None:
+                self.ring.abort()
+
+        async def guarded(stage: Awaitable[None]) -> None:
+            try:
+                await stage
+            except BaseException:
+                # Sibling faults must stop callback PCM before TaskGroup waits
+                # for an in-flight model/consumer thread to join.
+                invalidate_audio()
+                raise
 
         async def emit(frame: SpeechFrame) -> None:
             nonlocal last_sample
@@ -147,12 +161,14 @@ class SpeechStreamSession:
             await ready.wait()
             assert self.timeline is not None and self.ring is not None
             await self.playback(self.timeline, self.ring, emit, cancel, self.metrics)
+            if not cancel.is_set() and (not self.ring.finished or self.ring.depth):
+                raise RuntimeError("playback returned before PCM was drained")
 
         async def pipeline() -> None:
             async with asyncio.TaskGroup() as group:
-                group.create_task(source())
-                group.create_task(synthesize())
-                group.create_task(play())
+                group.create_task(guarded(source()))
+                group.create_task(guarded(synthesize()))
+                group.create_task(guarded(play()))
 
         work = asyncio.create_task(pipeline())
         cancelled = asyncio.create_task(cancel.wait())
@@ -160,6 +176,7 @@ class SpeechStreamSession:
             await asyncio.wait((work, cancelled), return_when=asyncio.FIRST_COMPLETED)
             if cancel.is_set():
                 self.metrics["outcome"] = "cancelled"
+                invalidate_audio()
                 work.cancel()
             else:
                 try:
@@ -170,11 +187,13 @@ class SpeechStreamSession:
                 self.metrics["outcome"] = "completed"
             return self.metrics
         except BaseException as error:
+            invalidate_audio()
             self.metrics.update(outcome="failed", error=str(error))
             raise
         finally:
             cancelled.cancel()
-            work.cancel()
+            if not work.done() and not work.cancelling():
+                work.cancel()
             await asyncio.gather(work, cancelled, return_exceptions=True)
             if self.metrics["outcome"] != "completed":
                 if self.ring is not None:

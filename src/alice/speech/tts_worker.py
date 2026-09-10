@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import multiprocessing as mp
 import queue
+import time
 from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -54,10 +56,16 @@ class ChunkBackend(Protocol):
 
 
 def _worker_main(
-    requests: Any, results: Any, backend: ChunkBackend | None, offline: bool
+    requests: Any,
+    results: Any,
+    backend: ChunkBackend | None,
+    offline: bool,
+    capacity: int,
 ) -> None:
     # This entry point is only called by spawn; it inherits no open device FDs.
-    engine = backend or PocketSynthesizer(offline=offline)
+    engine = backend or PocketSynthesizer(
+        offline=offline, stream_queue_capacity=capacity
+    )
     while True:
         request = requests.get()
         if request is None:
@@ -106,9 +114,18 @@ class PocketTtsWorker:
         offline: bool = True,
         backend: ChunkBackend | None = None,
         shutdown_timeout_s: float = 0.5,
+        chunk_timeout_s: float = 10.0,
+        startup_timeout_s: float = 30.0,
     ) -> None:
         if not 1 <= capacity <= 32 or not 0 < shutdown_timeout_s <= 5:
             raise ValueError("invalid worker queue or shutdown bound")
+        if not all(
+            math.isfinite(t) and 0.05 <= t <= 120
+            for t in (chunk_timeout_s, startup_timeout_s)
+        ):
+            raise ValueError("invalid worker progress deadline")
+        self._chunk_timeout = chunk_timeout_s
+        self._startup_timeout = startup_timeout_s
         self._capacity = capacity
         self._offline = offline
         self._backend = backend
@@ -135,7 +152,13 @@ class PocketTtsWorker:
         self._results = context.Queue(maxsize=self._capacity)
         self._process = context.Process(
             target=_worker_main,
-            args=(self._requests, self._results, self._backend, self._offline),
+            args=(
+                self._requests,
+                self._results,
+                self._backend,
+                self._offline,
+                self._capacity,
+            ),
             daemon=True,
         )
         self._process.start()
@@ -151,6 +174,7 @@ class PocketTtsWorker:
                 self._active = clause.generation_id
                 self._requests.put_nowait(clause.model_dump())
             expected, rate, finished = 0, None, False
+            progress = time.monotonic()
             try:
                 while self._active == clause.generation_id:
                     try:
@@ -158,6 +182,16 @@ class PocketTtsWorker:
                     except queue.Empty:
                         if not self.is_alive:
                             raise RuntimeError("speech worker exited unexpectedly")
+                        timeout = (
+                            self._startup_timeout
+                            if expected == 0
+                            else self._chunk_timeout
+                        )
+                        if time.monotonic() - progress > timeout:
+                            # Pocket's native error path may join a decoder stuck
+                            # behind a bounded queue. Kill/restart the owned process
+                            # instead of trusting thread cancellation or leaking it.
+                            raise RuntimeError("speech worker progress timeout")
                         await asyncio.sleep(0.002)
                         continue
                     if kind == "error":
@@ -187,6 +221,8 @@ class PocketTtsWorker:
                     rate = chunk.sample_rate
                     finished = chunk.final
                     yield chunk
+                    # Time spent backpressured by this consumer is not a model stall.
+                    progress = time.monotonic()
                     if finished:
                         return
             finally:

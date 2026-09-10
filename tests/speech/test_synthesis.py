@@ -124,3 +124,37 @@ def test_stream_yields_before_final_and_reuses_copied_voice_state(monkeypatch):
     assert list(stream) == []
     again = list(engine.stream("Hello", voice="azelma", seed=29))
     assert np.array_equal(first.pcm, again[0].pcm)
+
+
+def test_stream_bounds_pocket_internal_decoder_queues_without_global_patch(monkeypatch):
+    import queue
+
+    pocket_module = SimpleNamespace(queue=queue)
+
+    class Model:
+        sample_rate = 24000
+        config = SimpleNamespace(model_dump_json=lambda: "{}")
+
+        @classmethod
+        def load_model(cls, **kwargs):
+            return cls()
+
+        def get_state_for_audio_prompt(self, voice):
+            return {}
+
+        def generate_audio_stream(self, state, text, *, copy_state):
+            channel = pocket_module.queue.Queue()
+            channel.put_nowait("first")
+            with pytest.raises(queue.Full):
+                channel.put_nowait("second")
+            assert queue.Queue().maxsize == 0
+            yield torch.zeros(240)
+
+    monkeypatch.setitem(sys.modules, "pocket_tts", SimpleNamespace(TTSModel=Model))
+    monkeypatch.setitem(sys.modules, "pocket_tts.models.tts_model", pocket_module)
+    clip = next(
+        PocketSynthesizer(stream_queue_capacity=1).stream(
+            "Hello", voice="azelma", seed=29
+        )
+    )
+    assert len(clip.pcm) == 240

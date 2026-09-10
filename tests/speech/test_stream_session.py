@@ -203,3 +203,42 @@ def test_cancel_joins_inflight_consumer_before_terminal_release():
         assert len(frames) == 2 and frames[-1].speech_weight == 0
 
     asyncio.run(check())
+
+
+def test_cancel_invalidates_audio_before_joining_a_blocked_consumer():
+    import threading
+
+    async def check():
+        entered, release = threading.Event(), threading.Event()
+        invalidated, cancel, gate = (asyncio.Event() for _ in range(3))
+
+        def emit(frame):
+            if frame.speech_weight:
+                entered.set()
+                release.wait(3)
+
+        async def source():
+            yield clause()
+            await gate.wait()
+            yield clause(1)
+
+        session = SpeechStreamSession(worker=Worker(gate), emit=emit)
+        task = asyncio.create_task(session.run(source(), cancel))
+        try:
+            assert await asyncio.to_thread(entered.wait, 2)
+            original = session.ring.abort
+
+            def abort():
+                original()
+                invalidated.set()
+
+            session.ring.abort = abort
+            cancel.set()
+            await asyncio.wait_for(invalidated.wait(), 0.5)
+            assert session.ring.depth == 0
+            assert not release.is_set()
+        finally:
+            release.set()
+            await asyncio.wait_for(task, 2)
+
+    asyncio.run(check())
