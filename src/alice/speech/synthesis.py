@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import os
 import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from importlib.metadata import version
 from typing import Any, get_args
 
@@ -39,6 +41,27 @@ class PocketSynthesizer:
         return dict(self._identity)
 
     def synthesize(self, text: str, *, voice: str, seed: int) -> AudioClip:
+        with self._inference(text, voice=voice, seed=seed) as (model, state):
+            return self._clip(model.generate_audio(state, text, copy_state=True))
+
+    def stream(self, text: str, *, voice: str, seed: int) -> Iterator[AudioClip]:
+        """Keep setup warm and yield every decoder chunk without lookahead."""
+        with self._inference(text, voice=voice, seed=seed) as (model, state):
+            for tensor in model.generate_audio_stream(state, text, copy_state=True):
+                yield self._clip(tensor)
+
+    def _clip(self, tensor: Any) -> AudioClip:
+        pcm = tensor.detach().cpu().numpy()
+        if not np.isfinite(pcm).all():
+            raise ValueError("Pocket TTS returned nonfinite audio")
+        return AudioClip(
+            np.clip(pcm, -1, 1).astype(np.float32), int(self._model.sample_rate)
+        )
+
+    @contextmanager
+    def _inference(
+        self, text: str, *, voice: str, seed: int
+    ) -> Iterator[tuple[Any, Any]]:
         if voice not in get_args(Voice):
             raise ValueError("only built-in preset voices are supported")
         if not text.strip() or len(text) > 1000 or not 0 <= seed < 2**32:
@@ -84,16 +107,7 @@ class PocketSynthesizer:
                     # Loading consumes RNG on the first call. Reset so cold/warm
                     # requests with the same seed generate the same speech.
                     torch.manual_seed(seed)
-                    tensor = self._model.generate_audio(
-                        self._voices[voice], text, copy_state=True
-                    )
-                    pcm = tensor.detach().cpu().numpy()
-                    if not np.isfinite(pcm).all():
-                        raise ValueError("Pocket TTS returned nonfinite audio")
-                    return AudioClip(
-                        np.clip(pcm, -1, 1).astype(np.float32),
-                        int(self._model.sample_rate),
-                    )
+                    yield self._model, self._voices[voice]
             except ImportError as error:
                 raise RuntimeError(
                     "Install speech dependencies: uv sync --extra speech"

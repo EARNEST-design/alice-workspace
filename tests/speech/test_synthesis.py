@@ -92,3 +92,35 @@ def test_background_generation_can_update_cached_tensors(monkeypatch):
     )
     clip = PocketSynthesizer().synthesize("Hello", voice="alba", seed=0)
     assert np.allclose(clip.pcm, 0.1)
+
+
+def test_stream_yields_before_final_and_reuses_copied_voice_state(monkeypatch):
+    calls = []
+
+    class Model:
+        sample_rate = 24000
+        config = SimpleNamespace(model_dump_json=lambda: "{}")
+
+        @classmethod
+        def load_model(cls, **kwargs):
+            calls.append("load")
+            torch.rand(10)
+            return cls()
+
+        def get_state_for_audio_prompt(self, voice):
+            calls.append(voice)
+            return {}
+
+        def generate_audio_stream(self, state, text, *, copy_state):
+            assert copy_state
+            yield torch.rand(240)
+            calls.append("finished")
+
+    monkeypatch.setitem(sys.modules, "pocket_tts", SimpleNamespace(TTSModel=Model))
+    engine = PocketSynthesizer()
+    stream = engine.stream("Hello", voice="azelma", seed=29)
+    first = next(stream)
+    assert calls == ["load", "azelma"]
+    assert list(stream) == []
+    again = list(engine.stream("Hello", voice="azelma", seed=29))
+    assert np.array_equal(first.pcm, again[0].pcm)
