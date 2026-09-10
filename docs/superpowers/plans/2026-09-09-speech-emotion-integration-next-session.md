@@ -43,16 +43,21 @@ The motion repair tasks from the older September 7 handoff are already complete.
 Read `docs/experiments/2026-09-09-streaming-baseline.md` instead of repeating them.
 The checked-in support set (`config/affect/intent-filter-v1.yaml`) and affect-to-anchor mappings (`config/models/procedural-motion-v1.yaml`) are empty. The speech replay's residual weights are explicitly zero. The engine works, but those fixtures do not establish trained emotional expression. A newer external package must be checked, not assumed.
 
+Execution update (2026-09-10): Tasks 1–5 qualified at `83f6b1d`; see
+[report](../../experiments/2026-09-09-speech-emotion-integration.md). Task 6 remains
+unimplemented. First-audio/text overlap uses an event-gated fixture, not a live
+LLM provider. Raw composed proposals still require the Task 6 command guards.
+
 ## Task 1: Rebaseline and resolve the expression source
 
 **Files:** Read the checkpoint, `AGENTS.md`, `agents/systems-architect.md`, `agents/emotion-ml.md`, `agents/motion-control.md`, package/config files above, and the baseline report. Record findings in `docs/experiments/2026-09-09-speech-emotion-integration.md` when execution begins.
 
 **Interfaces:** Existing `load_package(path, expected_identities)` and production composer; produces an explicit expression source and its identity/provenance.
 
-- [ ] Run `git status --short`, `git log -8 --oneline`, `uv run pytest -q`, `uv run ruff check src tests`, and `uv run mypy src/alice` in the existing worktree. Compare with the checkpoint's 799-test baseline.
-- [ ] Inspect newer task/workspace artifacts for a real fitted model package. Load through the existing verified package API; record package digest, training provenance, support coordinates and evaluation status.
-- [ ] If no fitted package exists, retain honest neutral/fallback behavior in learned mode. For a visible integration demonstration, use an explicitly labeled authored-expression policy with configured smile/frown/neutral anchors and procedural blinks. Do not add invented training coordinates or relabel zero weights as trained emotion.
-- [ ] Record the selected demonstration source before implementation. The initial delivery is integration; training a new model family is a separate milestone.
+- [x] Run `git status --short`, `git log -8 --oneline`, `uv run pytest -q`, `uv run ruff check src tests`, and `uv run mypy src/alice` in the existing worktree. Compare with the checkpoint's 799-test baseline.
+- [x] Inspect newer task/workspace artifacts for a real fitted model package. Load through the existing verified package API; record package digest, training provenance, support coordinates and evaluation status.
+- [x] If no fitted package exists, retain honest neutral/fallback behavior in learned mode. For a visible integration demonstration, use an explicitly labeled authored-expression policy with configured smile/frown/neutral anchors and procedural blinks. Do not add invented training coordinates or relabel zero weights as trained emotion.
+- [x] Record the selected demonstration source before implementation. The initial delivery is integration; training a new model family is a separate milestone.
 
 ## Task 2: Commit incremental text and affect clauses
 
@@ -61,11 +66,11 @@ The checked-in support set (`config/affect/intent-filter-v1.yaml`) and affect-to
 
 **Interfaces:** Define `SpeechClause` with `schema_version='speech-clause/v1'`, `generation_id: str`, `clause_id: str`, `sequence: int`, `text: str`, `vector: tuple[float,float,float]`, `intensity: float`, `seed: int`, and `end_of_response: bool=False`. Reuse existing affect ranges/text bounds. Input is `AsyncIterable[SpeechClause]`; no provider-specific SDK belongs in the core contracts.
 
-- [ ] Write validation tests for blank text, nonfinite/out-of-range affect, invalid seeds, duplicate sequence IDs and attempts to replace a committed clause.
-- [ ] Make a JSON-lines fixture with two short clauses and contrasting affect. A fixture async source must yield clause 1 while withholding clause 2 until the consumer explicitly requests it.
-- [ ] Run `uv run pytest tests/speech/test_stream_contracts.py -q` and observe missing-contract failures; then implement the immutable event model and coordinator sequence checks.
-- [ ] Preserve the offline fractional-cue plan. Live v1 cues apply at clause audio onset; optional later alignment may add sample-anchored cues. Do not wait for whole-response JSON or calculate live cue times from unknown final duration.
-- [ ] Verify focused tests and commit `feat: define incremental speech and affect clauses`.
+- [x] Write validation tests for blank text, nonfinite/out-of-range affect, invalid seeds, duplicate sequence IDs and attempts to replace a committed clause.
+- [x] Make a JSON-lines fixture with two short clauses and contrasting affect. A fixture async source must yield clause 1 while withholding clause 2 until the consumer explicitly requests it.
+- [x] Run `uv run pytest tests/speech/test_stream_contracts.py -q` and observe missing-contract failures; then implement the immutable event model and coordinator sequence checks.
+- [x] Preserve the offline fractional-cue plan. Live v1 cues apply at clause audio onset; optional later alignment may add sample-anchored cues. Do not wait for whole-response JSON or calculate live cue times from unknown final duration.
+- [x] Verify focused tests and commit `feat: define incremental speech and affect clauses`.
 
 ## Task 3: Stream Pocket TTS from one warm process
 
@@ -74,12 +79,12 @@ The checked-in support set (`config/affect/intent-filter-v1.yaml`) and affect-to
 
 **Interfaces:** Define `PcmChunk(generation_id, clause_id, sequence, sample_rate, pcm, final)` as an immutable internal message; mono finite float32 PCM, chunk order checked by the receiver. `PocketTtsWorker.stream(clause: SpeechClause) -> AsyncIterator[PcmChunk]` is the coordinator-facing API. `cancel(generation_id)` invalidates queued results; `close()` joins/terminates the owned process within a bounded deadline.
 
-- [ ] Write a fake chunk generator that yields two chunks then waits on a test event. Assert the first chunk reaches the consumer before that event is released. Assert generation IDs reject stale chunks after cancellation and message capacity applies backpressure.
-- [ ] Inspect the installed `pocket_tts/models/tts_model.py` signature for `generate_audio_stream` and its copied voice-state semantics. Do not guess an API from a different package version.
-- [ ] Use `multiprocessing.get_context('spawn')` so the worker cannot inherit a live serial descriptor. Load January English/Azelma once per process, set the bounded CPU thread count inside it, and stream yielded arrays through a bounded IPC channel. Keep Torch globals/RNG separate from emotion inference.
-- [ ] Keep the model call serialized. Cancellation drops old-generation chunks immediately; if native generation cannot be interrupted promptly, bound shutdown and restart the owned worker rather than leaking it.
-- [ ] Test chunk-before-final delivery, finite PCM/rate validation, cold/warm deterministic seeds, cancellation, worker failure and shutdown. Run `uv run pytest tests/speech/test_tts_worker.py tests/speech/test_synthesis.py -q`.
-- [ ] Commit `feat: stream local Azelma PCM from an isolated worker`.
+- [x] Write a fake chunk generator that yields two chunks then waits on a test event. Assert the first chunk reaches the consumer before that event is released. Assert generation IDs reject stale chunks after cancellation and message capacity applies backpressure.
+- [x] Inspect the installed `pocket_tts/models/tts_model.py` signature for `generate_audio_stream` and its copied voice-state semantics. Do not guess an API from a different package version.
+- [x] Use `multiprocessing.get_context('spawn')` so the worker cannot inherit a live serial descriptor. Load January English/Azelma once per process, set the bounded CPU thread count inside it, and stream yielded arrays through a bounded IPC channel. Keep Torch globals/RNG separate from emotion inference.
+- [x] Keep the model call serialized. Cancellation drops old-generation chunks immediately; if native generation cannot be interrupted promptly, bound shutdown and restart the owned worker rather than leaking it.
+- [x] Test chunk-before-final delivery, finite PCM/rate validation, cold/warm deterministic seeds, cancellation, worker failure and shutdown. Run `uv run pytest tests/speech/test_tts_worker.py tests/speech/test_synthesis.py -q`.
+- [x] Commit `feat: stream local Azelma PCM from an isolated worker`.
 
 ## Task 4: Play a bounded PCM stream and derive mouth timing
 
@@ -88,11 +93,11 @@ The checked-in support set (`config/affect/intent-filter-v1.yaml`) and affect-to
 
 **Interfaces:** `PcmTimeline.append(chunk)` assigns contiguous absolute sample offsets and records clause-onset cues. `frame_at(sample_index) -> SpeechFrame` reads committed envelope/affect state. `played_sample` tracks the actual DAC clock separately from generated/queued counts. `SpeechStreamSession.run(clauses: AsyncIterable[SpeechClause], cancel: asyncio.Event) -> dict[str, object]` records the run outcome and metrics.
 
-- [ ] Write boundary tests before implementation: feeding identical PCM as one array or irregular chunks must produce the same 20 ms RMS/envelope frames. Preserve incomplete windows and attack/release state between chunks; retain fixed RMS calibration 0.01 gate/0.06 full open.
-- [ ] Implement a bounded ring buffer with an initial target of 200 ms queued PCM, enough for 100 ms mouth lead plus output scheduling margin. Account for generated, queued and DAC-played samples separately. Record buffer depth and actual first-audible latency.
-- [ ] The callback copies available PCM only. Precompute envelope/cues outside it. At audible sample `s`, mouth reads aperture at `s + round(0.1 * rate)`; affect and ownership read at `s`. Do not move the face merely because a future clause has been generated.
-- [ ] Define starvation explicitly: pending deliberate silence is represented in the sample timeline with closed aperture; a device underflow aborts the utterance. Never replay a stale mouth frame or treat zero-filled accidental underflow as successful playback.
-- [ ] Test the key overlap with synchronization events, not sleeps:
+- [x] Write boundary tests before implementation: feeding identical PCM as one array or irregular chunks must produce the same 20 ms RMS/envelope frames. Preserve incomplete windows and attack/release state between chunks; retain fixed RMS calibration 0.01 gate/0.06 full open.
+- [x] Implement a bounded ring buffer with an initial target of 200 ms queued PCM, enough for 100 ms mouth lead plus output scheduling margin. Account for generated, queued and DAC-played samples separately. Record buffer depth and actual first-audible latency.
+- [x] The callback copies available PCM only. Precompute envelope/cues outside it. At audible sample `s`, mouth reads aperture at `s + round(0.1 * rate)`; affect and ownership read at `s`. Do not move the face merely because a future clause has been generated.
+- [x] Define starvation explicitly: pending deliberate silence is represented in the sample timeline with closed aperture; a device underflow aborts the utterance. Never replay a stale mouth frame or treat zero-filled accidental underflow as successful playback.
+- [x] Test the key overlap with synchronization events, not sleeps:
 
 ```python
 # Fake producer yields initial PCM and then blocks before its final chunk.
@@ -101,8 +106,8 @@ The checked-in support set (`config/affect/intent-filter-v1.yaml`) and affect-to
 # Then release them, finish playback, and assert one terminal ownership release.
 ```
 
-- [ ] Test cancellation across all three queues, no stale-generation PCM/targets, bounded memory with a stalled consumer, short utterances smaller than the prebuffer, clip tail/closure, and worker/device failure propagation. Include the existing lead and playback tests.
-- [ ] Commit `feat: play incremental speech on a buffered DAC timeline`.
+- [x] Test cancellation across all three queues, no stale-generation PCM/targets, bounded memory with a stalled consumer, short utterances smaller than the prebuffer, clip tail/closure, and worker/device failure propagation. Include the existing lead and playback tests.
+- [x] Commit `feat: play incremental speech on a buffered DAC timeline`.
 
 ## Task 5: Compose live emotion motion with speech
 
@@ -111,12 +116,12 @@ The checked-in support set (`config/affect/intent-filter-v1.yaml`) and affect-to
 
 **Interfaces:** `ExpressionBridge.advance(frame: SpeechFrame, played_sample: int, sample_rate: int) -> TargetUpdate` maintains a persistent `GeneratorState`, calls `StreamingMotionGenerator.replan(...)` only when another accepted prefix is needed, and returns the expression at the audible position. Feed that proposal into existing `compose_frame` using the led mouth aperture and current speech ownership.
 
-- [ ] Bind the generation's sample origin to one monotonic clock. Preserve accepted-prefix state, RNG, event phases and complete sparse pose across clauses; a replan must not restart a blink/gesture or advance acceptance through unplayed speculative time.
-- [ ] Add a two-clause regression where clause 2 is fully generated ahead of playback. Assert its affect does not appear before its audible sample boundary and does appear at/after it.
-- [ ] Test simultaneous speech and an accepted blink: mouth follows the speech aperture; eyelids retain the blink phase; mouth corners/forehead/eyes retain their expression targets. Current speech weight governs release back to baseline.
-- [ ] Test an emotion transition during an existing event, supported versus fallback intent, restored-state replay, cancellation during lookahead, and stale-source handling. Keep authored demonstrations distinctly identified if Task 1 found no fitted model.
-- [ ] Render one retained composed replay before physical execution. Record model/config/seed identities, all 11 channel proposals, audio samples and per-channel derivative bounds. Compare the mouth trace against the accepted hardware profile.
-- [ ] Run the expression bridge tests and `tests/motion/test_speech_streaming.py`, `test_streaming.py`, `test_composed_streaming.py`; commit `feat: compose speech and expressions on the playback clock`.
+- [x] Bind the generation's sample origin to one monotonic clock. Preserve accepted-prefix state, RNG, event phases and complete sparse pose across clauses; a replan must not restart a blink/gesture or advance acceptance through unplayed speculative time.
+- [x] Add a two-clause regression where clause 2 is fully generated ahead of playback. Assert its affect does not appear before its audible sample boundary and does appear at/after it.
+- [x] Test simultaneous speech and an accepted blink: mouth follows the speech aperture; eyelids retain the blink phase; mouth corners/forehead/eyes retain their expression targets. Current speech weight governs release back to baseline.
+- [x] Test an emotion transition during an existing event, supported versus fallback intent, restored-state replay, cancellation during lookahead, and stale-source handling. Keep authored demonstrations distinctly identified if Task 1 found no fitted model.
+- [x] Render one retained composed replay before physical execution. Record model/config/seed identities, all 11 channel proposals, audio samples and per-channel derivative bounds. Compare the mouth trace against the accepted hardware profile.
+- [x] Run the expression bridge tests and `tests/motion/test_speech_streaming.py`, `test_streaming.py`, `test_composed_streaming.py`; commit `feat: compose speech and expressions on the playback clock`.
 
 ## Task 6: Execute mouth plus selected facial servos
 

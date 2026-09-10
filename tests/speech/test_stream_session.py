@@ -46,8 +46,13 @@ class EventPlayback:
         self.first, self.release = first, release
 
     async def __call__(self, timeline, ring, emit, cancel, metrics):
-        sample = 0
-        await emit(timeline.led_frame(sample))
+        # Model a real first audible callback: consume committed PCM before
+        # signaling the observer. Dispatching a frame alone is not playback.
+        output = np.empty((480, 1), np.float32)
+        assert ring.read_into(output) == 480
+        assert np.any(output)
+        sample = 480
+        await emit(timeline.led_frame(0))
         self.first.set()
         await self.release.wait()
         while not ring.finished or ring.depth:

@@ -116,3 +116,14 @@ def test_replanning_does_not_accumulate_absolute_blink_or_gaze_offsets():
     assert max(abs(v) for v in gaze) <= 0.16 + 1e-6
     assert any(v < -0.1 for v in eyelids)
     assert any(abs(v) < 1e-4 for v in eyelids[100:])
+
+
+def test_stale_source_completes_accepted_blink_without_new_events():
+    live = bridge()
+    eyelids = []
+    for sample in range(0, 24000 * 6, 480):
+        update = live.advance(frame(sample), sample, 24000, source_fresh=sample < 24000)
+        eyelids.append(positions(update)["upper_eyelids"])
+    assert min(eyelids[:80]) < -0.1
+    assert all(abs(value) < 1e-4 for value in eyelids[150:])
+    assert live.state.filtered_intent.support_status.value == "stale"
