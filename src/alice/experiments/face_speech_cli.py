@@ -1,0 +1,383 @@
+"""Incremental speech with guarded selected facial servos; simulated by default."""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import hashlib
+import json
+import secrets
+import shutil
+import signal
+import subprocess
+import sys
+import time
+from collections.abc import AsyncIterator, Callable
+from pathlib import Path
+from threading import Event
+from typing import Any
+
+from alice.contracts.speech_stream import ClauseSequence, SpeechClause
+from alice.experiments.jaw_trial_cli import _check_owners, _exclusive_transport, _write
+from alice.experiments.motion_readiness import (
+    inspect_controller_identity,
+    load_readiness_device_config,
+)
+from alice.hardware.face_scope import FACE_CHANNELS, face_manifest, face_profiles
+from alice.hardware.maestro_face import MaestroFaceAdapter
+from alice.hardware.manifest import HardwareManifest, load_manifest
+from alice.safety.supervisor import (
+    OperatorApproval,
+    PreflightEvidence,
+    SafetySupervisor,
+)
+from alice.speech.composer import compose_frame
+from alice.speech.expression_bridge import ExpressionBridge
+from alice.speech.face_runtime import FaceRuntime, SimulatedFaceDriver
+from alice.speech.face_stream import FaceCommandStream
+from alice.speech.jaw_trial import trial_limits
+from alice.speech.stream_cli import _derivatives, _preview, _RecordingWorker
+from alice.speech.stream_playback import SimulatedPlayback, SoundDevicePlayback
+from alice.speech.stream_session import SpeechStreamSession
+from alice.speech.timeline import SpeechFrame
+from alice.speech.tts_worker import PocketTtsWorker
+
+ROOT = Path(__file__).resolve().parents[3]
+
+
+def _factory(
+    full: HardwareManifest,
+    generation: str,
+    hardware: bool,
+    report: dict[str, Any],
+    output: Path,
+) -> Callable[[Event], FaceCommandStream]:
+    def create(cancel: Event) -> FaceCommandStream:
+        scope = face_manifest(full)
+        gate = SafetySupervisor(
+            manifest=scope, clock=time.monotonic_ns, limits=trial_limits()
+        )
+        token = secrets.token_urlsafe(32)
+        raw: MaestroFaceAdapter | None = None
+        approval_time = time.monotonic_ns()
+        driver: MaestroFaceAdapter | SimulatedFaceDriver
+        try:
+            if hardware:
+                devices = load_readiness_device_config(
+                    ROOT / "config/experiments/streaming-motion-readiness-v1.yaml"
+                )
+                identity = inspect_controller_identity(
+                    full.controller.command_device_path, devices.controller
+                )
+                report["controller_identity"] = identity.model_dump(mode="json")
+                report["interface_ownership"] = _check_owners(full)
+                raw = MaestroFaceAdapter(
+                    manifest=scope,
+                    stable_device_path=full.controller.command_device_path,
+                    expected_controller_serial="00037376",
+                    required_enable_token=token,
+                    clock=time.monotonic_ns,
+                    permit_verifier=gate.actuation_permit_verifier,
+                    transport_factory=_exclusive_transport,
+                    timeout_seconds=0.05,
+                    settle_timeout_ns=500_000_000,
+                    poll_interval_ns=5_000_000,
+                )
+                raw.open(token, cancel=cancel)
+                before = raw.read_only_preflight(tuple(FACE_CHANNELS))
+                report["preflight"] = before.model_dump(mode="json")
+                _write(output / "startup.json", report)
+                if before.controller_error_register:
+                    raise RuntimeError("Maestro error register is not clear")
+                snapshot = raw.initialize_disabled_home(token)
+                report["initialized_preflight"] = snapshot.model_dump(mode="json")
+                report["disabled_pwm_start_is_not_measured_mechanics"] = True
+                driver = raw
+            else:
+                driver = SimulatedFaceDriver(scope)
+                snapshot = driver.read_only_preflight(tuple(FACE_CHANNELS))
+            run_id = f"face-{time.time_ns()}"
+            evidence = PreflightEvidence(
+                run_id=run_id,
+                hardware_id=scope.hardware_id,
+                calibration_sha256=scope.calibration_sha256,
+                controller_serial=scope.controller.serial_number,
+                requirement_results={
+                    r.requirement_id: True for r in scope.preflight_requirements
+                },
+                competing_process_detected=False,
+                controller_error_codes=(),
+                home_verified=True,
+                observed_monotonic_ns=snapshot.observed_monotonic_ns,
+            )
+            if (
+                not gate.preflight(evidence).accepted
+                or not gate.arm(
+                    OperatorApproval(
+                        approval_id="explicit-attended-run"
+                        if hardware
+                        else "simulated",
+                        run_id=run_id,
+                        confirmed_monotonic_ns=approval_time,
+                    )
+                ).accepted
+            ):
+                raise RuntimeError("selected-face preflight/arming rejected")
+            if raw is not None:
+                raw.enable_fast_jaw_response(token)
+                report["jaw_response_override"] = raw.jaw_response_override
+            _write(output / "startup.json", report)
+            return FaceCommandStream(
+                gate, driver, token, full, generation_id=generation
+            )
+        except BaseException:
+            if raw is not None:
+                raw.close()
+            raise
+
+    return create
+
+
+async def _run(
+    clauses: list[SpeechClause],
+    output: Path,
+    *,
+    hardware: bool,
+    play: bool,
+    report: dict[str, Any],
+) -> None:
+    first = clauses[0]
+    bridge = ExpressionBridge(
+        config_root=ROOT / "config",
+        seed=first.seed,
+        generation_id=first.generation_id,
+        mode="authored",
+    )
+    full = load_manifest(ROOT / "hardware/alice-face-v1.yaml")
+    _write(output / "source-hardware.json", full.model_dump(mode="json"))
+    _write(output / "active-hardware.json", face_manifest(full).model_dump(mode="json"))
+    _write(
+        output / "channel-profiles.json",
+        {n: c.model_dump(mode="json") for n, c in face_profiles().items()},
+    )
+    worker = PocketTtsWorker(offline=True)
+    recorder = _RecordingWorker(worker, output)
+    rows: list[dict[str, Any]] = []
+    cancel = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    session: SpeechStreamSession | None = None
+
+    def stop_audio() -> None:
+        if session is not None and session.ring is not None:
+            session.ring.abort()
+        loop.call_soon_threadsafe(cancel.set)
+
+    runtime = FaceRuntime(
+        _factory(full, first.generation_id, hardware, report, output),
+        on_fault=stop_audio,
+    )
+
+    def stop_trial() -> None:
+        stop_audio()
+        runtime.abort("audio/session cancelled")
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, stop_trial)
+
+    def emit(frame: SpeechFrame) -> None:
+        source_time = time.monotonic_ns()
+        # Terminal ownership release is evidence, never permission for Home.
+        if frame.speech_weight == 0:
+            rows.append(
+                {
+                    "frame": frame.model_dump(),
+                    "terminal_release": True,
+                    "observed_monotonic_s": time.monotonic(),
+                }
+            )
+            return
+        if frame.sample_index / (recorder.sample_rate or 24000) > 10:
+            raise RuntimeError("face trial exceeded ten seconds of audio")
+        expression = bridge.advance(
+            frame, frame.sample_index, recorder.sample_rate or 24000
+        )
+        composed = compose_frame(expression, frame, bridge.sync_config)
+        runtime.offer(
+            composed,
+            first.generation_id,
+            frame.sample_index,
+            source_monotonic_ns=source_time,
+        )
+        rows.append(
+            {
+                "frame": frame.model_dump(),
+                "proposal": composed.model_dump(),
+                "observed_monotonic_s": time.monotonic(),
+            }
+        )
+
+    async def source() -> AsyncIterator[SpeechClause]:
+        for clause in clauses:
+            yield clause
+
+    session = SpeechStreamSession(
+        worker=recorder,
+        emit=emit,
+        config=bridge.sync_config,
+        playback=SoundDevicePlayback(fault_signal=runtime.cancel_signal)
+        if play or hardware
+        else SimulatedPlayback(),
+        on_abort=lambda: runtime.abort("audio pipeline aborted"),
+    )
+    completed = False
+    runtime.start()
+    try:
+        if not await asyncio.to_thread(runtime.ready.wait, 5):
+            raise RuntimeError("face startup deadline exceeded")
+        runtime.raise_if_failed()
+        report["outcome"] = "running"
+        _write(output / "manifest.json", report)
+        await session.run(source(), cancel)
+        runtime.raise_if_failed()
+        if session.metrics["outcome"] != "completed":
+            raise RuntimeError(f"audio {session.metrics['outcome']}")
+        runtime.complete()
+        if not await asyncio.to_thread(runtime.done.wait, 8):
+            raise RuntimeError("face completion deadline exceeded")
+        runtime.raise_if_failed()
+        completed = True
+        report["outcome"] = "completed"
+    finally:
+        primary = sys.exception()
+        cleanup_errors: list[str] = []
+        if not completed:
+            runtime.abort("speech did not complete successfully")
+        try:
+            await asyncio.to_thread(runtime.join)
+        except BaseException as exc:
+            cleanup_errors.append(f"face runtime join: {exc}")
+        try:
+            await worker.close()
+        except BaseException as exc:
+            cleanup_errors.append(f"worker close: {exc}")
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.remove_signal_handler(sig)
+        samples = (
+            session.timeline.generated_samples if session.timeline else recorder.samples
+        )
+        recorder.close_recording(max(0, samples - recorder.samples))
+        _write(output / "chunks.json", recorder.chunks)
+        _write(output / "audio-metrics.json", session.metrics)
+        (output / "composed.jsonl").write_text(
+            "".join(json.dumps(r) + "\n" for r in rows)
+        )
+        motion = [r for r in rows if "proposal" in r]
+        _write(output / "proposal-derivatives.json", _derivatives(motion))
+        _preview(output, recorder, motion, bridge)
+        (output / "expression-state.json").write_text(bridge.snapshot())
+        stream = runtime.stream
+        (output / "commands.jsonl").write_text(
+            "".join(json.dumps(r) + "\n" for r in stream.records) if stream else ""
+        )
+        report.update(
+            audio=session.metrics,
+            expression=bridge.identity,
+            controller_home_confirmed=bool(stream and stream.home_confirmed),
+            consumed_source_revisions=len(stream.consumed_revisions) if stream else 0,
+            physical_sync_measured=False,
+            operator_feedback=None,
+        )
+        report["cleanup_errors"] = cleanup_errors
+        if cleanup_errors:
+            if primary is not None:
+                primary.add_note("; ".join(cleanup_errors))
+            else:
+                raise RuntimeError("; ".join(cleanup_errors))
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--clauses", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--play", action="store_true", help="Real speakers, simulated face"
+    )
+    parser.add_argument(
+        "--enable-hardware",
+        action="store_true",
+        help="Explicit attended selected-face run",
+    )
+    args = parser.parse_args(argv)
+    output: Path | None = None
+    report: dict[str, Any] = {
+        "schema_version": "face-speech-run/v1",
+        "outcome": "preparing",
+        "actuation_mode": "hardware" if args.enable_hardware else "simulated",
+        "selected_channels": FACE_CHANNELS,
+        "electrical_margin_verified": False,
+        "source": "Authored text/expression and generated audio; no participant data.",
+    }
+    try:
+        raw_source = args.clauses.read_bytes()
+        clauses = [
+            SpeechClause.model_validate_json(line)
+            for line in raw_source.splitlines()
+            if line.strip()
+        ]
+        ledger = ClauseSequence()
+        for clause in clauses:
+            ledger.commit(clause)
+        ledger.finish()
+        args.output.mkdir(parents=True, exist_ok=False)
+        output = args.output
+        (output / "source.jsonl").write_bytes(raw_source)
+        shutil.copytree(ROOT / "config", output / "config")
+        shutil.copytree(
+            ROOT / "src/alice",
+            output / "code/alice",
+            ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+        )
+        for name in ("uv.lock", "pyproject.toml"):
+            shutil.copyfile(ROOT / name, output / name)
+        shutil.copyfile(
+            ROOT / "hardware/bringup/face-speech-trial-v1.md", output / "procedure.md"
+        )
+        report["code_revision"] = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        report["input_sha256"] = hashlib.sha256(raw_source).hexdigest()
+        print(
+            f"Selected face channels {list(FACE_CHANNELS.values())}; "
+            f"mode={report['actuation_mode']}; evidence={output}",
+            flush=True,
+        )
+        asyncio.run(
+            _run(
+                clauses,
+                output,
+                hardware=args.enable_hardware,
+                play=args.play,
+                report=report,
+            )
+        )
+        return 0
+    except (Exception, KeyboardInterrupt) as exc:
+        report.update(outcome="failed", error=f"{type(exc).__name__}: {exc}")
+        print(f"alice-face-speech: {report['error']}", file=sys.stderr, flush=True)
+        return 130 if isinstance(exc, KeyboardInterrupt) else 2
+    finally:
+        if output is not None:
+            report["artifacts"] = {
+                str(p.relative_to(output)): hashlib.sha256(p.read_bytes()).hexdigest()
+                for p in sorted(output.rglob("*"))
+                if p.is_file() and p != output / "manifest.json"
+            }
+            _write(output / "manifest.json", report)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

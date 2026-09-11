@@ -120,3 +120,67 @@ def test_device_underflow_aborts_and_closes(monkeypatch):
         assert metrics["underflows"] == 1
 
     asyncio.run(check())
+
+
+def test_callback_revokes_shared_signal_while_emit_is_in_flight(monkeypatch):
+    signal = threading.Event()
+    devices = []
+
+    class Abort(Exception):
+        pass
+
+    class Stream:
+        def __init__(self, **kwargs):
+            devices.append(self)
+            self.callback = kwargs["callback"]
+            self.active = False
+            self.time = 10.0
+
+        def start(self):
+            self.active = True
+            self.callback(
+                np.empty((480, 1), np.float32),
+                480,
+                SimpleNamespace(outputBufferDacTime=10),
+                None,
+            )
+
+        def abort(self):
+            self.active = False
+
+        def close(self):
+            pass
+
+    monkeypatch.setitem(
+        sys.modules,
+        "sounddevice",
+        SimpleNamespace(
+            OutputStream=Stream,
+            CallbackAbort=Abort,
+            CallbackStop=Exception,
+        ),
+    )
+
+    async def check():
+        timeline, pcm = prepared()
+        ring = PcmRingBuffer(24000)
+        await ring.put(pcm)
+        ring.finish()
+
+        async def emit(frame):
+            with pytest.raises(Abort):
+                devices[0].callback(
+                    np.empty((480, 1), np.float32),
+                    480,
+                    SimpleNamespace(outputBufferDacTime=10.02),
+                    "underflow",
+                )
+            assert signal.is_set(), "serial authority must revoke before emit returns"
+            devices[0].active = False
+
+        with pytest.raises(RuntimeError, match="underflow"):
+            await SoundDevicePlayback(fault_signal=signal)(
+                timeline, ring, emit, asyncio.Event(), {}
+            )
+
+    asyncio.run(check())

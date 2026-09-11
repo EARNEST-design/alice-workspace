@@ -43,6 +43,7 @@ class SpeechStreamSession:
         playback: PlaybackDriver | None = None,
         prebuffer_s: float = 0.2,
         capacity_s: float = 2.0,
+        on_abort: Callable[[], None] | None = None,
     ) -> None:
         if not 0.2 <= prebuffer_s <= capacity_s <= 2.0:
             raise ValueError("invalid prebuffer or PCM capacity")
@@ -58,6 +59,7 @@ class SpeechStreamSession:
         self.timeline: PcmTimeline | None = None
         self.metrics: dict[str, object] = {}
         self._used = False
+        self._on_abort = on_abort
 
     async def run(
         self, clauses: AsyncIterable[SpeechClause], cancel: asyncio.Event
@@ -70,6 +72,8 @@ class SpeechStreamSession:
         queue: asyncio.Queue[SpeechClause | None] = asyncio.Queue(maxsize=2)
         ready = asyncio.Event()
         last_sample = 0
+        abort_notified = False
+        stage_error: BaseException | None = None
         self.metrics = {
             "outcome": "running",
             "started_monotonic_s": started,
@@ -81,13 +85,24 @@ class SpeechStreamSession:
         }
 
         def invalidate_audio() -> None:
+            nonlocal abort_notified
             if self.ring is not None:
                 self.ring.abort()
+            if not abort_notified:
+                abort_notified = True
+                if self._on_abort is not None:
+                    self._on_abort()
 
         async def guarded(stage: Awaitable[None]) -> None:
+            nonlocal stage_error
             try:
                 await stage
-            except BaseException:
+            except BaseException as error:
+                if (
+                    not isinstance(error, asyncio.CancelledError)
+                    and stage_error is None
+                ):
+                    stage_error = error
                 # Sibling faults must stop callback PCM before TaskGroup waits
                 # for an in-flight model/consumer thread to join.
                 invalidate_audio()
@@ -174,6 +189,8 @@ class SpeechStreamSession:
         cancelled = asyncio.create_task(cancel.wait())
         try:
             await asyncio.wait((work, cancelled), return_when=asyncio.FIRST_COMPLETED)
+            if stage_error is not None:
+                raise stage_error
             if cancel.is_set():
                 self.metrics["outcome"] = "cancelled"
                 invalidate_audio()

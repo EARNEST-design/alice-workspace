@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Awaitable, Callable
+from threading import Event
 from types import SimpleNamespace
 from typing import Any
 
@@ -51,6 +52,13 @@ class SimulatedPlayback:
 
 
 class SoundDevicePlayback:
+    def __init__(self, *, fault_signal: Event | None = None) -> None:
+        self.fault_signal = fault_signal
+
+    def _signal_fault(self) -> None:
+        if self.fault_signal is not None:
+            self.fault_signal.set()
+
     async def __call__(
         self,
         timeline: PcmTimeline,
@@ -67,6 +75,9 @@ class SoundDevicePlayback:
         def callback(out: Any, frames: int, timing: Any, status: Any) -> None:
             result = player.callback(out, frames, timing, status)
             if result == "abort":
+                # Signal only: the serial owner/watchdog handles closure.
+                # No model or serial I/O occurs inside this callback.
+                self._signal_fault()
                 raise sd.CallbackAbort
             if result == "stop":
                 raise sd.CallbackStop
@@ -84,8 +95,12 @@ class SoundDevicePlayback:
         try:
             stream = await asyncio.shield(creation)
         except asyncio.CancelledError:
+            self._signal_fault()
             stream = await creation
             await asyncio.to_thread(stream.close)
+            raise
+        except BaseException:
+            self._signal_fault()
             raise
         try:
             starting = asyncio.create_task(asyncio.to_thread(stream.start))
@@ -97,6 +112,7 @@ class SoundDevicePlayback:
             last_sample = -1
             while stream.active:
                 if cancel.is_set():
+                    self._signal_fault()
                     return
                 if player.error:
                     raise RuntimeError(player.error)
@@ -120,6 +136,9 @@ class SoundDevicePlayback:
             if not ring.finished or ring.depth:
                 raise RuntimeError("audio device stopped before the stream finished")
             metrics["played_samples"] = player.submitted_samples
+        except BaseException:
+            self._signal_fault()
+            raise
         finally:
             metrics["underflows"] = player.underflows
             await asyncio.to_thread(stream.abort)
