@@ -73,6 +73,8 @@ class FaceRuntime:
         self.ready, self.done = Event(), Event()
         self._stop, self._success, self._has_source = Event(), Event(), Event()
         self._error_lock = Lock()
+        self._hold_pose: TargetUpdate | None = None
+        self._hold_s = 0.0
         self.error: BaseException | None = None
         self._thread = Thread(target=self._run, name="face-serial-owner", daemon=True)
         self._watchdog = Thread(target=self._watch, name="face-watchdog", daemon=True)
@@ -118,8 +120,21 @@ class FaceRuntime:
         )
         self._has_source.set()
 
-    def complete(self) -> None:
+    def complete(
+        self,
+        *,
+        hold_pose: TargetUpdate | None = None,
+        hold_s: float = 0,
+    ) -> None:
+        """Called by the coordinator only after successful audio completion."""
         self.raise_if_failed()
+        if not 0 <= hold_s <= 2 or (hold_s > 0) != (hold_pose is not None):
+            raise ValueError("post-speech pose requires a hold in (0, 2] seconds")
+        if self.stream is None or self._success.is_set() or self.done.is_set():
+            raise RuntimeError("face completion is not available")
+        if hold_pose is not None:
+            self.stream.pose_positions(hold_pose)
+        self._hold_pose, self._hold_s = hold_pose, hold_s
         self._success.set()
 
     def raise_if_failed(self) -> None:
@@ -154,6 +169,23 @@ class FaceRuntime:
                 self._stop.wait(0.002)
             if self._stop.is_set():
                 return
+            if self._hold_pose is not None:
+                deadline = time.monotonic() + 6
+                settled: float | None = None
+                while not self._stop.is_set():
+                    if time.monotonic() > deadline:
+                        raise RuntimeError("post-speech pose exceeded deadline")
+                    self.stream.step(hold_pose=self._hold_pose)
+                    if self.stream.at_pose(self._hold_pose):
+                        if settled is None:
+                            settled = time.monotonic()
+                        if time.monotonic() - settled >= self._hold_s:
+                            break
+                    else:
+                        settled = None
+                    self._stop.wait(0.002)
+                if self._stop.is_set():
+                    return
             deadline = time.monotonic() + 6
             while not self.stream.at_home:
                 if self._stop.is_set():

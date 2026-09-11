@@ -61,3 +61,41 @@ worker cleanup, callback underflow during inference, and full composed replay.
 The CLI defaults to simulated speakers and servos; real hardware is explicit.
 Authored expressions remain labeled authored, and no fitted emotion package or
 live provider-specific LLM adapter is claimed.
+
+## Operator-guided visible comparison
+
+After two clean physical runs, the operator described timing as okay but wanted
+faster mouth motion and could not see the other expression. Preserve those runs
+as functional execution evidence, not subjective acceptance. The visible
+comparison increases only the corner extent to .8, inside the previously
+operator-accepted 100% smile/frown poses, retaining .08/.8/4 derivative caps.
+Authored intensity/scale become 1 and transition .8 s. Envelope attack/release
+become 10/30 ms with no expression jaw bias; jaw speed caps and 100 ms lead stay
+unchanged. Original policy and sync files remain the baseline. A CLI config-root
+snapshot makes the selected version explicit and reproducible.
+
+The longer Home ramp exposed a repeatable 2.626 ms Python generation-1 garbage
+collection pause during command planning. A plan that has already consumed more
+than 1 ms is now recorded as discarded before any serial call; sent state remains
+unchanged, and the next step recomputes using current elapsed time. Adapter
+admission still enforces 2 ms before every write. Repeated skipped plans still
+hit the per-channel 250 ms gap limit and fault. The qualifying device-free run
+completed after one discarded plan, with all channels Home and zero underflows.
+
+
+## Full blink and closed-mouth sad pose
+
+The stronger attended trial exposed two separate presentation issues: procedural
+blinks reached only about -.4, and speech-driven jaw opening obscured sadness.
+The optional full-blink policy now reaches calibrated -1 with a long enough
+plateau, using lid-specific limits (step .1, rate 1.5/s, acceleration 8/s²).
+The original event config remains unchanged. The foreground jaw still follows
+audio during speech. An explicit final-negative trial option asks the trusted
+coordinator to enter a bounded post-speech pose only after successful playback.
+It closes the mouth, holds the complementary frown corners, clears the lids,
+and then returns to Home. This phase has no audio sample/source freshness
+claim; its records identify it separately. Calibration, command derivatives,
+serial progress, run duration, cancellation and controller checks remain active.
+The hold begins after commanded rest and matching latest per-channel PWM readback.
+A mismatch restarts the dwell timer; the phase deadline stays fixed. This is
+controller-output evidence, not measured mechanical arrival.

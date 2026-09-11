@@ -141,3 +141,115 @@ def test_runtime_fault_aborts_active_audio_ring(fault):
         release.set()
         runtime.abort("test cleanup")
         runtime.join()
+
+
+def test_success_holds_closed_mouth_frown_then_returns_home():
+    from alice.speech.face_runtime import FaceRuntime
+
+    runtime = FaceRuntime(factory, on_fault=lambda: None)
+    runtime.start()
+    assert runtime.ready.wait(2)
+    pose = TargetUpdate(
+        offset_s=0,
+        targets=(
+            ActuatorTarget(actuator_name="mouth_open", normalized_position=-1),
+            ActuatorTarget(actuator_name="left_mouth_corner", normalized_position=-0.4),
+            ActuatorTarget(actuator_name="right_mouth_corner", normalized_position=0.4),
+        ),
+    )
+    try:
+        runtime.complete(hold_pose=pose, hold_s=0.1)
+        assert runtime.done.wait(5)
+        runtime.raise_if_failed()
+        records = runtime.stream.records
+        closed = [
+            r["status"]["sent_monotonic_ns"]
+            for r in records
+            if r.get("phase") == "post-speech"
+            and "status" in r
+            and r["request"]["targets"][0]["actuator_name"] == "mouth_open"
+            and r["request"]["targets"][0]["normalized_position"] == -1
+        ]
+        assert closed and (max(closed) - min(closed)) / 1e9 >= 0.1
+        assert runtime.stream.home_confirmed
+        assert runtime.stream.states["left_mouth_corner"].position == 0
+    finally:
+        runtime.abort("test cleanup")
+        runtime.join()
+
+
+def test_cancel_during_closed_pose_stops_without_home_or_restoration():
+    from alice.speech.face_runtime import FaceRuntime
+
+    runtime = FaceRuntime(factory, on_fault=lambda: None)
+    runtime.start()
+    assert runtime.ready.wait(2)
+    pose = TargetUpdate(
+        offset_s=0,
+        targets=(ActuatorTarget(actuator_name="mouth_open", normalized_position=-1),),
+    )
+    try:
+        runtime.complete(hold_pose=pose, hold_s=1)
+        deadline = time.monotonic() + 2
+        while not runtime.stream.at_pose(pose) and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert runtime.stream.at_pose(pose)
+        runtime.abort("cancel during hold")
+        assert runtime.done.wait(1)
+        with pytest.raises(RuntimeError, match="cancel during hold"):
+            runtime.raise_if_failed()
+        assert runtime.stream.driver.closed
+        assert not runtime.stream.home_confirmed
+        assert not any(r.get("phase") == "home" for r in runtime.stream.records)
+    finally:
+        runtime.abort("cleanup")
+        runtime.join()
+
+
+def test_post_speech_hold_waits_for_controller_pwm_arrival():
+    from alice.speech.face_runtime import FaceRuntime
+
+    def delayed_factory(cancel):
+        stream = factory(cancel)
+        original = stream.driver.stream_face_target
+        closed_started = None
+
+        def delayed_readback(token, request):
+            nonlocal closed_started
+            receipt = original(token, request)
+            if (
+                request.targets[0].actuator_name == "mouth_open"
+                and receipt.target_qus == 4608
+            ):
+                if closed_started is None:
+                    closed_started = time.monotonic()
+                if time.monotonic() - closed_started < 0.3:
+                    return receipt.model_copy(update={"observed_qus": 4800})
+            return receipt
+
+        stream.driver.stream_face_target = delayed_readback
+        return stream
+
+    runtime = FaceRuntime(delayed_factory, on_fault=lambda: None)
+    runtime.start()
+    assert runtime.ready.wait(2)
+    pose = TargetUpdate(
+        offset_s=0,
+        targets=(ActuatorTarget(actuator_name="mouth_open", normalized_position=-1),),
+    )
+    try:
+        runtime.complete(hold_pose=pose, hold_s=0.1)
+        assert runtime.done.wait(3)
+        runtime.raise_if_failed()
+        closed = [
+            r["status"]["sent_monotonic_ns"]
+            for r in runtime.stream.records
+            if r.get("phase") == "post-speech"
+            and "status" in r
+            and r["request"]["targets"][0]["actuator_name"] == "mouth_open"
+            and r["status"]["target_qus"] == 4608
+        ]
+        assert (max(closed) - min(closed)) / 1e9 >= 0.4
+    finally:
+        runtime.abort("cleanup")
+        runtime.join()

@@ -19,11 +19,11 @@ def face_profiles() -> dict[str, JawTrialConfig]:
 
     These are host command limits, not measured mechanical velocity. Only the
     jaw uses the accepted rapid/full-range profile. Others retain firmware
-    settings; lids allow the reviewed -.426 blink, corners the +/- .243 anchor.
+    settings. Lids allow calibrated full closure; corners allow +/- .8.
     """
     profiles = {}
     for name in FACE_CHANNELS:
-        extent = 0.5 if "eyelids" in name else 0.3
+        extent = 0.8 if "mouth_corner" in name else (0.5 if "eyelids" in name else 0.3)
         profiles[name] = JawTrialConfig(
             closed_position=-extent,
             open_position=extent,
@@ -32,6 +32,15 @@ def face_profiles() -> dict[str, JawTrialConfig]:
             max_acceleration_per_s2=4,
             response_time_s=0.18,
         )
+        if "eyelids" in name:
+            profiles[name] = JawTrialConfig(
+                closed_position=-1,
+                open_position=1,
+                max_step=0.1,
+                max_rate_per_s=1.5,
+                max_acceleration_per_s2=8,
+                response_time_s=0.1,
+            )
     profiles["mouth_open"] = JawTrialConfig(
         closed_position=-1,
         open_position=1,

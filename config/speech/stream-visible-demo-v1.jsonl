@@ -1,0 +1,2 @@
+{"schema_version": "speech-clause/v1", "generation_id": "authored-demo-29", "clause_id": "welcome", "sequence": 0, "text": "Hello! I am happy to see you.", "vector": [0.7, 0.3, 0.0], "intensity": 1.0, "seed": 29, "end_of_response": false}
+{"schema_version": "speech-clause/v1", "generation_id": "authored-demo-29", "clause_id": "concern", "sequence": 1, "text": "That sounds difficult. Let us work through it together.", "vector": [-0.6, 0.1, 0.0], "intensity": 1.0, "seed": 30, "end_of_response": true}

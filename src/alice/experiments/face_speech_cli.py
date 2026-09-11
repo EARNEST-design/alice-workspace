@@ -17,6 +17,8 @@ from pathlib import Path
 from threading import Event
 from typing import Any
 
+from alice.contracts.actuation import ActuatorTarget
+from alice.contracts.motion import TargetUpdate
 from alice.contracts.speech_stream import ClauseSequence, SpeechClause
 from alice.experiments.jaw_trial_cli import _check_owners, _exclusive_transport, _write
 from alice.experiments.motion_readiness import (
@@ -145,10 +147,11 @@ async def _run(
     hardware: bool,
     play: bool,
     report: dict[str, Any],
+    sad_hold_s: float = 0,
 ) -> None:
     first = clauses[0]
     bridge = ExpressionBridge(
-        config_root=ROOT / "config",
+        config_root=output / "config",
         seed=first.seed,
         generation_id=first.generation_id,
         mode="authored",
@@ -241,8 +244,26 @@ async def _run(
         runtime.raise_if_failed()
         if session.metrics["outcome"] != "completed":
             raise RuntimeError(f"audio {session.metrics['outcome']}")
-        runtime.complete()
-        if not await asyncio.to_thread(runtime.done.wait, 8):
+        hold_pose = None
+        if sad_hold_s:
+            hold_pose = TargetUpdate(
+                offset_s=0,
+                targets=(
+                    ActuatorTarget(actuator_name="mouth_open", normalized_position=-1),
+                    ActuatorTarget(
+                        actuator_name="left_mouth_corner", normalized_position=-0.8
+                    ),
+                    ActuatorTarget(
+                        actuator_name="right_mouth_corner", normalized_position=0.8
+                    ),
+                ),
+            )
+        report["post_speech_pose"] = (
+            hold_pose.model_dump(mode="json") if hold_pose else None
+        )
+        report["post_speech_hold_s"] = sad_hold_s
+        runtime.complete(hold_pose=hold_pose, hold_s=sad_hold_s)
+        if not await asyncio.to_thread(runtime.done.wait, 14):
             raise RuntimeError("face completion deadline exceeded")
         runtime.raise_if_failed()
         completed = True
@@ -299,6 +320,13 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--clauses", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--config-root", type=Path, default=ROOT / "config")
+    parser.add_argument(
+        "--sad-hold-s",
+        type=float,
+        default=0,
+        help="Hold a closed-mouth frown after the final negative clause (0–2 seconds)",
+    )
     parser.add_argument(
         "--play", action="store_true", help="Real speakers, simulated face"
     )
@@ -328,10 +356,14 @@ def main(argv: list[str] | None = None) -> int:
         for clause in clauses:
             ledger.commit(clause)
         ledger.finish()
+        if not 0 <= args.sad_hold_s <= 2:
+            raise ValueError("sad hold must be between zero and two seconds")
+        if args.sad_hold_s and clauses[-1].vector[0] >= -0.2:
+            raise ValueError("sad hold requires a final authored negative clause")
         args.output.mkdir(parents=True, exist_ok=False)
         output = args.output
         (output / "source.jsonl").write_bytes(raw_source)
-        shutil.copytree(ROOT / "config", output / "config")
+        shutil.copytree(args.config_root, output / "config")
         shutil.copytree(
             ROOT / "src/alice",
             output / "code/alice",
@@ -362,6 +394,7 @@ def main(argv: list[str] | None = None) -> int:
                 hardware=args.enable_hardware,
                 play=args.play,
                 report=report,
+                sad_hold_s=args.sad_hold_s,
             )
         )
         return 0

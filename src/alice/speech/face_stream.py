@@ -129,6 +129,7 @@ class FaceCommandStream:
         self.states = {
             n: ChannelState(gate.committed_targets[n], 0, now) for n in FACE_CHANNELS
         }
+        self.observed_positions = {n: full.actuator(n).home_qus for n in FACE_CHANNELS}
         if any(s.position != 0 for s in self.states.values()):
             raise ValueError("selected-face stream must begin at Home")
         self._started = self.last_progress_ns = now
@@ -190,7 +191,40 @@ class FaceCommandStream:
             self.revoke("invalid or cancelled face source")
             raise
 
-    def step(self, *, home: bool = False, waiting: bool = False) -> None:
+    def pose_positions(self, pose: TargetUpdate) -> dict[str, float]:
+        positions = dict.fromkeys(FACE_CHANNELS, 0.0)
+        for target in pose.targets:
+            name = target.actuator_name
+            if name not in positions:
+                raise ValueError("post-speech pose exceeds selected face scope")
+            profile = self.profiles[name]
+            if (
+                not profile.closed_position
+                <= target.normalized_position
+                <= profile.open_position
+            ):
+                raise ValueError("post-speech pose exceeds channel limits")
+            positions[name] = target.normalized_position
+        return positions
+
+    def at_pose(self, pose: TargetUpdate) -> bool:
+        """Commanded rest with matching latest controller PWM, not mechanics."""
+        positions = self.pose_positions(pose)
+        return all(
+            self.full.actuator(n).target_qus(s.position)
+            == self.full.actuator(n).target_qus(positions[n])
+            == self.observed_positions[n]
+            and abs(s.velocity) < 1e-9
+            for n, s in self.states.items()
+        )
+
+    def step(
+        self,
+        *,
+        home: bool = False,
+        waiting: bool = False,
+        hold_pose: TargetUpdate | None = None,
+    ) -> None:
         try:
             self._check()
             with self._lock:
@@ -200,14 +234,21 @@ class FaceCommandStream:
                     self._sample,
                     self._revision,
                 )
+            if hold_pose is not None:
+                if home or waiting:
+                    raise ValueError("conflicting face phases")
+                positions = self.pose_positions(hold_pose)
+            trusted_phase = home or waiting or hold_pose is not None
             for name, state in self.states.items():
                 self._check()
                 now = self.clock()
-                if not (home or waiting) and (
+                if not trusted_phase and (
                     received is None or not 0 <= now - received <= 250_000_000
                 ):
                     raise RuntimeError("face audio source is stale")
                 dt = (now - state.sent_ns) / 1e9
+                if dt > 0.25:
+                    raise RuntimeError("face channel command gap exceeded")
                 profile = self.profiles[name]
                 if dt < profile.command_interval_s:
                     continue
@@ -229,12 +270,27 @@ class FaceCommandStream:
                     ),
                 )
                 record: dict[str, object] = {
-                    "audio_sample": sample if not (home or waiting) else None,
+                    "audio_sample": sample if not trusted_phase else None,
+                    "phase": "post-speech"
+                    if hold_pose is not None
+                    else ("home" if home else "waiting" if waiting else "speech"),
                     "source_revision": revision,
                     "requested_position": desired,
                     "request": request.model_dump(mode="json"),
                 }
                 self.records.append(record)
+                if self.clock() - now > 1_000_000:
+                    # A Python GC/scheduling pause may consume the 2 ms dispatch
+                    # budget before any I/O. Discard this unsent plan and leave
+                    # sent state untouched; a later step replans from its own
+                    # current clock. The adapter still enforces the full 2 ms
+                    # deadline before writing, and channel gap caps stay active.
+                    self.records[-1] = {
+                        "discarded_plan": record,
+                        "reason": "planning consumed dispatch budget",
+                        "observed_monotonic_ns": self.clock(),
+                    }
+                    continue
                 try:
                     receipt = self.driver.stream_face_target(self.token, request)
                 except FaceTransactionError as exc:
@@ -266,6 +322,7 @@ class FaceCommandStream:
                     velocity,
                     receipt.sent_monotonic_ns,
                 )
+                self.observed_positions[name] = receipt.observed_qus
                 self.last_progress_ns = receipt.reported_monotonic_ns
                 self.consumed_revisions.add(revision)
         except BaseException:

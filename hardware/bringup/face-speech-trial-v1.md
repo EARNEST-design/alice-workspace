@@ -15,18 +15,40 @@ response. Eye gaze 8/10 and head/neck 0/1/2 are excluded.
 | Function | Channel | Calibration min / Home / max (quarter µs) | Trial normalized range | Max step | Max rate /s | Max acceleration /s² | Runtime speed / acceleration |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | Mouth | 6 | 4608 / 5059 / 5440 | -1 to 1 | .4 | 10 | 200 | 0 / 0, restore 0 / 11 |
-| Lower eyelids | 3 | 2880 / 5626 / 6400 | -.5 to .5 | .08 | .8 | 4 | retained 0 / 0 |
-| Upper eyelids | 4 | 3840 / 6173 / 7232 | -.5 to .5 | .08 | .8 | 4 | retained 0 / 0 |
+| Lower eyelids | 3 | 2880 / 5626 / 6400 | -1 to 1 | .1 | 1.5 | 8 | retained 0 / 0 |
+| Upper eyelids | 4 | 3840 / 6173 / 7232 | -1 to 1 | .1 | 1.5 | 8 | retained 0 / 0 |
 | Forehead | 5 | 4032 / 5918 / 6592 | -.3 to .3 | .08 | .8 | 4 | retained 0 / 0 |
-| Left corner | 9 | 5120 / 6499 / 6912 | -.3 to .3 | .08 | .8 | 4 | retained 50 / 10 |
-| Right corner | 11 | 5120 / 5524 / 6912 | -.3 to .3 | .08 | .8 | 4 | retained 50 / 10 |
+| Left corner | 9 | 5120 / 6499 / 6912 | -.8 to .8 | .08 | .8 | 4 | retained 50 / 10 |
+| Right corner | 11 | 5120 / 5524 / 6912 | -.8 to .8 | .08 | .8 | 4 | retained 50 / 10 |
 
-The last software replay reached eyelid -.426 and corner magnitude .243. The
-initial .5/.3 limits contain those proposals with reduced expression dynamics
-(.18 s response). They do not inherit the jaw's full-range rapid profile.
+The first physical trials used .5 eyelid/.3 corner limits and reached corner
+magnitude .243. The operator could not see the expression. The revised corner
+extent is .8, within the 100% smile/frown endpoints previously operator-accepted
+in `hardware/expression-presets.md`; step/rate/acceleration are unchanged.
+Corner/forehead dynamics retain a .18 s response. After the operator reported
+incomplete blinking, lids use a .1 s response and full calibrated closure, with
+independent caps shown above. Firmware settings are retained.
 Minimum per-channel command interval is 40 ms; source and serial progress expire
 at 250 ms. The run is bounded to 25 s, audio to 10 s, and the Home ramp to 6 s.
 The mouth keeps its accepted .03 s response and 100 ms lookahead compensation.
+
+The optional visible comparison uses `authored-expression-visible-v1.json`
+(scale 1, .8 s transition) and `stream-visible-demo-v1.jsonl` (intensity 1).
+`sync-responsive-v1.json` reduces envelope attack/release to 10/30 ms; it does
+not increase jaw speed/acceleration or change the 100 ms lead. The original
+30/60 ms envelope and authored demo remain the comparison baseline. Supply a
+full snapshotted config directory through `--config-root`; only the alternate
+policy/sync files replace their canonical names in that retained directory.
+For the full blink trial, replace `models/face-events-v1.yaml` with
+`speech/face-events-full-blink-v1.yaml`: amplitude 1, onset/release 1 s, hold .8 s.
+These deliberately slow phases allow complete closure under the command caps.
+They are authored trial settings, not a fitted natural blink model.
+
+Add `--sad-hold-s 1.2` for a final negative clause to retain a closed-mouth frown
+after the audio has finished. The owner ramps jaw to -1, corners to -.8/+.8 and
+other selected channels to Home, holds after commanded rest and matching controller PWM, then returns all to
+Home. Hold duration is limited to 2 s; reaching and holding the pose is bounded
+to 6 s. The existing 25 s run cap and fault/cancel stops remain active.
 
 ## Execution and observation
 

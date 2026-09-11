@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import shutil
 import time
 
 import numpy as np
@@ -173,4 +174,81 @@ def test_audio_fault_revokes_face_before_slow_worker_cancel(tmp_path, monkeypatc
         r
         for r in records
         if "request" in r and r["request"]["issued_monotonic_ns"] > fault[0]
+    ]
+
+
+def test_trial_uses_snapshotted_alternate_config_root(tmp_path, monkeypatch):
+    from alice.experiments import face_speech_cli as cli
+
+    monkeypatch.setattr(cli, "PocketTtsWorker", ShortWorker)
+    config = tmp_path / "config"
+    shutil.copytree(ROOT / "config", config)
+    sync = json.loads((config / "speech/sync-hardware-v1.json").read_text())
+    sync["open_position"] = 0.5
+    sync["expression_jaw_weight"] = 0
+    (config / "speech/sync-hardware-v1.json").write_text(json.dumps(sync))
+    output = tmp_path / "configured"
+    assert (
+        cli.main(
+            [
+                "--clauses",
+                str(ROOT / "config/speech/stream-demo-v1.jsonl"),
+                "--config-root",
+                str(config),
+                "--output",
+                str(output),
+            ]
+        )
+        == 0
+    )
+    rows = [json.loads(r) for r in (output / "composed.jsonl").read_text().splitlines()]
+    jaw = [
+        t["normalized_position"]
+        for r in rows
+        if "proposal" in r
+        for t in r["proposal"]["targets"]
+        if t["actuator_name"] == "mouth_open"
+    ]
+    assert 0.4 < max(jaw) <= 0.5
+    assert (
+        json.loads((output / "config/speech/sync-hardware-v1.json").read_text())[
+            "open_position"
+        ]
+        == 0.5
+    )
+
+
+def test_successful_sad_line_holds_closed_frown_after_audio(tmp_path, monkeypatch):
+    from alice.experiments import face_speech_cli as cli
+
+    monkeypatch.setattr(cli, "PocketTtsWorker", ShortWorker)
+    output = tmp_path / "sad"
+    assert (
+        cli.main(
+            [
+                "--clauses",
+                str(ROOT / "config/speech/stream-visible-demo-v1.jsonl"),
+                "--output",
+                str(output),
+                "--sad-hold-s",
+                ".1",
+            ]
+        )
+        == 0
+    )
+    records = [
+        json.loads(r) for r in (output / "commands.jsonl").read_text().splitlines()
+    ]
+    post = [r for r in records if r.get("phase") == "post-speech" and "status" in r]
+    assert post
+    assert all(r["audio_sample"] is None for r in post)
+    targets = {
+        r["request"]["targets"][0]["actuator_name"]: r["status"]["target_qus"]
+        for r in post
+    }
+    assert targets["mouth_open"] == 4608
+    assert targets["left_mouth_corner"] < 5500
+    assert targets["right_mouth_corner"] > 6500
+    assert json.loads((output / "manifest.json").read_text())[
+        "controller_home_confirmed"
     ]

@@ -130,21 +130,29 @@ LLM provider. Raw composed proposals still require the Task 6 command guards.
 
 **Interfaces:** One trusted face-stream executor consumes composed `TargetUpdate` values and a fixed allowlist drawn from `hardware/alice-face-v1.yaml`. Each sent receipt retains per-channel target, host send time and current PWM. No unchecked model output can write directly to serial.
 
-- [ ] Define an initial facial allowlist using mouth, mouth corners, forehead and eyelids from the actual mapped proposal; enable eye gaze deliberately if included. Keep neck_rotation/head_tilt/face_pitch out of the initial facial trial. Document exact selected channels and caps before a physical run.
-- [ ] Add disconnected tests proving unselected channels never emit bytes, sparse updates preserve existing selected values, coupled eyelid/corner updates compose correctly, and a variable-latency transaction does not corrupt per-channel command timing.
-- [ ] Preserve one serial owner and latest-target coalescing. Do not apply mouth's 0/0 runtime tuning or full-range dynamic caps to all channels. Derive selected-channel limits from their actual calibration/profile and the reviewed proposal.
-- [ ] Test cancellation/stale source/controller error/partial serial write while audio is active. Fault closure must perform no extra transactions; normal completion must confirm Home for enabled channels before restoring the jaw response profile.
-- [ ] Run a device-free composed trial, then the operator-requested attended physical trial. No repeated readiness phrases are needed. Reuse the robot-facing C525 observer only; do not open the human-facing C920 or a microphone.
+- [x] Define an initial facial allowlist using mouth, mouth corners, forehead and eyelids from the actual mapped proposal; enable eye gaze deliberately if included. Keep neck_rotation/head_tilt/face_pitch out of the initial facial trial. Document exact selected channels and caps before a physical run.
+- [x] Add disconnected tests proving unselected channels never emit bytes, sparse updates preserve existing selected values, coupled eyelid/corner updates compose correctly, and a variable-latency transaction does not corrupt per-channel command timing.
+- [x] Preserve one serial owner and latest-target coalescing. Do not apply mouth's 0/0 runtime tuning or full-range dynamic caps to all channels. Derive selected-channel limits from their actual calibration/profile and the reviewed proposal.
+- [x] Test cancellation/stale source/controller error/partial serial write while audio is active. Fault closure must perform no extra transactions; normal completion must confirm Home for enabled channels before restoring the jaw response profile.
+- [x] Run a device-free composed trial, then the operator-requested attended physical trial. No repeated readiness phrases are needed. Reuse the robot-facing C525 observer only; do not open the human-facing C920 or a microphone.
 - [ ] Record full configs, code/model/input hashes, queue/audio metrics, sent targets/current PWM, robot-camera evidence and operator feedback. Confirm mouth alignment remains acceptable while other expressions move. Commit `feat: execute composed speech and facial motion` after review and checks.
 
 ## Completion criteria for the next milestone
 
 - [ ] First audio plays before the LLM finishes and before first-clause TTS finishes.
-- [ ] Mouth keeps the accepted 100 ms compensation, including chunk/clause boundaries.
+- [x] Mouth keeps the accepted 100 ms compensation, including chunk/clause boundaries.
 - [ ] Expressions visibly coexist with speech and transition on the audible clause clock.
-- [ ] The selected expression source is honestly labeled and its support/model provenance retained.
-- [ ] Audio stays independent of model/serial work; cancellation flushes old-generation work; queues remain bounded.
+- [x] The selected expression source is honestly labeled and its support/model provenance retained.
+- [x] Audio stays independent of model/serial work; cancellation flushes old-generation work; queues remain bounded.
 - [ ] Selected facial channels pass their own limits and physical trial, with head motion separate.
-- [ ] Tests, type/lint checks, a retained experiment report and the next checkpoint exist.
+- [x] Tests, type/lint checks, a retained experiment report and the next checkpoint exist.
 
 If time is limited, finish Tasks 1–5 with real incremental audio and simulated composed servos, then leave Task 6 as the explicit next hardware step. Do not declare full integration complete from a static preview or full-WAV replay.
+
+
+September 11 continuation: Task 6 executor committed at 7fe8264, with reviewed
+full-blink/closed-mouth-hold tuning and 879 passing tests. Three earlier physical
+trials collected operator feedback; the latest full-blink run had changing PWM
+but almost no visible motion. Physical tuning acceptance remains pending the
+operator's response about servo power. See the
+[current checkpoint](../../checkpoints/2026-09-11-selected-face-speech.md).

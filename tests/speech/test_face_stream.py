@@ -298,3 +298,55 @@ def test_inference_does_not_refresh_stale_dac_frame(tmp_path):
     with pytest.raises(ValueError, match="stale"):
         stream.offer(proposal(mouth_open=1), "g", 0, source_monotonic_ns=captured)
     assert wire.closed and not wire.writes
+
+
+def test_visible_corners_reach_reviewed_expression_extent_with_same_speed_caps(
+    tmp_path,
+):
+    stream, _, _, now, _ = setup(tmp_path)
+    for i in range(75):
+        now[0] += 40_000_000
+        stream.offer(proposal(left_mouth_corner=0.7, right_mouth_corner=-0.7), "g", i)
+        stream.step()
+    assert stream.states["left_mouth_corner"].position > 0.69
+    assert stream.states["right_mouth_corner"].position < -0.69
+
+
+def test_slow_unsent_plan_is_discarded_and_replanned_on_current_clock(
+    tmp_path, monkeypatch
+):
+    from alice.speech import face_stream
+
+    stream, _, wire, now, _ = setup(tmp_path)
+    original = face_stream.bounded_quantized_target
+    delayed = False
+
+    def pause_once(*args):
+        nonlocal delayed
+        target = original(*args)
+        if not delayed:
+            delayed = True
+            now[0] += 3_000_000
+        return target
+
+    monkeypatch.setattr(face_stream, "bounded_quantized_target", pause_once)
+    stream.offer(proposal(mouth_open=0.8), "g", 0)
+    now[0] += 40_000_000
+    stream.step()
+    assert not wire.closed
+    assert not [p for _, p in wire.writes if p[0] == 0x84 and p[1] == 6]
+    assert stream.states["mouth_open"].position == 0
+    now[0] += 2_000_000
+    stream.step()
+    assert [p for _, p in wire.writes if p[0] == 0x84 and p[1] == 6]
+    assert any("discarded_plan" in r for r in stream.records)
+
+
+def test_full_blink_reaches_both_calibrated_closed_endpoints(tmp_path):
+    stream, _, wire, now, _ = setup(tmp_path)
+    for i in range(75):
+        now[0] += 40_000_000
+        stream.offer(proposal(lower_eyelids=-1, upper_eyelids=-1), "g", i)
+        stream.step()
+    assert wire.positions[3] == 2880
+    assert wire.positions[4] == 3840
