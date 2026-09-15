@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import FrozenInstanceError
 from datetime import UTC, datetime
 
 import pytest
@@ -35,16 +36,20 @@ from alice_nodes.contracts import (
     speech_state_from_msg,
     speech_state_to_msg,
     validate_begin_run_request,
+    validate_begin_run_response,
     validate_end_run_request,
     validate_end_run_response,
     validate_playback_status,
     validate_run_health,
+    validate_run_speech_feedback,
     validate_run_speech_goal,
+    validate_run_speech_result,
     validate_servo_receipt,
 )
 from alice_nodes.transport import (
     CreditLedger,
     PcmPacket,
+    PeerIdentity,
     RunIdentity,
     SequenceGuard,
     StreamHeader,
@@ -396,6 +401,79 @@ def test_begin_run_rejects_unknown_schema() -> None:
         validate_begin_run_request(request)
 
 
+def test_begin_run_response_validates_expected_peer_context_and_is_frozen() -> None:
+    response = BeginRun.Response()
+    response.identity = run_identity_to_msg(IDENTITY)
+    response.accepted = True
+    response.idempotent = False
+    response.error = ""
+    response.responder_node_name = "tts"
+    response.responder_incarnation = "tts-1"
+    response.clock_verified = False
+    response.lifecycle_state = BeginRun.Response.PREPARED
+
+    acknowledgement = validate_begin_run_response(
+        response,
+        expected_identity=IDENTITY,
+        expected_responder=PeerIdentity("tts", "tts-1"),
+        requested_operation="prepare",
+        hardware=False,
+    )
+    assert acknowledgement.lifecycle_state == "prepared"
+    with pytest.raises(FrozenInstanceError):
+        acknowledgement.accepted = False  # type: ignore[misc]
+
+    response.identity = run_identity_to_msg(
+        RunIdentity("other-run", "epoch-1", "gen-1")
+    )
+    with pytest.raises(ValueError, match="identity"):
+        validate_begin_run_response(
+            response,
+            expected_identity=IDENTITY,
+            expected_responder=PeerIdentity("tts", "tts-1"),
+            requested_operation="prepare",
+            hardware=False,
+        )
+    response.identity = run_identity_to_msg(IDENTITY)
+    response.responder_incarnation = "tts-restarted"
+    with pytest.raises(ValueError, match="responder"):
+        validate_begin_run_response(
+            response,
+            expected_identity=IDENTITY,
+            expected_responder=PeerIdentity("tts", "tts-1"),
+            requested_operation="prepare",
+            hardware=False,
+        )
+
+
+def test_begin_run_response_rejects_inconsistent_acceptance_clock_and_state() -> None:
+    response = BeginRun.Response()
+    response.identity = run_identity_to_msg(IDENTITY)
+    response.accepted = True
+    response.error = "unexpected"
+    response.responder_node_name = "maestro"
+    response.responder_incarnation = "maestro-1"
+    response.clock_verified = False
+    response.lifecycle_state = BeginRun.Response.PREPARED
+    context = {
+        "expected_identity": IDENTITY,
+        "expected_responder": PeerIdentity("maestro", "maestro-1"),
+        "requested_operation": "start",
+        "hardware": True,
+    }
+
+    with pytest.raises(ValueError, match="accepted"):
+        validate_begin_run_response(response, **context)
+    response.error = ""
+    response.lifecycle_state = BeginRun.Response.ACTIVE
+    with pytest.raises(ValueError, match="clock"):
+        validate_begin_run_response(response, **context)
+    response.clock_verified = True
+    response.lifecycle_state = BeginRun.Response.PREPARED
+    with pytest.raises(ValueError, match="lifecycle"):
+        validate_begin_run_response(response, **context)
+
+
 def test_end_run_requires_explicit_terminal_outcome() -> None:
     request = EndRun.Request()
     request.schema_version = "end-run/v1"
@@ -475,6 +553,104 @@ def test_committed_clause_action_source_has_no_fixture_path() -> None:
         validate_run_speech_goal(goal)
 
 
+def test_run_speech_result_validates_identity_outcome_and_artifact() -> None:
+    result = RunSpeech.Result()
+    result.identity = run_identity_to_msg(IDENTITY)
+    result.accepted = True
+    result.error = ""
+    result.terminal_outcome = RunSpeech.Result.SUCCESS
+    result.artifact_identity = "manifest-sha256"
+    result.responder_incarnation = "session-1"
+
+    value = validate_run_speech_result(
+        result,
+        expected_identity=IDENTITY,
+        expected_responder_incarnation="session-1",
+    )
+    assert value.terminal_outcome == "success"
+    with pytest.raises(FrozenInstanceError):
+        value.accepted = False  # type: ignore[misc]
+
+    result.artifact_identity = ""
+    with pytest.raises(ValueError, match="artifact"):
+        validate_run_speech_result(
+            result,
+            expected_identity=IDENTITY,
+            expected_responder_incarnation="session-1",
+        )
+    result.artifact_identity = "manifest-sha256"
+    result.terminal_outcome = 99
+    with pytest.raises(ValueError, match="outcome"):
+        validate_run_speech_result(
+            result,
+            expected_identity=IDENTITY,
+            expected_responder_incarnation="session-1",
+        )
+    result.terminal_outcome = RunSpeech.Result.SUCCESS
+    result.accepted = False
+    result.error = "rejected"
+    result.artifact_identity = ""
+    with pytest.raises(ValueError, match="rejected"):
+        validate_run_speech_result(
+            result,
+            expected_identity=IDENTITY,
+            expected_responder_incarnation="session-1",
+        )
+
+
+def test_run_speech_feedback_validates_context_enum_and_count_order() -> None:
+    feedback = RunSpeech.Feedback()
+    feedback.header = pcm_packet_to_msg(
+        PcmPacket(
+            StreamHeader(IDENTITY, 0, 1_000_000_000, "session-1"),
+            "clause-0",
+            0,
+            0,
+            16_000,
+            (0.0,),
+            True,
+            _clause(),
+            True,
+            True,
+        )
+    ).header
+    feedback.committed_clauses = 1
+    feedback.generated_samples = 800
+    feedback.submitted_samples = 600
+    feedback.played_samples = 400
+    feedback.playback_state = RunSpeech.Feedback.PLAYING
+
+    value = validate_run_speech_feedback(
+        feedback,
+        expected_identity=IDENTITY,
+        expected_publisher_incarnation="session-1",
+    )
+    assert value.played_samples == 400
+    feedback.header.publisher_incarnation = "session-restarted"
+    with pytest.raises(ValueError, match="publisher"):
+        validate_run_speech_feedback(
+            feedback,
+            expected_identity=IDENTITY,
+            expected_publisher_incarnation="session-1",
+        )
+    feedback.header.publisher_incarnation = "session-1"
+    feedback.played_samples = 601
+    with pytest.raises(ValueError, match="counts"):
+        validate_run_speech_feedback(
+            feedback,
+            expected_identity=IDENTITY,
+            expected_publisher_incarnation="session-1",
+        )
+    feedback.played_samples = 400
+    feedback.playback_state = 99
+    with pytest.raises(ValueError, match="state"):
+        validate_run_speech_feedback(
+            feedback,
+            expected_identity=IDENTITY,
+            expected_publisher_incarnation="session-1",
+        )
+
+
 def test_run_health_validates_schema_state_and_header() -> None:
     message = RunHealth()
     message.header = pcm_packet_to_msg(
@@ -546,3 +722,179 @@ def test_servo_receipt_checks_selected_mapping_calibration_and_pwm_range() -> No
     message.channels[0].target_qus = 20_000
     with pytest.raises(ValueError, match="PWM"):
         validate_servo_receipt(message, expected_calibration_sha256=HASH)
+
+
+def _begin_reply() -> BeginRun.Response:
+    return BeginRun.Response(
+        identity=run_identity_to_msg(IDENTITY),
+        accepted=True,
+        responder_node_name="tts",
+        responder_incarnation="tts-1",
+        clock_verified=True,
+        lifecycle_state=BeginRun.Response.PREPARED,
+    )
+
+
+@pytest.mark.parametrize(
+    ("changes", "match"),
+    [
+        ({"accepted": False}, "requires an error"),
+        ({"accepted": False, "error": "rejected", "idempotent": True}, "idempotent"),
+        ({"lifecycle_state": 99}, "lifecycle"),
+        ({"responder_node_name": "audio"}, "responder"),
+        ({"accepted": False, "error": "   "}, "error"),
+    ],
+)
+def test_begin_reply_rejects_invalid_semantics(changes, match) -> None:
+    response = _begin_reply()
+    for field, value in changes.items():
+        setattr(response, field, value)
+    with pytest.raises(ValueError, match=match):
+        validate_begin_run_response(
+            response,
+            expected_identity=IDENTITY,
+            expected_responder=PeerIdentity("tts", "tts-1"),
+            requested_operation="prepare",
+            hardware=True,
+        )
+
+
+@pytest.mark.parametrize("accepted", [True, False])
+def test_begin_reply_accepts_retry_or_explained_rejection(accepted) -> None:
+    response = _begin_reply()
+    response.accepted = accepted
+    response.idempotent = accepted
+    response.error = "" if accepted else "configuration rejected"
+    value = validate_begin_run_response(
+        response,
+        expected_identity=IDENTITY,
+        expected_responder=PeerIdentity("tts", "tts-1"),
+        requested_operation="prepare",
+        hardware=True,
+    )
+    assert value.accepted is accepted
+    assert value.idempotent is accepted
+
+
+def _speech_result() -> RunSpeech.Result:
+    return RunSpeech.Result(
+        identity=run_identity_to_msg(IDENTITY),
+        accepted=True,
+        terminal_outcome=RunSpeech.Result.SUCCESS,
+        artifact_identity="manifest-sha256",
+        responder_incarnation="session-1",
+    )
+
+
+@pytest.mark.parametrize(
+    ("changes", "match"),
+    [
+        (
+            {"identity": run_identity_to_msg(RunIdentity("other", "epoch-1", "gen-1"))},
+            "identity",
+        ),
+        ({"responder_incarnation": "session-restarted"}, "responder"),
+        ({"error": "unexpected"}, "error"),
+        ({"artifact_identity": "   "}, "artifact"),
+        ({"terminal_outcome": RunSpeech.Result.FAULT}, "detail"),
+        ({"terminal_outcome": RunSpeech.Result.CANCELLED}, "detail"),
+        ({"terminal_outcome": RunSpeech.Result.FAULT, "error": "   "}, "error"),
+        (
+            {
+                "accepted": False,
+                "terminal_outcome": RunSpeech.Result.FAULT,
+                "error": "rejected",
+            },
+            "rejected",
+        ),
+    ],
+)
+def test_run_speech_result_rejects_invalid_semantics(changes, match) -> None:
+    result = _speech_result()
+    for field, value in changes.items():
+        setattr(result, field, value)
+    with pytest.raises(ValueError, match=match):
+        validate_run_speech_result(
+            result,
+            expected_identity=IDENTITY,
+            expected_responder_incarnation="session-1",
+        )
+
+
+@pytest.mark.parametrize(
+    ("accepted", "outcome"),
+    [
+        (True, RunSpeech.Result.FAULT),
+        (True, RunSpeech.Result.CANCELLED),
+        (False, RunSpeech.Result.FAULT),
+    ],
+)
+def test_run_speech_result_accepts_explained_unsuccessful_outcomes(
+    accepted, outcome
+) -> None:
+    result = _speech_result()
+    result.accepted = accepted
+    result.terminal_outcome = outcome
+    result.error = "stopped"
+    result.artifact_identity = ""
+    value = validate_run_speech_result(
+        result,
+        expected_identity=IDENTITY,
+        expected_responder_incarnation="session-1",
+    )
+    assert value.accepted is accepted
+    assert value.error == "stopped"
+    assert value.artifact_identity is None
+
+
+def _speech_feedback() -> RunSpeech.Feedback:
+    result = RunSpeech.Feedback()
+    result.header.identity = run_identity_to_msg(IDENTITY)
+    result.header.publisher_incarnation = "session-1"
+    result.header.source_monotonic_ns = 1_000_000_000
+    result.committed_clauses = 32
+    # These cumulative audio counts include both TTS PCM and the local tail.
+    result.generated_samples = 1_600
+    result.submitted_samples = 1_600
+    result.played_samples = 1_600
+    result.playback_state = RunSpeech.Feedback.DRAINED
+    return result
+
+
+@pytest.mark.parametrize("fault", ["identity", "clause_bound", "generated", "drain"])
+def test_run_speech_feedback_rejects_invalid_semantics(fault) -> None:
+    feedback = _speech_feedback()
+    if fault == "identity":
+        feedback.header.identity = run_identity_to_msg(
+            RunIdentity("other", "epoch-1", "gen-1")
+        )
+    elif fault == "clause_bound":
+        feedback.committed_clauses = 33
+    elif fault == "generated":
+        feedback.generated_samples = 1_599
+    else:
+        feedback.played_samples = 1_599
+    with pytest.raises(ValueError):
+        validate_run_speech_feedback(
+            feedback,
+            expected_identity=IDENTITY,
+            expected_publisher_incarnation="session-1",
+        )
+
+
+def test_run_speech_feedback_includes_local_tail_and_is_frozen() -> None:
+    value = validate_run_speech_feedback(
+        _speech_feedback(),
+        expected_identity=IDENTITY,
+        expected_publisher_incarnation="session-1",
+    )
+    assert (
+        value.generated_samples
+        == value.submitted_samples
+        == value.played_samples
+        == 1_600
+    )
+    assert value.committed_clauses == 32
+    assert value.playback_state == "drained"
+    with pytest.raises(FrozenInstanceError):
+        value.generated_samples = 0  # type: ignore[misc]

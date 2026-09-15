@@ -512,6 +512,17 @@ class BeginRunCommand:
 
 
 @dataclass(frozen=True)
+class BeginRunAcknowledgement:
+    identity: RunIdentity
+    accepted: bool
+    idempotent: bool
+    responder: PeerIdentity
+    clock_verified: bool
+    lifecycle_state: Literal["prepared", "active"]
+    error: str | None
+
+
+@dataclass(frozen=True)
 class EndRunCommand:
     identity: RunIdentity
     outcome: Literal["success", "cancelled", "fault"]
@@ -532,6 +543,26 @@ class RunSpeechCommand:
     calibration_sha256: str
     clock_domain_fingerprint: str
     requester_incarnation: str
+
+
+@dataclass(frozen=True)
+class RunSpeechResultValue:
+    identity: RunIdentity
+    accepted: bool
+    terminal_outcome: Literal["success", "cancelled", "fault"]
+    artifact_identity: str | None
+    responder_incarnation: str
+    error: str | None
+
+
+@dataclass(frozen=True)
+class RunSpeechFeedbackValue:
+    header: StreamHeader
+    committed_clauses: int
+    generated_samples: int
+    submitted_samples: int
+    played_samples: int
+    playback_state: Literal["buffering", "playing", "drained", "fault", "cancelled"]
 
 
 @dataclass(frozen=True)
@@ -656,6 +687,56 @@ def validate_begin_run_request(request: BeginRun.Request) -> BeginRunCommand:
     )
 
 
+def validate_begin_run_response(
+    response: BeginRun.Response,
+    *,
+    expected_identity: RunIdentity,
+    expected_responder: PeerIdentity,
+    requested_operation: Literal["prepare", "start"],
+    hardware: bool,
+) -> BeginRunAcknowledgement:
+    identity = run_identity_from_msg(response.identity)
+    if identity != expected_identity:
+        raise ValueError("begin-run response identity does not match")
+    responder = PeerIdentity(
+        response.responder_node_name, response.responder_incarnation
+    )
+    if responder != expected_responder:
+        raise ValueError("begin-run responder context does not match")
+    lifecycle = {
+        BeginRun.Response.PREPARED: "prepared",
+        BeginRun.Response.ACTIVE: "active",
+    }.get(response.lifecycle_state)
+    if lifecycle is None:
+        raise ValueError("invalid begin-run lifecycle state")
+    error = _text(response.error, "begin-run error", 256) if response.error else None
+    if response.accepted and error is not None:
+        raise ValueError("accepted begin-run response cannot carry an error")
+    if not response.accepted and error is None:
+        raise ValueError("rejected begin-run response requires an error")
+    if response.idempotent and not response.accepted:
+        raise ValueError("rejected begin-run response cannot be idempotent")
+    expected_lifecycle = {
+        "prepare": "prepared",
+        "start": "active",
+    }.get(requested_operation)
+    if expected_lifecycle is None:
+        raise ValueError("invalid requested begin-run operation")
+    if response.accepted and lifecycle != expected_lifecycle:
+        raise ValueError("begin-run lifecycle disagrees with accepted operation")
+    if response.accepted and hardware and not response.clock_verified:
+        raise ValueError("hardware begin-run acceptance requires verified clock")
+    return BeginRunAcknowledgement(
+        identity=identity,
+        accepted=bool(response.accepted),
+        idempotent=bool(response.idempotent),
+        responder=responder,
+        clock_verified=bool(response.clock_verified),
+        lifecycle_state=lifecycle,
+        error=error,
+    )
+
+
 def validate_end_run_request(request: EndRun.Request) -> EndRunCommand:
     if request.schema_version != "end-run/v1":
         raise ValueError("unknown end-run schema")
@@ -747,6 +828,93 @@ def validate_run_speech_goal(goal: RunSpeech.Goal) -> RunSpeechCommand:
         source=source,
         fixture_name=fixture_name,
         **_validate_run_fields(goal),
+    )
+
+
+def validate_run_speech_result(
+    result: RunSpeech.Result,
+    *,
+    expected_identity: RunIdentity,
+    expected_responder_incarnation: str,
+) -> RunSpeechResultValue:
+    identity = run_identity_from_msg(result.identity)
+    if identity != expected_identity:
+        raise ValueError("RunSpeech result identity does not match")
+    responder = _text(
+        result.responder_incarnation, "RunSpeech responder incarnation", 128
+    )
+    if responder != expected_responder_incarnation:
+        raise ValueError("RunSpeech result responder context does not match")
+    outcome = {
+        RunSpeech.Result.SUCCESS: "success",
+        RunSpeech.Result.CANCELLED: "cancelled",
+        RunSpeech.Result.FAULT: "fault",
+    }.get(result.terminal_outcome)
+    if outcome is None:
+        raise ValueError("invalid RunSpeech terminal outcome")
+    error = _text(result.error, "RunSpeech error", 256) if result.error else None
+    artifact = (
+        _text(result.artifact_identity, "RunSpeech artifact identity", 128)
+        if result.artifact_identity
+        else None
+    )
+    if not result.accepted:
+        if outcome != "fault" or error is None or artifact is not None:
+            raise ValueError("rejected RunSpeech result is inconsistent")
+    elif outcome == "success":
+        if error is not None:
+            raise ValueError("successful RunSpeech result cannot carry an error")
+        if artifact is None:
+            raise ValueError("successful RunSpeech result requires artifact identity")
+    elif error is None:
+        raise ValueError("cancelled or faulted RunSpeech result requires detail")
+    return RunSpeechResultValue(
+        identity=identity,
+        accepted=bool(result.accepted),
+        terminal_outcome=outcome,
+        artifact_identity=artifact,
+        responder_incarnation=responder,
+        error=error,
+    )
+
+
+def validate_run_speech_feedback(
+    feedback: RunSpeech.Feedback,
+    *,
+    expected_identity: RunIdentity,
+    expected_publisher_incarnation: str,
+) -> RunSpeechFeedbackValue:
+    header = stream_header_from_msg(feedback.header)
+    if header.identity != expected_identity:
+        raise ValueError("RunSpeech feedback identity does not match")
+    if header.publisher_incarnation != expected_publisher_incarnation:
+        raise ValueError("RunSpeech feedback publisher context does not match")
+    state = {
+        RunSpeech.Feedback.BUFFERING: "buffering",
+        RunSpeech.Feedback.PLAYING: "playing",
+        RunSpeech.Feedback.DRAINED: "drained",
+        RunSpeech.Feedback.FAULTED: "fault",
+        RunSpeech.Feedback.CANCELLED_STATE: "cancelled",
+    }.get(feedback.playback_state)
+    if state is None:
+        raise ValueError("invalid RunSpeech feedback playback state")
+    clauses = _uint(feedback.committed_clauses, "committed clause count", 32)
+    if clauses > 32:
+        raise ValueError("committed clause count exceeds response bound")
+    generated = _uint(feedback.generated_samples, "generated sample count")
+    submitted = _uint(feedback.submitted_samples, "submitted sample count")
+    played = _uint(feedback.played_samples, "played sample count")
+    if not played <= submitted <= generated:
+        raise ValueError("RunSpeech progress counts are out of order")
+    if state == "drained" and not played == submitted == generated:
+        raise ValueError("drained RunSpeech feedback requires equal sample counts")
+    return RunSpeechFeedbackValue(
+        header=header,
+        committed_clauses=clauses,
+        generated_samples=generated,
+        submitted_samples=submitted,
+        played_samples=played,
+        playback_state=state,
     )
 
 

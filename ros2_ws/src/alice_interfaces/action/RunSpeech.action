@@ -23,9 +23,18 @@ bool accepted
 string<=256 error
 uint8 terminal_outcome
 string<=128 artifact_identity
+string<=128 responder_incarnation
 ---
+uint8 BUFFERING=0
+uint8 PLAYING=1
+uint8 DRAINED=2
+uint8 FAULTED=3
+uint8 CANCELLED_STATE=4
+
 StreamHeader header
 uint32 committed_clauses
+# All audio PCM, including the bounded local audio tail.
+# Transport credits acknowledge only TTS-sent samples.
 uint64 generated_samples
 uint64 submitted_samples
 uint64 played_samples

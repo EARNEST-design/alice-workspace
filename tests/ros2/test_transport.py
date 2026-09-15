@@ -234,12 +234,19 @@ def test_restarted_publisher_cannot_continue_prior_stream_sequence() -> None:
     )
 
 
-def test_coalesced_latest_stream_can_disable_pcm_progress_gap_rule() -> None:
-    guard = SequenceGuard(IDENTITY, exact=False, max_gap_ns=None)
+def test_coalesced_latest_stream_skips_sequences_within_time_gap_bound() -> None:
+    guard = SequenceGuard(IDENTITY, exact=False)
 
     assert guard.admit(_header(0), now_monotonic_ns=1_000_000_000)
     assert guard.admit(
-        _header(5, 2_000_000_000), now_monotonic_ns=2_000_000_000
+        _header(5, 1_200_000_000), now_monotonic_ns=1_200_000_000
+    )
+    with pytest.raises(ValueError, match="progress gap"):
+        guard.admit(
+            _header(9, 1_450_000_001), now_monotonic_ns=1_450_000_001
+        )
+    assert guard.admit(
+        _header(9, 1_450_000_000), now_monotonic_ns=1_450_000_000
     )
 
 
@@ -369,6 +376,89 @@ def test_pcm_rejects_out_of_order_clause_without_mutating_ledger() -> None:
         response_final=False,
     )
     assert guard.admit(first, now_monotonic_ns=1_000_000_000) == 1
+
+
+def test_pcm_rejects_duplicate_clause_id_without_mutating_ledgers() -> None:
+    guard = PcmStreamGuard(IDENTITY)
+    first_clause = _clause(0)
+    first = PcmPacket(
+        _header(0), "clause-0", 0, 0, 16_000, (0.1,), True, first_clause, True, False
+    )
+    assert guard.admit(first, now_monotonic_ns=1_000_000_000) == 1
+
+    duplicate = SpeechClause(
+        generation_id="gen-1",
+        clause_id="clause-0",
+        sequence=1,
+        text="again",
+        vector=(0.1, -0.2, 0.3),
+        intensity=0.4,
+        seed=8,
+    )
+    malformed = PcmPacket(
+        _header(1), "clause-0", 1, 1, 16_000, (0.2,), True, duplicate, True, False
+    )
+    with pytest.raises(ValueError, match="duplicate"):
+        guard.admit(malformed, now_monotonic_ns=1_000_000_000)
+
+    replacement = _clause(1)
+    retry = PcmPacket(
+        _header(1), "clause-1", 1, 1, 16_000, (0.2,), True, replacement, True, False
+    )
+    assert guard.admit(retry, now_monotonic_ns=1_000_000_000) == 1
+    assert guard.sample_offset == 2
+
+
+def test_pcm_rejects_response_text_over_budget_without_mutating_ledgers() -> None:
+    guard = PcmStreamGuard(IDENTITY)
+    offset = 0
+    for sequence, size in enumerate((1_000, 1_000, 1_000, 999)):
+        clause = SpeechClause(
+            generation_id="gen-1",
+            clause_id=f"clause-{sequence}",
+            sequence=sequence,
+            text="x" * size,
+            vector=(0.1, -0.2, 0.3),
+            intensity=0.4,
+            seed=sequence,
+        )
+        packet = PcmPacket(
+            _header(sequence),
+            clause.clause_id,
+            sequence,
+            offset,
+            16_000,
+            (0.1,),
+            True,
+            clause,
+            True,
+            False,
+        )
+        assert guard.admit(packet, now_monotonic_ns=1_000_000_000) == 1
+        offset += 1
+
+    over_budget = SpeechClause(
+        generation_id="gen-1",
+        clause_id="clause-4",
+        sequence=4,
+        text="xx",
+        vector=(0.1, -0.2, 0.3),
+        intensity=0.4,
+        seed=4,
+        end_of_response=True,
+    )
+    malformed = PcmPacket(
+        _header(4), "clause-4", 4, 4, 16_000, (0.1,), True, over_budget, True, True
+    )
+    with pytest.raises(ValueError, match="4000"):
+        guard.admit(malformed, now_monotonic_ns=1_000_000_000)
+
+    final_clause = over_budget.model_copy(update={"text": "x"})
+    retry = PcmPacket(
+        _header(4), "clause-4", 4, 4, 16_000, (0.1,), True, final_clause, True, True
+    )
+    assert guard.admit(retry, now_monotonic_ns=1_000_000_000) == 1
+    assert guard.sample_offset == 5
 
 
 def test_oversize_pcm_rejection_does_not_consume_sequence() -> None:

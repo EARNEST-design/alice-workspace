@@ -7,7 +7,7 @@ import re
 from dataclasses import dataclass, replace
 from typing import Literal
 
-from alice.contracts.speech_stream import SpeechClause
+from alice.contracts.speech_stream import ClauseSequence, SpeechClause
 
 MAX_TRANSPORT_AGE_NS = 250_000_000
 MAX_PROGRESS_GAP_NS = 250_000_000
@@ -347,6 +347,7 @@ class PcmStreamGuard:
         self._active_clause_id: str | None = None
         self._active_clause_end = False
         self._response_finished = False
+        self._clauses = ClauseSequence()
 
     @property
     def sample_offset(self) -> int:
@@ -358,6 +359,9 @@ class PcmStreamGuard:
         ):
             return None
         self._validate_packet(packet)
+        if packet.first_packet:
+            assert packet.clause is not None
+            self._clauses.commit(packet.clause)
 
         self._sequences.commit(packet.header)
         if packet.first_packet:
