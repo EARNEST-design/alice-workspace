@@ -49,7 +49,13 @@ the existing FaceRuntime/FaceCommandStream and trusted selected-face adapter.
 The CLI and ROS participant share the extracted adapter and read-only device
 identity implementation; the calibrated trajectory algorithm is not forked.
 
-EndRun acceptance initiates asynchronous finalization. Only a successful
+EndRun acceptance initiates asynchronous finalization. Successful EndRun seals
+ordinary job admission atomically, including replacement of a queued latest
+item. Retained admitted jobs finish their normal validation and work before
+success cleanup can close files or snapshot model state. This retirement wait
+is bounded to one second; a late error or timeout faults the run. Cancellation
+interrupts the wait and retains the independent fault-evidence path. The wait
+does not waive any active source/progress limit. Only a successful
 current-run audio drain permits Maestro's selected post-speech pose and Home.
 Session waits for runtime.done, successful Home/readback/restoration, durable
 local audio and command logs, and recorder finalization before action success.

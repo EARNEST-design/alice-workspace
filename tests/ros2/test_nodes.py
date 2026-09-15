@@ -716,3 +716,96 @@ def test_maestro_drain_cannot_authorize_home_before_first_control(tmp_path):
     finally:
         node.destroy_node()
         rclpy.shutdown()
+
+
+def test_recorder_admitted_writes_finish_before_success_closes_events(tmp_path):
+    import json
+    import threading
+    import time
+
+    import rclpy
+    from alice_interfaces.msg import PlaybackStatus
+    from alice_nodes.base import RuntimePaths, write_json
+    from alice_nodes.contracts import stream_header_to_msg, validate_playback_status
+    from alice_nodes.recorder import create_node
+    from alice_nodes.transport import StreamHeader
+    from test_lifecycle import prepare, start, successful_end
+
+    rclpy.init()
+    node = create_node(
+        paths=RuntimePaths(
+            Path("/workspace/config"),
+            Path("/workspace/hardware"),
+            tmp_path,
+            Path("/workspace/config/speech"),
+        )
+    )
+    entered, release = threading.Event(), threading.Event()
+    try:
+        request = prepare(node)
+        assert node.begin(request).accepted
+        assert start(node, request).accepted
+        for role in node.peers.keys() - {"recorder", "session"}:
+            directory = node.run_dir / role
+            directory.mkdir(exist_ok=True)
+            write_json(
+                directory / "terminal.json",
+                {"identity": vars(node.identity), "outcome": "success"},
+            )
+        write_json(
+            node.run_dir / "audio/audio.json",
+            {"drained": True, "response_final": True, "underflows": 0},
+        )
+        write_json(
+            node.run_dir / "maestro/servo.json",
+            {"home_confirmed": True, "runtime_done": True, "error": None},
+        )
+
+        def event(sequence):
+            return PlaybackStatus(
+                header=stream_header_to_msg(
+                    StreamHeader(
+                        node.identity,
+                        sequence,
+                        time.monotonic_ns(),
+                        "audio-incarnation",
+                    )
+                ),
+                schema_version="playback-status/v1",
+                state=PlaybackStatus.PLAYING,
+                submitted_samples=480,
+                played_samples=1,
+            )
+
+        def delayed_validate(message):
+            validate_playback_status(message)
+            entered.set()
+            release.wait(2)
+
+        first, second = event(0), event(1)
+        node.submit(lambda: node.record(first, "audio", delayed_validate))
+        assert entered.wait(1)
+        node.submit(lambda: node.record(second, "audio", validate_playback_status))
+        assert successful_end(node, request).accepted
+        time.sleep(0.05)
+        assert node.events is not None and not node.events.closed
+        assert not node._completed and not (node.local_dir / "terminal.json").exists()
+        release.set()
+        deadline = time.monotonic() + 1
+        while not node._completed and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert node._completed and node.error is None
+        assert node.events is None
+        rows = [
+            json.loads(line)
+            for line in (node.local_dir / "events.jsonl").read_text().splitlines()
+        ]
+        assert [row["message"]["header"]["sequence"] for row in rows] == [0, 1]
+        assert (
+            json.loads((node.local_dir / "manifest.json").read_text())["event_count"]
+            == 2
+        )
+    finally:
+        release.set()
+        node.destroy_node()
+        rclpy.shutdown()

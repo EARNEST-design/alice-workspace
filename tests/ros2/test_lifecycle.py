@@ -443,3 +443,129 @@ def test_blocked_finalizer_keeps_publishing_health(node):
         release.set()
         executor.shutdown(timeout_sec=1)
         observer.destroy_node()
+
+
+def successful_end(node, request):
+    return node.end(
+        EndRun.Request(
+            schema_version="end-run/v1",
+            identity=request.identity,
+            outcome=EndRun.Request.SUCCESS,
+            reason="completed",
+            requester_incarnation="session-incarnation",
+        )
+    )
+
+
+def test_success_seals_admission_and_waits_for_all_admitted_work(node):
+    import threading
+
+    entered, release, cleaned = threading.Event(), threading.Event(), threading.Event()
+    observed = []
+    request = prepare(node)
+    assert node.begin(request).accepted
+
+    def blocked():
+        entered.set()
+        release.wait(3)
+        observed.append("first")
+
+    def cleanup(outcome):
+        observed.append((outcome, node._outstanding))
+        cleaned.set()
+
+    node.finalize_run = cleanup
+    node.submit(blocked)
+    assert entered.wait(1)
+    node.submit(lambda: observed.append("admitted latest"), latest="pending")
+    try:
+        reply = successful_end(node, request)
+        assert reply.accepted and not reply.completed
+        late = node.submit(lambda: observed.append("after seal"), latest="pending")
+        assert late.retired, "EndRun did not seal ordinary admission"
+        assert not cleaned.wait(0.1), "success cleanup overtook admitted work"
+        assert not node._completed and not (node.local_dir / "terminal.json").exists()
+    finally:
+        release.set()
+    assert cleaned.wait(1)
+    assert observed == ["first", "admitted latest", ("success", 0)]
+
+
+def test_pending_success_retains_late_ordinary_error(node):
+    import json
+    import threading
+
+    entered, release = threading.Event(), threading.Event()
+    outcomes = []
+    request = prepare(node)
+    assert node.begin(request).accepted
+    node.finalize_run = outcomes.append
+
+    def blocked():
+        entered.set()
+        release.wait(3)
+        raise RuntimeError("late admitted operation failure")
+
+    node.submit(blocked)
+    assert entered.wait(1)
+    try:
+        assert successful_end(node, request).accepted
+        time.sleep(0.05)
+        assert not node._completed and outcomes == []
+    finally:
+        release.set()
+    deadline = time.monotonic() + 1
+    while not node._completed and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert node._completed and "late admitted operation failure" in node.error
+    terminal = json.loads((node.local_dir / "terminal.json").read_text())
+    assert terminal["outcome"] == "fault" and outcomes == ["fault"]
+
+
+def test_success_retirement_timeout_faults_with_stuck_job_and_blocks_next_run(node):
+    import json
+    import threading
+
+    entered, release = threading.Event(), threading.Event()
+    outcomes = []
+    request = prepare(node)
+    assert node.begin(request).accepted
+    node.finalize_run = outcomes.append
+    node.submit(lambda: (entered.set(), release.wait(4)))
+    assert entered.wait(1)
+    try:
+        assert successful_end(node, request).accepted
+        deadline = time.monotonic() + 2.5
+        while not node._completed and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert node._completed and node.error, "stuck work was finalized successfully"
+        assert "retire" in node.error and "deadline" in node.error
+        assert outcomes == ["fault"]
+        assert (
+            json.loads((node.local_dir / "terminal.json").read_text())["outcome"]
+            == "fault"
+        )
+        assert node._outstanding == 1
+        assert not node.begin(prepare(node, "next-epoch")).accepted
+    finally:
+        release.set()
+
+
+def test_cancellation_interrupts_success_wait_without_waiting_for_stuck_job(node):
+    import threading
+
+    entered, release = threading.Event(), threading.Event()
+    request = prepare(node)
+    assert node.begin(request).accepted
+    node.submit(lambda: (entered.set(), release.wait(3)))
+    assert entered.wait(1)
+    try:
+        assert successful_end(node, request).accepted
+        node.fail("cancel pending success")
+        deadline = time.monotonic() + 0.5
+        while not node._completed and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert node._completed and node.error == "cancel pending success"
+        assert node._outstanding == 1
+    finally:
+        release.set()

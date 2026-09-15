@@ -198,3 +198,41 @@ the event-loop change: Pocket English-2026-01 warms successfully, stays alive,
 and publishes zero run transport samples. It retains the previously qualified
 read-only cache, configuration hash and model revision; this remains PREPARE
 qualification, not physical or end-to-end real-model streaming acceptance.
+
+## Task 3 review repair round 2
+
+Rereview of `f028659` found that independent successful cleanup could overtake
+ordinary work and suppress a later error after terminal success. Successful
+EndRun now seals ordinary admission before a new arrival can replace a pending
+latest item. Existing retained jobs finish their normal identity, sequence and
+original-source-age validation and execution. The finalizer waits on a condition
+for all ordinary jobs to retire without error before success snapshot/close or
+terminal evidence. Errors latch before retirement is signalled.
+
+The success-work wait is a fixed **one second**, leaving time inside the existing
+five-second participant finalization deadline (fourteen seconds for Maestro).
+It is not a ROS parameter or an extension of the active 250 ms source/progress
+limits. Timeout converts pending success into fault. Cancellation interrupts
+the wait immediately, retaining independent fault evidence for a stuck worker;
+the next epoch remains barred until prior jobs and finalization retire. No
+protocol, hardware, model-dependency or other runtime-parameter changes follow.
+
+`task3-r2-red-01` reproduced four ordering failures (120 other tests passed).
+`task3-r2-green-01` passed **124 tests in 12.26 seconds**, covering generated
+conversions, transport and runtime/lifecycle behavior. The new tests prove
+admission sealing without latest-item replacement, no premature success cleanup,
+a retained late error, bounded fault evidence despite a stuck job, immediate
+cancellation of a pending success wait, and two actual Recorder event writes
+persisting before its file closes. Existing heartbeat, first-control and queued
+START cancellation regressions remain passing.
+
+`task3-r2-smoke-01` passed the five isolated offline eight-process scenarios:
+two successful epochs with complete 31,200-sample output, sibling suspension,
+and each first-control topic suppressed while all eight ACTIVE incarnations
+remain live. The SpeechState/ExpressionFrame observer artifacts retain 213/211
+health messages. Fault cases have no Home/post-speech writes, and every process
+log, including replacements, has no traceback. No build overlapped the timing
+smoke. Ruff and diff whitespace checks pass. Inherited warning dispositions
+are unchanged, and no broad legacy suite was repeated for this base-runtime-only
+repair. `task3-r2-artifact-manifest.json` separately binds all round-two evidence
+and source hashes; both earlier qualification manifests remain unchanged.

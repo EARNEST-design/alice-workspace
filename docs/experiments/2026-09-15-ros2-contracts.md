@@ -214,3 +214,18 @@ original external timestamp, rechecks age before publication, and adds only its
 own stream sequence and publisher incarnation. A clause older than 250 ms in
 the relay queue is rejected before publication or the relay's output-sequence
 mutation. The sparse PCM production exception does not apply to this age rule.
+
+
+### Task 3 review repair: successful EndRun ordering
+
+Accepted successful EndRun seals ordinary work admission under the run lock,
+before any later arrival can replace a queued latest item. Success cleanup and
+terminal evidence wait for all retained admitted jobs to retire, bounded by a
+one-second wait. Those jobs retain their captured identity/cancellation context
+and undergo the normal schema, original-source-age and sequence checks; the
+seal does not silently discard valid queued messages. Worker errors latch
+before retirement is signalled, so a late failure cannot follow a successful
+terminal record. Timeout converts the pending success into fault. Cancellation
+wakes the wait immediately and fault evidence remains independent of a stuck
+ordinary worker. New-epoch admission still requires full prior-job retirement.
+No wire schema, active 250 ms limit or service completion deadline changes.

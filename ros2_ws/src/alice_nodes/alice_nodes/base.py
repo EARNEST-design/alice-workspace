@@ -33,6 +33,7 @@ LATEST = QoSProfile(
 RELIABLE = QoSProfile(depth=128, reliability=ReliabilityPolicy.RELIABLE)
 HEALTH = QoSProfile(depth=64, reliability=ReliabilityPolicy.RELIABLE)
 LIMIT_NS = 250_000_000
+SUCCESS_WORK_TIMEOUT_S = 1.0
 
 
 @dataclass(frozen=True)
@@ -178,6 +179,9 @@ class RuntimeNode(Node):
         self._stop = threading.Event()
         self.cancel = threading.Event()
         self._outstanding = 0
+        self._work_sealed = False
+        self._work_context = threading.local()
+        self._work_retired = threading.Condition(self._lock)
         self._final_outstanding = 0
         self._final_jobs = queue.Queue(maxsize=4)
         self._jobs = queue.Queue(maxsize=128)
@@ -255,7 +259,21 @@ class RuntimeNode(Node):
     def admit_header(self, header, producer, stream, *, exact=False, sparse=False):
         if header.identity != self.identity:
             return False
-        if self.lifecycle.state != "active" or self.error or self._ended is not None:
+        item = getattr(self._work_context, "item", None)
+        admitted_work = (
+            item is not None
+            and item.identity == self.identity
+            and item.cancel is self.cancel
+            and not item.retired
+        )
+        if (
+            self.lifecycle.state != "active"
+            or self.error
+            or (
+                self._ended is not None
+                and not (self._ended == "success" and admitted_work)
+            )
+        ):
             return False
         if self.peers.get(producer) != header.publisher_incarnation:
             raise ValueError(
@@ -271,14 +289,16 @@ class RuntimeNode(Node):
 
     def submit(self, operation: Callable, *, latest: str | None = None):
         with self._lock:
+            item = WorkItem(self.identity, self.cancel, operation, latest=latest)
+            # Seal before coalescing: a later arrival cannot overwrite the last
+            # valid item admitted before successful EndRun.
+            if self.cancel.is_set() or self._work_sealed:
+                item.retired = True
+                item.finished.set()
+                return item
             if latest is not None and latest in self._latest:
                 item = self._latest[latest]
                 item.operation = operation
-                return item
-            item = WorkItem(self.identity, self.cancel, operation, latest=latest)
-            if self.cancel.is_set():
-                item.retired = True
-                item.finished.set()
                 return item
             try:
                 self._jobs.put_nowait(item)
@@ -321,15 +341,18 @@ class RuntimeNode(Node):
                     if not valid:
                         item.retired = True
                 if valid:
+                    self._work_context.item = item
                     item.operation()
             except Exception as exc:
                 item.error = exc
                 if item.identity == self.identity:
                     self.fail(str(exc))
             finally:
-                with self._lock:
+                self._work_context.item = None
+                with self._work_retired:
                     self._outstanding -= 1
                     item.finished.set()
+                    self._work_retired.notify_all()
 
     def _queue_finalize(self, outcome):
         self._final_outstanding += 1
@@ -343,13 +366,33 @@ class RuntimeNode(Node):
                 continue
             try:
                 if identity == self.identity and cancel is self.cancel:
-                    if outcome != "success" or not cancel.is_set():
+                    if outcome != "success" or self._await_success_work(
+                        identity, cancel
+                    ):
                         self._finalize(outcome)
             except Exception as exc:
                 self.fail(str(exc))
             finally:
                 with self._lock:
                     self._final_outstanding -= 1
+
+    def _await_success_work(self, identity, cancel):
+        deadline = time.monotonic() + SUCCESS_WORK_TIMEOUT_S
+        with self._work_retired:
+            while self._outstanding:
+                if identity != self.identity or cancel.is_set():
+                    return False
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                self._work_retired.wait(remaining)
+            else:
+                return (
+                    identity == self.identity and not cancel.is_set() and not self.error
+                )
+        # Fault cleanup remains independent of the blocked ordinary worker.
+        self.fail("ordinary work did not retire before success deadline")
+        return False
 
     def subscribe_work(self, message_type, topic, callback, *, latest=False, qos=None):
         def receive(message):
@@ -439,6 +482,7 @@ class RuntimeNode(Node):
                             self.peers,
                         ) = {}, {}, {}, {}
                         self.cancel = threading.Event()
+                        self._work_sealed = False
                         self._playing_since = None
                         self._control_source = None
                         self._control_drained = False
@@ -540,6 +584,7 @@ class RuntimeNode(Node):
                 if self._ended is None:
                     self.validate_end(command.outcome)
                     self._ended = command.outcome
+                    self._work_sealed = True
                     if command.outcome != "success":
                         self.fail(command.reason)
                     else:
@@ -613,6 +658,8 @@ class RuntimeNode(Node):
             self.error = str(detail)[:256] or "runtime failure"
             self.state = RunHealth.FAULT
             self.cancel.set()
+            self._work_sealed = True
+            self._work_retired.notify_all()
             # Retire queued jobs before terminal evidence can admit another epoch.
             while True:
                 try:
