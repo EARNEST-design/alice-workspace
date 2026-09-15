@@ -7,7 +7,7 @@ import hashlib
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
-import yaml  # type: ignore[import-untyped]
+import yaml
 
 from alice.experiments.hardware_identification import (
     ElectricalSafetyEvidence,

@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 import stat
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -102,7 +103,7 @@ def inspect_controller_identity(
     expectation: ControllerDeviceExpectation,
     *,
     sys_tty_root: Path = Path("/sys/class/tty"),
-    snapshot_device=None,
+    snapshot_device: Callable[[Path, Path, str], DeviceNodeSnapshot] | None = None,
 ) -> StableDeviceIdentity:
     """Verify a Maestro command-port by-id link and its read-only sysfs identity."""
 
@@ -145,7 +146,7 @@ def inspect_camera_identity(
     expectation: CameraDeviceExpectation,
     *,
     sys_video_root: Path = Path("/sys/class/video4linux"),
-    snapshot_device=None,
+    snapshot_device: Callable[[Path, Path, str], DeviceNodeSnapshot] | None = None,
 ) -> StableDeviceIdentity:
     """Verify a stable V4L2 capture link and sysfs membership without opening it."""
 

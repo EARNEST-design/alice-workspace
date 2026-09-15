@@ -7,7 +7,7 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Literal
 
-import yaml  # type: ignore[import-untyped]
+import yaml
 from pydantic import BaseModel, ConfigDict
 
 from alice.contracts.blendshapes import NonEmptyString, Sha256Hex

@@ -19,7 +19,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Literal, Never, SupportsIndex
 
-import yaml  # type: ignore[import-untyped]
+import yaml
 from pydantic import (
     AwareDatetime,
     BaseModel,
@@ -78,7 +78,10 @@ from alice.safety.supervisor import (
     SafetyLimits,
     SafetySupervisor,
 )
-from alice.speech.device_identity import LinuxUsbIdentity, _resolve_linux_usb_identity
+from alice.speech.device_identity import LinuxUsbIdentity
+from alice.speech.device_identity import (
+    _resolve_linux_usb_identity as _resolve_linux_usb_identity,
+)
 
 _PLACEHOLDER_PREFIX = "REQUIRED_"
 _PREFLIGHT_ACK = "I CONFIRM PREFLIGHT WITH MASTER SERVO POWER OFF"

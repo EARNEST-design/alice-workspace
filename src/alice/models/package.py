@@ -51,7 +51,7 @@ from alice.motion.face_events import (
     FaceEventPolicy,
 )
 from alice.motion.streaming import ProductionCandidateComposer
-from alice.speech.device_identity import FilesystemIdentity
+from alice.speech.device_identity import FilesystemIdentity as FilesystemIdentity
 
 _WEIGHTS_PATH = "weights/residual.safetensors"
 _TRAINING_RECORD_PATH = "records/training.json"

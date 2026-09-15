@@ -1,0 +1,45 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+Visualization Manager:
+  Class: ""
+  Global Options:
+    Background Color: 32; 39; 44
+    Fixed Frame: alice_preview/base_link
+    Frame Rate: 30
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Name: Ground
+      Enabled: true
+      Cell Size: 0.1
+      Plane Cell Count: 20
+      Color: 100; 113; 120
+    - Class: rviz_default_plugins/RobotModel
+      Name: Alice planning model
+      Enabled: true
+      Alpha: 1
+      Visual Enabled: true
+      Collision Enabled: false
+      TF Prefix: alice_preview
+      Description Source: Topic
+      Description Topic:
+        Value: /alice_preview/robot_description
+        Reliability Policy: Reliable
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Depth: 5
+    - Class: rviz_default_plugins/TF
+      Name: Joint frames
+      Enabled: false
+      Show Axes: true
+      Show Names: true
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Distance: 1.2
+      Focal Point: {X: 0, Y: 0, Z: 0.31}
+      Pitch: 0.15
+      Yaw: 0.5
+Window Geometry:
+  Width: 1100
+  Height: 800

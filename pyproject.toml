@@ -55,6 +55,7 @@ dev = [
   "safetensors>=0.8.0",
   "torch>=2.14.0",
   "types-pyserial",
+  "types-pyyaml>=6.0.12.20260906",
 ]
 
 [[tool.uv.index]]

@@ -10,7 +10,7 @@ from typing import Literal
 
 import numpy as np
 import torch
-import yaml  # type: ignore[import-untyped]
+import yaml
 from pydantic import BaseModel, ConfigDict, Field
 from safetensors.torch import save
 

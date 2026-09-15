@@ -11,8 +11,9 @@ import signal
 import subprocess
 import sys
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
+from threading import Event
 from typing import Any
 
 from alice.contracts.actuation import ActuatorTarget
@@ -21,10 +22,11 @@ from alice.contracts.speech_stream import ClauseSequence, SpeechClause
 from alice.experiments.jaw_trial_cli import _check_owners as _check_owners
 from alice.experiments.jaw_trial_cli import _write
 from alice.hardware.face_scope import FACE_CHANNELS, face_manifest, face_profiles
-from alice.hardware.manifest import load_manifest
+from alice.hardware.manifest import HardwareManifest, load_manifest
 from alice.speech.composer import compose_frame
 from alice.speech.expression_bridge import ExpressionBridge
 from alice.speech.face_runtime import FaceRuntime
+from alice.speech.face_stream import FaceCommandStream
 from alice.speech.stream_cli import _derivatives, _preview, _RecordingWorker
 from alice.speech.stream_playback import SimulatedPlayback, SoundDevicePlayback
 from alice.speech.stream_session import SpeechStreamSession
@@ -34,7 +36,13 @@ from alice.speech.tts_worker import PocketTtsWorker
 ROOT = Path(__file__).resolve().parents[3]
 
 
-def _factory(full, generation, hardware, report, output):
+def _factory(
+    full: HardwareManifest,
+    generation: str,
+    hardware: bool,
+    report: dict[str, Any],
+    output: Path,
+) -> Callable[[Event], FaceCommandStream]:
     from alice.speech.face_adapter import face_factory
 
     return face_factory(

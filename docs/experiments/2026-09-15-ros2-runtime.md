@@ -236,3 +236,266 @@ smoke. Ruff and diff whitespace checks pass. Inherited warning dispositions
 are unchanged, and no broad legacy suite was repeated for this base-runtime-only
 repair. `task3-r2-artifact-manifest.json` separately binds all round-two evidence
 and source hashes; both earlier qualification manifests remain unchanged.
+
+## Task 4: actual Compose deployment
+
+The migration now packages eight separate default participants plus explicit
+`tools` and headless `preview` profiles. Default boot is idle, non-root,
+read-only, capability-dropped and confined to an internal UDP bridge, with no
+model caches or device mappings. Application source and the large pinned Python
+dependency stages are separate. Builds use the qualified venv interpreter for
+colcon and verify installed entrypoint shebangs. Additional OS/ROS packages are
+pinned; source changes reuse the large wheel layers (small final OS runtime
+layers may rebuild). Images and each qualification helper snapshot have
+independent SHA256 identities; an old Git commit is not used to identify dirty
+application source.
+
+Robot description files were selectively imported from
+`13c25490d78ccec05a6f2714deafb5c39c60862b`. Lyrical Xacro/URDF topology and real
+separate-container joint-state/TF checks preserve the `/alice_preview` prefix,
+provisional 0.62 m height, body IDs and mimics. There is no PWM bridge or new
+actuation scope. The imported package's obsolete CMake minimum was corrected;
+the remaining `CATKIN_INSTALL_INTO_PREFIX_ROOT` unused-variable warning comes
+from colcon's generic CMake invocation for an ament package, not a failed build.
+It is retained rather than suppressed. The first build used an incorrect parser
+package name; `ros-lyrical-urdfdom-py` is the released Lyrical package.
+
+### Clock-domain deployment correction
+
+The first live graph rejected PREPARE because Docker 29.7.2 gives concurrent
+containers separate time namespaces. Earlier sequential probes had not exposed
+this distinction. Concurrent participants have the same kernel boot and complete
+zero monotonic/boottime offsets. Under the coordinator's explicit technical
+ruling, proof algorithm `host-monotonic-zero/v1` validates those metadata and
+hashes the version, run epoch and kernel boot identity. Namespace metadata must
+still be readable and well-formed; its inode is diagnostic rather than part of
+the proof. Missing, malformed, duplicate, extra, unknown or nonzero offsets and
+incompatible proofs reject admission before factories. All 250 ms source/progress
+limits remain unchanged, with no timestamp translation or daemon change.
+Raw clock IDs/proofs are not retained. All-eight concurrent proof evidence is
+recorded inside each actual Compose scenario; host-shell proofs are not used.
+See ADR 0012 and the preserved clock failures/probes for the Linux/Docker basis.
+
+### Functional and timing observations
+
+`task4-compose-smoke-02` passed the uninstrumented default graph, synthetic
+success with admission timing, and headless preview. Synthetic output contains
+24,000 transport samples plus 7,200 tail samples: generated=submitted=played
+31,200, zero underflow, bounded ring, successful Home and recorder manifest.
+The 61 measured admissions have p99/max 16.98295 ms, meeting the 20 ms benchmark
+in that run without competing builds.
+
+`task4-compose-matrix-01` passed20 functional scenarios, including real offline
+Azelma through the graph, cancellation, gap/duplicate/stale PCM, delayed
+expression, first SpeechState loss, credit backpressure, controller/recorder
+fault, config/clock mismatch, cancel during sad hold, five owner crashes and
+expression restart. The offline output has 178,560 transport plus 7,200 tail
+samples:185,760 generated=submitted=played (7.74s), zero underflow and48,000
+maximum ring capacity. Exact model/tokenizer/Azelma assets were verified inside
+the actual TTS container before inference. This is real model streaming, beyond
+the earlier Task 3 PREPARE-only warmup. It preserves the accepted Azelma seeds,
+visible-face tuning, sample accounting and bounds; it is not a bit-identical
+waveform or physical baseline claim.
+
+Real-model timing does **not** meet the 20 ms p99 target. Matrix01's373 admissions
+have p50=3.658ms,p95=15.019ms,p99=22.326ms,max28.566ms, four above 20 ms.
+A focused repeat (`task4-focused-matrix-02/offline-profile`) has 372 admissions,
+p99=21.760ms,max32.293ms, seven above 20 ms. All remain below the unchanged 250 ms
+rejection bound. Matched source timestamps locate tails across expression
+execution and later scheduling waits; motion execution p99 is0.610ms.
+None of 21 retained healthcheck execution intervals overlaps those seven tails.
+That diagnostic wall/monotonic correlation does not establish CPU causality.
+The audio wrapper sampled the prior `last_dac_ns` before the method updated it,
+so it cannot attribute newly published audio source age. Actual audio polling
+already occurs every2 ms;20 ms controls PCM chunks and progress spacing. No
+unmeasured cadence/resource change was made, and functional pass is not timing
+acceptance. Coordinator stage analysis and healthcheck attribution scripts bind
+their retained inputs by hash.
+
+The original drop-PCM `underflow` case safely aborted on missing mouth lookahead
+before callback drain, so it is not callback-underflow proof. The focused repeat
+adds an actual callback output-underflow status injection: counter 1, immediate
+local synchronization fault and no successful drain. Source-exhaustion initially
+failed in the helper because `/fixtures` was a symlink into installed config;
+a custom bind hid visible-face resources. A real directory fixes that packaging
+boundary, verified by an installed-image RED→GREEN mount test and the subsequent
+actual source-exhaustion fault (`source closed without end_of_response`).
+
+### Teardown qualification and evidence limits
+
+Early matrix logs were captured before Compose stop and cannot prove clean
+teardown. Capturing logs after stop exposed premature ROS-context destruction,
+then queued-handler wake-guard destruction in the Lyrical executor. The focused
+SIGTERM tests retain both RED stages. A saturated-handler test proves clean
+retirement; a non-returning handler proves local stop within250 ms, independent
+fault evidence and failed process exit after a five-second drain deadline.
+No exception is suppressed. A separate shutdown failure artifact preserves
+failed cleanup without rewriting a sealed run terminal.
+
+`task4-boundary-matrix-03` adds real bridge cases for both first-control losses,
+blocked TTS subprocess/expression cancellation, external relay aging, stale
+epoch after fresh PREPARE, conflicting/idempotent terminals, queued START and
+success retirement late-error/timeout. The latter three target one actual
+participant through its lifecycle services while seven other containers remain
+idle; they are not represented as all-eight-active action tests. The expression
+observer initially requested incompatible reliable QoS, so its no-late-frame
+assertion is not passing coverage until rerun with the actual best-effort topic.
+The first active SIGTERM-all run left local terminals but session required the
+supervisor's15 s SIGKILL while waiting on stopped peers; the explicit bounded
+process-exit repair addresses this separately from clean post-run shutdown.
+
+Final commands/results, speaker-only outcome, exact evidence-level coverage and
+artifact manifest are recorded below after final verification. Servo/camera
+physical acceptance remains pending; metadata-only hardware overlay inspection
+does not resolve the previous visible-motion issue.
+
+### Acceptance-row mapping
+
+The final matrix uses eight actual runtime containers on the inspected internal
+bridge and a ninth tools client. Selected test-only wrappers inject faults into
+those processes. They are not host-unit or same-container substitutes.
+
+| Acceptance input | Actual-container scenario / evidence |
+| --- | --- |
+| Default boot; happy simulation | `default`, `success`: live graph/inspect, idle assertion, matched sample accounting, mock receipts/Home, recorder manifest |
+| Real TTS | `offline`: actual cached Azelma inference, in-container model asset hashes and model identity, complete sample counts |
+| Bounded PCM | `backpressure`: slow DAC, cumulative credit duplicates, outstanding reservations≤48,000, producer cancel |
+| PCM gap/order | `gap`, `duplicate`: fresh packets with missing/duplicate sequence rejected by audio |
+| Stale source | `stale`, `delayed-expression`: expired original source rejects current work |
+| First-control loss | `first-control`, `first-control-motion`: each topic withheld while all eight ACTIVE publishers remain observed |
+| Stalled inference cancellation | `tts-stall-cancel`, `expression-stall-cancel`: actual owned subprocess termination; local terminal before blocked expression retires; matching QoS observes zero late frames |
+| Queued START | `queued-start`: cross-container lifecycle service, no factory call, old job blocks new epoch until retirement |
+| External relay aging | `external-relay-aging`: original stamp unchanged, delayed forwarding rejected, zero PCM |
+| Generation change | `stale-epoch`: prepare fresh audio epoch, publish actual old packet, no generated/submitted/played samples in new epoch |
+| Session/audio/expression/Maestro/recorder crash | `kill-session`, `kill-audio`, `kill-expression`, `kill-maestro`, `kill-recorder`: scoped SIGKILL, independent surviving evidence, last-write stop timing |
+| Callback underflow | `callback-underflow`: inject actual callback status error, counter 1/no drain; `underflow` separately retains earlier safe lookahead rejection |
+| Controller error | `controller`: mocked owner error propagates through local watchdog; no Home/recovery |
+| Cancel during sad hold | `cancel-hold`: cancellation after audio drain wins before Home |
+| Successful finalization ordering | `success-retirement-error`, `success-retirement-timeout`: admitted work blocks success; late error/deadline faults; independent finalization and epoch retirement |
+| Conflicting terminals | `terminal-conflict`: repeated FAULT is idempotent; repeated SUCCESS rejected; terminal digest unchanged |
+| Config mismatch | `config-mismatch`: mismatched request digest rejects preparation; malformed calibration/model/profile combinations retain focused contract/unit coverage |
+| Clock mismatch | `clock-mismatch`: incompatible participant proof rejects PREPARE; strict metadata parsing/equality matrix is unit-tested and all actual containers prove zero offsets/equal versioned proof |
+| Process restart | `restart-expression`: new incarnation cannot resume the old run |
+| Face-observation failure | Every successful replay run: explicit no-face validity/error, empty scores, no inferred affect |
+| Source exhaustion | `source-exhaustion`: incomplete fixture faults without successful completion/Home |
+| Transport timing | Original source→actual Maestro admission rows; synthetic and real-model distributions retained separately; unmet20 ms target explicit |
+| SIGTERM teardown (additional) | `sigterm-all`: local cancellation/evidence before bounded handler-drain failure; ordinary post-run stops exit cleanly |
+| Robot description (additional) | `preview`: separate joint/robot-state publishers, synthetic joints and prefixed TF, provisional geometry only |
+
+The three targeted lifecycle-service cases deliberately leave the other seven
+participants idle. Metadata parsing rejection tests cannot safely manufacture
+nonzero kernel offsets inside hardened containers; their evidence level remains
+unit tests plus actual-container valid-domain proof and incompatible-proof
+admission rejection. No shifted-clock or physical-hardware qualification is
+implied. All final post-stop logs are retained, including expected injected
+faults and explicitly failed cleanup.
+
+### Final matrix and verification results
+
+`task4-final-matrix-01` qualifies build 07's exact image/source identities:
+**35/35 functional scenarios pass**. The read-only evidence audit verifies every
+sealed terminal file hash, audio count/ring bounds, eight observed ACTIVE
+publishers in the stall/topic-loss cases, and all post-stop logs. The eight
+runtime participants stop with exit 0 after completed runs. Deliberate owner
+SIGKILL exits 137; preview `ros2 launch` processes terminate with 143 while their
+publishers report clean exit. Active SIGTERM-all gives the session exit 1 and a
+separate five-second failed-quiescence artifact with cancellation and completed
+local terminal evidence; the seven other runtime participants exit 0. This is
+bounded failed cleanup, not successful shutdown or hidden supervisor SIGKILL.
+No Traceback, RCLError or Destroyable diagnostics remain in these stopped logs.
+
+The final build 07 synthetic 64 admissions have p99/max 15.837108 ms. Its real
+offline 385 admissions have p99=21.175648 ms,max23.221253 ms; the 20 ms target remains
+unmet. All three real-model distributions are retained, and no competing build
+ran during their timing samples. The offline run still has exact sample
+accounting, zero underflow, independent Home and recorder evidence.
+
+`task4-final-supplement-01` passes 4/4 additional scenarios: actual Recorder
+retirement with a late error/timeout, and session/audio self-crash through a
+test-only ROS trigger. Each process writes its own CLOCK_MONOTONIC marker and
+immediately sends SIGKILL to itself. The helper refuses to crash if writing the
+marker takes more than 2 ms; neither run rejected. Marker→last retained mock
+receipt is 207.914402 ms (session) and 209.117 ms (audio). Those intervals include
+marker writing and any subsequent scheduling; they avoid Docker CLI startup.
+They do not prove physical PWM cutoff or a general hard real-time guarantee.
+
+The coarse host-command-start→last-receipt measurements remain 297.848 ms (session),
+308.497 ms (audio),322.931 ms (expression),330.107 ms (recorder). Docker CLI duration
+alone is164–214 ms. Tools-observed last target heartbeat→last receipt reaches
+255.681/255.492/251.952/257.770 ms respectively; this observer is not the exact
+heartbeat consumed by Maestro, and watchdog/in-flight scheduling is visible.
+These measured gaps are not relabeled as an exact250 ms end-to-end stop. The
+strict expiry/admission predicates remain 250 ms. `task4-stop-analysis.json`
+separates command start/completion, diagnostic Docker-exit conversion, observed
+heartbeat and self-marker measurements with input hashes and limits. A killed
+Maestro cannot finalize its local command log; Recorder retains 18 published
+servo receipts, which need not include its final write. Process death prevents
+future writes by that owner but cannot remove physical controller power.
+
+The first full verification passes 1046 tests with three skips and two existing
+fork warnings in 77.29 s; Ruff passes. Strict mypy then fails 15 errors in five
+files, so the combined command is a failed attempt. The exact pre-migration
+`3f4093b` source passes 85 files under the same image/checker. The migration's
+lightweight helper extraction had dropped typed signatures and explicit
+re-exports. Those are restored; `types-PyYAML==6.0.12.20260906` is declared in
+the development lock and pinned test image, and now-obsolete YAML import ignores
+are removed. These changes affect annotations/re-exports, not control behavior.
+Host strict mypy passes 87 files; the final image verifies the installed stubs.
+The final covering script uses `bash -eo pipefail` inside Docker so an earlier
+pytest/Ruff failure cannot be masked by a later successful command.
+
+The three container skips are the Docker effective-context regression, the
+installed-image custom-fixture bind regression (Docker CLI/daemon deliberately
+absent inside the test container), and the optional Node.js speech-preview
+clock/seek regression. They are run separately on the host. Both fork warnings
+come from existing deliberate hardware-authority fork tests; no new callback
+cleanup diagnostics accompany the suite.
+
+Final self-review also caught a closed-stderr edge in failed process exit. A
+diagnostic write could raise before `os._exit` and enter Python's unbounded
+pool join. The final version relies on its durable failure artifact and exit 1,
+with no potentially blocked diagnostic I/O before that boundary. The saturation,
+stuck-handler and closed-stderr prepared-run tests pass 3/3 in 13.16 s and assert
+local stop within250 ms plus independent fault evidence. Build 08 includes this
+narrow fix and the type-only repairs. Build 07's broad matrix is preserved with
+its exact identities; the final image receives fresh normal/SIGTERM/speaker
+checks and full regression rather than relabeling earlier binaries.
+
+
+### Final build 08 handoff
+
+Build 08 completed successfully. Its core, speech, perception and test images
+share source-tree SHA256
+`6390a6263c19b5642b60a3cd9310fe98caacbbcf5d2503b711500057f8b230c1`.
+`task4-image-source-manifests-08.json` records each immutable image ID and every
+input file hash; `task4-package-inventory-08-*.txt` records installed packages.
+`task4-full-verification-02.sh` exits 0: 1046 passed, three skips, two existing
+fork warnings in 76.68 s; Ruff passes and strict mypy passes 87 source files.
+`task4-host-covering-01.log` has nine passes in 1.53 s, covering all three skips.
+
+`task4-final-image08` passes the normal and active SIGTERM-all scenarios using
+these exact images. Post-stop audit confirms the same explicit bounded failed
+session cleanup (exit 1, local terminal complete, cancellation requested,
+five-second quiescence deadline); ordinary completion stops cleanly.
+`task4-public-launcher-08.sh` exercises the documented launcher up/run/down and
+exits 0. All eight sealed terminals report success, 31,200 samples are played,
+and post-stop logs have no ROS teardown errors. The stack is removed; this
+launcher probe did not separately retain per-container exit codes.
+
+After advance playback announcement, `task4-speaker-08` passes real offline
+Azelma through the selected SN6140 analog Pulse sink. Only the audio container
+receives the Pulse socket; Maestro and perception remain simulated. The audio
+clock is `portaudio-dac`: 178,560 transport samples plus 7,200 tail samples give
+185,760 generated/submitted/played samples, drained=true, zero underflows and
+48,000 maximum ring depth. Model, tokenizer and Azelma bytes are verified inside
+TTS before inference (`speaker/model-assets.json`). Simulated Home completes;
+physical_motion_verified remains false. All eight post-stop exits are 0, sealed
+artifact hashes verify, and stopped logs have no ROS teardown exceptions.
+This verifies stream completion on the selected route; it is not an independent
+acoustic measurement or a user report of audibility. No waveform is retained.
+
+`task4-artifact-manifest.json` hashes successful and failed attempts, retained
+harnesses, source/model manifests and coordinator clock/timing rulings. Build
+07 broad-matrix evidence is explicitly distinct from build 08 targeted evidence.
+No new servo or camera trial ran. Whole-migration review and physical acceptance
+remain coordinator/operator follow-up; the real-model 20 ms p99 gap is open.

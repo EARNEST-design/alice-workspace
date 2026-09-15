@@ -1,0 +1,13 @@
+services:
+  audio:
+    command: [alice-node, audio, --ros-args, -p, "audio_device_enabled:=true"]
+    environment:
+      PULSE_SERVER: unix:/run/alice-pulse/native
+      PULSE_SINK: ${ALICE_PULSE_SINK:?Set the inspected output sink name}
+      ALSA_CONFIG_PATH: /opt/alice/asound.conf
+    volumes:
+      - type: bind
+        source: ${ALICE_PULSE_SOCKET:?Set the user Pulse native socket}
+        target: /run/alice-pulse/native
+        read_only: true
+        bind: {create_host_path: false}

@@ -23,6 +23,7 @@ from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from alice.hardware.face_scope import face_manifest
 from alice.hardware.manifest import load_manifest
 from alice_nodes import contracts as wire
+from alice_nodes.clock import clock_proof
 from alice_nodes.transport import RunLifecycleGuard, SequenceGuard, StreamHeader
 
 LATEST = QoSProfile(
@@ -34,6 +35,7 @@ RELIABLE = QoSProfile(depth=128, reliability=ReliabilityPolicy.RELIABLE)
 HEALTH = QoSProfile(depth=64, reliability=ReliabilityPolicy.RELIABLE)
 LIMIT_NS = 250_000_000
 SUCCESS_WORK_TIMEOUT_S = 1.0
+SHUTDOWN_HANDLER_TIMEOUT_S = 5.0
 
 
 @dataclass(frozen=True)
@@ -42,16 +44,6 @@ class RuntimePaths:
     hardware: Path
     output: Path
     fixtures: Path
-
-
-def clock_proof(epoch: str) -> str:
-    """Salt inside the participant namespace; never persist the proof or raw IDs."""
-    fields = [
-        Path("/proc/sys/kernel/random/boot_id").read_text(),
-        os.readlink("/proc/self/ns/time"),
-        Path("/proc/self/timens_offsets").read_text(),
-    ]
-    return hashlib.sha256((epoch + "\0" + "\0".join(fields)).encode()).hexdigest()
 
 
 def effective_files(root: Path, profile: str) -> dict[str, bytes]:
@@ -792,17 +784,70 @@ class RuntimeNode(Node):
 
 
 def spin(factory, args=None):
-    import rclpy
+    import signal
 
-    rclpy.init(args=args)
+    import rclpy
+    from rclpy.signals import SignalHandlerOptions
+
+    # rclpy's default SIGTERM handler destroys the context before application
+    # cleanup. Keep it live for local revocation/evidence and executor retirement.
+    stop = threading.Event()
+    previous = {
+        signum: signal.signal(signum, lambda *_: stop.set())
+        for signum in (signal.SIGINT, signal.SIGTERM)
+    }
+    rclpy.init(args=args, signal_handler_options=SignalHandlerOptions.NO)
     node = factory()
     executor = MultiThreadedExecutor(num_threads=6)
     executor.add_node(node)
     try:
-        executor.spin()
+        while not stop.is_set() and rclpy.ok():
+            executor.spin_once(timeout_sec=0.05)
     except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
-        node.destroy_node()
-        executor.shutdown(timeout_sec=2)
-        rclpy.try_shutdown()
+        try:
+            if node.identity is not None and not node._completed:
+                node.fail("node shutdown")
+            # Lyrical rclpy destroys its wake guard before joining its pool.
+            # Already queued handlers still trigger that guard on entry. Spin
+            # scheduling is stopped above; retire those bounded handlers first.
+            # Keep this compatibility ordering covered by the saturated SIGTERM
+            # regression until upstream shutdown joins before guard destruction.
+            pool = executor._executor
+            pool.shutdown(wait=False)
+            deadline = time.monotonic() + SHUTDOWN_HANDLER_TIMEOUT_S
+            threads = tuple(pool._threads)
+            for thread in threads:
+                thread.join(timeout=max(0, deadline - time.monotonic()))
+            if any(thread.is_alive() for thread in threads):
+                # Python cannot interrupt a stuck callback safely. Local fail()
+                # above already revoked actuation and launched independent fault
+                # evidence. Do not destroy entities or wait in Python's atexit
+                # pool join; make this failed process boundary explicit instead.
+                reason = "ROS handler quiescence deadline expired during shutdown"
+                try:
+                    node.paths.output.mkdir(parents=True, exist_ok=True)
+                    write_json(
+                        node.paths.output
+                        / f"shutdown-{node.role}-{node.incarnation}.json",
+                        {
+                            "node": node.role,
+                            "quiescent": False,
+                            "deadline_seconds": SHUTDOWN_HANDLER_TIMEOUT_S,
+                            "error": reason,
+                            "local_terminal_completed": node._completed,
+                            "cancel_requested": node.cancel.is_set(),
+                        },
+                    )
+                finally:
+                    # The artifact and exit status surface the failure. Stderr
+                    # can be closed or blocked; never let diagnostic I/O prevent
+                    # the process boundary after the drain deadline.
+                    os._exit(1)
+            executor.shutdown(timeout_sec=5)
+            node.destroy_node()
+        finally:
+            rclpy.try_shutdown()
+            for signum, handler in previous.items():
+                signal.signal(signum, handler)

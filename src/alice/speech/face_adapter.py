@@ -20,6 +20,7 @@ from alice.safety.supervisor import (
     SafetySupervisor,
 )
 from alice.speech.device_identity import (
+    LinuxUsbIdentity,
     _resolve_linux_usb_identity,
     inspect_controller_identity,
     load_readiness_device_config,
@@ -47,7 +48,11 @@ def _exclusive_transport(path: str, timeout_seconds: float) -> Any:
     )
 
 
-def _check_owners(full: HardwareManifest, *, resolver=None) -> dict[str, object]:
+def _check_owners(
+    full: HardwareManifest,
+    *,
+    resolver: Callable[[str], LinuxUsbIdentity] | None = None,
+) -> dict[str, object]:
     paths = (
         full.controller.command_device_path,
         full.controller.command_device_path.replace("-if00", "-if02"),

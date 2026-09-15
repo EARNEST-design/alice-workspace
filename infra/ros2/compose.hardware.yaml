@@ -1,0 +1,37 @@
+# Explicit attended action --hardware is still required. Never autoplays/arms.
+services:
+  session: {command: [alice-node, session, --ros-args, -p, "hardware_enabled:=true"]}
+  tts: {command: [alice-node, tts, --ros-args, -p, "hardware_enabled:=true", -p, "tts_mode:=pocket"]}
+  audio: {command: [alice-node, audio, --ros-args, -p, "hardware_enabled:=true"]}
+  expression: {command: [alice-node, expression, --ros-args, -p, "hardware_enabled:=true"]}
+  motion: {command: [alice-node, motion, --ros-args, -p, "hardware_enabled:=true"]}
+  recorder: {command: [alice-node, recorder, --ros-args, -p, "hardware_enabled:=true"]}
+  maestro:
+    command: [alice-node, maestro, --ros-args, -p, "hardware_enabled:=true"]
+    pid: host
+    group_add: ["${ALICE_SERIAL_GID:?Set numeric serial group}"]
+    devices:
+      - "${ALICE_MAESTRO_IF00:?Resolve command interface}:${ALICE_MAESTRO_IF00}:rw"
+      - "${ALICE_MAESTRO_IF02:?Resolve auxiliary interface}:${ALICE_MAESTRO_IF02}:r"
+    volumes:
+      - type: bind
+        source: /dev/serial/by-id
+        target: /dev/serial/by-id
+        read_only: true
+        bind: {create_host_path: false}
+  perception:
+    command: [alice-node, perception, --ros-args, -p, "hardware_enabled:=true", -p, "perception_mode:=c525", -p, "model_path:=/models/face_landmarker.task"]
+    group_add: ["${ALICE_VIDEO_GID:?Set numeric camera group}"]
+    devices:
+      - "${ALICE_C525_DEVICE:?Resolve selected C525 capture node}:${ALICE_C525_DEVICE}:rw"
+    volumes:
+      - type: bind
+        source: /dev/v4l/by-id
+        target: /dev/v4l/by-id
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${ALICE_FACE_MODEL:?Set reviewed MediaPipe asset}
+        target: /models/face_landmarker.task
+        read_only: true
+        bind: {create_host_path: false}

@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final, Literal, TypeVar
 
-import yaml  # type: ignore[import-untyped]
+import yaml
 
 from alice.experiments.hardware_identification import (
     FailedRunPowerRemovalConfirmation,

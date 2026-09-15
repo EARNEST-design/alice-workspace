@@ -1,0 +1,104 @@
+x-runtime: &runtime
+  user: "${ALICE_UID:-1000}:${ALICE_GID:-1000}"
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  init: true
+  restart: "no"
+  stop_grace_period: 20s
+  networks: [runtime]
+  pids_limit: 256
+  mem_limit: 2g
+  tmpfs: ["/tmp:rw,nosuid,nodev,size=256m,mode=1777"]
+  volumes:
+    - type: bind
+      source: ${ALICE_ARTIFACTS:-../../artifacts/ros2/local}
+      target: /artifacts
+      bind: {create_host_path: false}
+  environment: &environment
+    ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-73}
+    RMW_IMPLEMENTATION: rmw_fastrtps_cpp
+    FASTDDS_DEFAULT_PROFILES_FILE: /opt/alice/fastdds.xml
+    ROS_LOG_DIR: /tmp/ros-log
+    HOME: /tmp
+    OMP_NUM_THREADS: "1"
+    OPENBLAS_NUM_THREADS: "1"
+    HF_HUB_OFFLINE: "1"
+    HF_HUB_DISABLE_TELEMETRY: "1"
+    HF_HOME: /tmp/hf
+    HF_HUB_CACHE: /models/hub
+    ALICE_IMAGE_ID: ${ALICE_CORE_ID:-unprovided}
+  healthcheck:
+    test: [CMD, python, /opt/alice/healthcheck.py]
+    interval: 10s
+    timeout: 8s
+    start_period: 15s
+    retries: 3
+
+services:
+  session:
+    <<: *runtime
+    image: ${ALICE_CORE_IMAGE:-alice-ros2:core}
+    command: [alice-node, session]
+  tts:
+    <<: *runtime
+    image: ${ALICE_SPEECH_IMAGE:-alice-ros2:speech}
+    environment:
+      <<: *environment
+      ALICE_IMAGE_ID: ${ALICE_SPEECH_ID:-unprovided}
+    command: [alice-node, tts]
+  audio:
+    <<: *runtime
+    image: ${ALICE_SPEECH_IMAGE:-alice-ros2:speech}
+    environment:
+      <<: *environment
+      ALICE_IMAGE_ID: ${ALICE_SPEECH_ID:-unprovided}
+    command: [alice-node, audio]
+  expression:
+    <<: *runtime
+    image: ${ALICE_SPEECH_IMAGE:-alice-ros2:speech}
+    environment:
+      <<: *environment
+      ALICE_IMAGE_ID: ${ALICE_SPEECH_ID:-unprovided}
+    command: [alice-node, expression]
+  motion:
+    <<: *runtime
+    image: ${ALICE_CORE_IMAGE:-alice-ros2:core}
+    command: [alice-node, motion]
+  maestro:
+    <<: *runtime
+    image: ${ALICE_CORE_IMAGE:-alice-ros2:core}
+    command: [alice-node, maestro]
+  perception:
+    <<: *runtime
+    image: ${ALICE_PERCEPTION_IMAGE:-alice-ros2:perception}
+    environment:
+      <<: *environment
+      ALICE_IMAGE_ID: ${ALICE_PERCEPTION_ID:-unprovided}
+    command: [alice-node, perception]
+  recorder:
+    <<: *runtime
+    image: ${ALICE_CORE_IMAGE:-alice-ros2:core}
+    command: [alice-node, recorder]
+  tools:
+    <<: *runtime
+    image: ${ALICE_TEST_IMAGE:-alice-ros2:test}
+    profiles: [tools]
+    healthcheck: {disable: true}
+    command: [ros2, node, list, --no-daemon]
+  robot_state_publisher:
+    <<: *runtime
+    image: ${ALICE_CORE_IMAGE:-alice-ros2:core}
+    profiles: [preview]
+    healthcheck: {disable: true}
+    command: [ros2, launch, alice_bringup, preview.launch.py, "role:=robot_state_publisher"]
+  joint_state_publisher:
+    <<: *runtime
+    image: ${ALICE_CORE_IMAGE:-alice-ros2:core}
+    profiles: [preview]
+    healthcheck: {disable: true}
+    command: [ros2, launch, alice_bringup, preview.launch.py, "role:=joint_state_publisher"]
+networks:
+  runtime:
+    internal: true
+    driver: bridge

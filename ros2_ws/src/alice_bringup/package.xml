@@ -1,0 +1,11 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>alice_bringup</name><version>0.1.0</version>
+  <description>Explicit isolated Alice participant and headless preview launch.</description>
+  <maintainer email="alice@example.invalid">Alice maintainers</maintainer>
+  <license>Proprietary</license>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <exec_depend>alice_nodes</exec_depend><exec_depend>alice_description</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <export><build_type>ament_cmake</build_type></export>
+</package>

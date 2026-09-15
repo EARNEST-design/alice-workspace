@@ -1,0 +1,9 @@
+services:
+  tts:
+    command: [alice-node, tts, --ros-args, -p, "tts_mode:=pocket"]
+    volumes:
+      - type: bind
+        source: ${ALICE_TTS_CACHE:?Set the public model repository cache path}
+        target: /models/hub/models--kyutai--pocket-tts-without-voice-cloning
+        read_only: true
+        bind: {create_host_path: false}

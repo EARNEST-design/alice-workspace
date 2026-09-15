@@ -1,0 +1,14 @@
+# All values in this file are unmeasured illustrative geometry, in metres.
+# At height_m=0.62: 0.04 + 0.12 + 0.12 + 0.19 + 0.02 + 0.13 = 0.62.
+# Scalar height_m uniformly scales these dimensions from the 0.62 m baseline.
+ankle_height: 0.04
+shin_length: 0.12
+thigh_length: 0.12
+hip_spacing: 0.115
+hip_to_neck: 0.19
+neck_length: 0.02
+head_radius: 0.065
+shoulder_height_above_hip: 0.16
+shoulder_spacing: 0.25
+upper_arm_length: 0.095
+forearm_length: 0.085

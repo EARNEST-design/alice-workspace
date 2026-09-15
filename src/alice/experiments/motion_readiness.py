@@ -14,7 +14,7 @@ from typing import Literal, cast
 
 import numpy as np
 import torch
-import yaml  # type: ignore[import-untyped]
+import yaml
 from pydantic import BaseModel, ConfigDict, JsonValue
 
 from alice.contracts.actuation import ActuatorTarget
@@ -685,8 +685,11 @@ def _report(
 
 
 def inspect_controller_identity(
-    stable_path, expectation, *, sys_tty_root=Path("/sys/class/tty")
-):
+    stable_path: str | Path,
+    expectation: ControllerDeviceExpectation,
+    *,
+    sys_tty_root: Path = Path("/sys/class/tty"),
+) -> StableDeviceIdentity:
     return _inspect_controller_identity(
         stable_path,
         expectation,
@@ -696,8 +699,11 @@ def inspect_controller_identity(
 
 
 def inspect_camera_identity(
-    stable_path, expectation, *, sys_video_root=Path("/sys/class/video4linux")
-):
+    stable_path: str | Path,
+    expectation: CameraDeviceExpectation,
+    *,
+    sys_video_root: Path = Path("/sys/class/video4linux"),
+) -> StableDeviceIdentity:
     return _inspect_camera_identity(
         stable_path,
         expectation,

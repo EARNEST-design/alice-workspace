@@ -569,3 +569,24 @@ def test_cancellation_interrupts_success_wait_without_waiting_for_stuck_job(node
         assert node._outstanding == 1
     finally:
         release.set()
+
+
+@pytest.mark.parametrize(
+    "bad_proof",
+    [
+        "0" * 64,
+        "host-monotonic-zero/v0:" + "0" * 64,
+        "host-monotonic-zero/v1:" + "0" * 64,
+    ],
+)
+def test_clock_proof_incompatibility_rejects_before_prepare_or_factory(node, bad_proof):
+    request = prepare(node)
+    request.clock_domain_fingerprint = bad_proof
+    calls = []
+    node.prepare_run = lambda: calls.append("prepare")
+    node.start_run = lambda: calls.append("factory")
+    reply = node.begin(request)
+    assert not reply.accepted
+    assert "clock-domain mismatch" in reply.error
+    assert node.identity is None
+    assert not calls

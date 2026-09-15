@@ -24,7 +24,8 @@ from alice.safety.supervisor import (
     SafetySupervisor,
 )
 from alice.speech.face_adapter import _check_owners as _shared_check_owners
-from alice.speech.face_adapter import _exclusive_transport, _write
+from alice.speech.face_adapter import _exclusive_transport
+from alice.speech.face_adapter import _write as _write
 from alice.speech.jaw_playback import run_jaw_playback
 from alice.speech.jaw_trial import (
     JawCommandStream,
@@ -439,7 +440,7 @@ def main(argv: list[str] | None = None) -> int:
     return exit_code
 
 
-def _check_owners(full):
+def _check_owners(full: HardwareManifest) -> dict[str, object]:
     return _shared_check_owners(full, resolver=_resolve_linux_usb_identity)
 
 

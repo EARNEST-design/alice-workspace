@@ -8,7 +8,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, Callable, TextIO
 
-import yaml  # type: ignore[import-untyped]
+import yaml
 
 from alice.experiments.manifest import ArtifactManifest
 from alice.experiments.passive_capture import (

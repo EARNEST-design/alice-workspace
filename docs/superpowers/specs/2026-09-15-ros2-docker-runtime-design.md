@@ -302,3 +302,19 @@ Local evidence: `SESSION_CHECKPOINT.md`, ADRs 0001/0010/0011, `pyproject.toml`,
 ## User-supplied description integration
 
 On 2026-09-15 the user identified `codex/robot-description` as the existing Alice model. Integrate the original `alice_description` package from commit `13c25490d78ccec05a6f2714deafb5c39c60862b` into the Lyrical workspace, with an optional headless visualization profile. Preserve its `/alice_preview` namespace and provisional geometry assumptions. Keep the eight primary runtime services and existing calibrated actuation contracts. Robot-state and joint-state publishers are additional opt-in visualization services, with no device access or PWM conversion. Requalify its Xacro/URDF/TF behavior under Lyrical.
+
+##2026-09-15 coordinator correction: unshifted host clock proof
+
+Actual Docker29.7.2 Compose qualification disproved the assumption that concurrent
+containers share a time-namespace identity. This technical correction supersedes
+namespace-inode equality above: require the same valid kernel boot identity plus
+strictly complete zero monotonic/boottime offsets, using versioned, epoch-salted
+`host-monotonic-zero/v1` proofs. Reject missing/malformed/duplicate/extra/unknown
+records, nonzero offsets, unreadable current-namespace metadata and incompatible
+proofs before preparation. Linux freezes offsets after a process enters the
+namespace, so zero offsets identify the unshifted initial host clock; namespace
+identity remains a local diagnostic. No source-time translation/restamping,
+clock bypass, bound widening, daemon change or hardware acceptance follows.
+This is the coordinator's recorded technical correction, not new user approval.
+ADR0012 and the dated experiment preserve rationale, primary sources and original
+failed evidence. The actual eight containers must qualify the revised proof.

@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Annotated, Literal
 
 import numpy as np
-import yaml  # type: ignore[import-untyped]
+import yaml
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 
 from alice.contracts.actuation import ActuatorTarget

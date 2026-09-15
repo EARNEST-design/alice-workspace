@@ -71,6 +71,7 @@ torch @ https://download-r2.pytorch.org/whl/cpu/torch-2.14.0%2Bcpu-cp314-cp314-m
 tqdm==4.70.0
 typer==0.27.2
 types-pyserial==3.5.0.20260712
+types-pyyaml==6.0.12.20260906
 typing-extensions==4.16.0
 typing-inspection==0.4.4
 urllib3==2.7.0

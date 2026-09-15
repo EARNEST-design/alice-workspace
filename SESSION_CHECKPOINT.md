@@ -1,38 +1,44 @@
 # Alice session checkpoint
 
-**Saved 2026-09-15: ROS 2 Docker migration approved; implementation in progress.** The user
-requested the whole current pipeline run as separate nodes in the latest ROS 2
-environment, packaged as a Docker project. The proposed scope is existing
-speech, emotion/expression, facial control and robot-camera observation; live
-microphone/LLM conversation is a separate extension unless requested.
+**Saved 2026-09-15: Task 4 ROS 2 Compose implementation complete, awaiting
+coordinator task and whole-migration review.** Work remains in the preserved
+`feature/streaming-affect-motion` worktree. No merge, push or pruning performed.
 
-- [Approved ROS 2 Docker design](/home/alice/alice-workspace/.worktrees/streaming-affect-motion/docs/superpowers/specs/2026-09-15-ros2-docker-runtime-design.md)
-- Target: ROS 2 Lyrical Luth / Ubuntu 26.04, pinned official image; eight separate
-  Compose services with typed ROS interfaces and preserved audio-clock timing.
-- Python 3.14 qualification built the pinned Lyrical core, speech, perception
-  and test images. Real offline Azelma synthesis and MediaPipe model opening
-  passed with no devices or runtime network. No new hardware trial has run.
-- [Implementation plan](/home/alice/alice-workspace/.worktrees/streaming-affect-motion/docs/superpowers/plans/2026-09-15-ros2-docker-runtime.md)
-- Tasks 1 and 2 are complete with clean reviews. Task 2 final fix `eb5aa0e`
-  retains the 250 ms active timing guard, validates service/action replies,
-  and preserves transactional clause bounds. Fresh Lyrical contract regression:
-  156 tests passed; base imports work without ML dependencies.
-- Task 3 (eight runtime nodes) is complete at `0da16b0`, with clean review
-  after two lifecycle/timing repair rounds. Final covering checks passed 124
-  tests and five isolated eight-process scenarios, including first-control
-  loss with live health publishers. Success waits for admitted work; fault
-  evidence stays independent of stalled work. Original full regression passed
-  988 tests (two known skips and two existing warnings). This is process-level
-  evidence; Task 4 will qualify separate Compose containers and the optional
-  robot description. The earlier Python qualification passed 881 tests.
-- Continue with Task 4 using the ledger in
-  `.superpowers/sdd/2026-09-15-ros2-docker-runtime/progress.md` inside the
-  preserved worktree. Do not redispatch completed tasks or clear artifacts.
-
-User identified the existing `alice_description` on `codex/robot-description`
-(commit `13c2549`). Task 4 will selectively reuse it as an optional Lyrical
-visualization profile, preserving provisional geometry and `/alice_preview`.
-It does not replace servo calibration or add a PWM-to-joint conversion.
+- Eight default idle non-root, read-only, capability-dropped containers run on
+  an internal UDP bridge with no model cache or device requirements. Offline
+  TTS, selected speaker, hardware, tools and provisional preview are explicit.
+- [Runbook](/home/alice/alice-workspace/.worktrees/streaming-affect-motion/docs/ros2.md)
+  and [dated evidence](/home/alice/alice-workspace/.worktrees/streaming-affect-motion/docs/experiments/2026-09-15-ros2-runtime.md)
+  record commands, exact image/source/model identities and acceptance limits.
+- Tasks 1–3 retain clean scoped reviews. Task 4 base is `ce7480d`; final image
+  source SHA256 is `6390a6263c19b5642b60a3cd9310fe98caacbbcf5d2503b711500057f8b230c1`.
+  The task report is `.superpowers/sdd/2026-09-15-ros2-docker-runtime/task-4-report.md`.
+- Final full verification: 1046 passed, three skips covered by nine host tests,
+  two existing fork warnings; Ruff and strict mypy (87 files) pass. Actual build
+  07 matrix: 35 functional cases plus four focused crash/retirement cases pass.
+  Final build 08 normal/SIGTERM, public launcher and speaker checks pass with
+  separately identified evidence. All failed attempts remain preserved.
+- Announced speaker-only offline Azelma completed on the SN6140 analog Pulse
+  route: DAC clock, 185,760 samples played, zero underflows. Maestro/perception
+  remained simulated; no new servo or camera trial ran. This is stream evidence,
+  not independent acoustic measurement or physical facial acceptance.
+- Real-model source-to-admission p99 remains 21.176 ms (target 20 ms), maximum
+  23.221 ms. Strict 250 ms guards remain unchanged. Coarse observer stop gaps
+  reach 255–258 ms and are not relabeled exact deadline proof; self-crash marker
+  checks retain 207.914/209.117 ms to last mock receipt. Physical PWM cutoff is
+  not proven by process death.
+- Active all-node SIGTERM can leave session ROS handlers unquiesced; local
+  cancel/evidence completes, then an explicit five-second failed-cleanup exit 1
+  avoids destroyed-guard callbacks and indefinite Python join. This qualified
+  rclpy-version workaround and failed status remain documented, not waived.
+- Coordinator ruling versions clock proof as `host-monotonic-zero/v1`: same
+  kernel boot plus strictly parsed zero monotonic/boottime offsets; reject bad,
+  missing or nonzero metadata. Docker private namespace identity is diagnostic.
+- Selective user-approved robot description from exact `13c2549` is qualified
+  for Lyrical headless preview only, preserving provisional geometry and the
+  `alice_preview` namespace. No PWM bridge or added actuation scope.
+- Continue coordinator reviews using the existing progress ledger and artifact
+  manifest. Preserve the worktree, failed attempts and unrelated hardware notes.
 
 The following hardware checkpoint remains valid and physically unaccepted; the
 ROS migration does not resolve or supersede its pending visible-motion check.
