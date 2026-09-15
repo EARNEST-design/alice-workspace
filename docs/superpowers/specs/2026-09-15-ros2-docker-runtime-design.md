@@ -1,6 +1,6 @@
 # Alice ROS 2 Docker runtime design
 
-Date: 2026-09-15. Status: proposed for review; implementation has not started.
+Date: 2026-09-15. Status: approved by the user on 2026-09-15; implementation in progress.
 
 ## Objective and scope
 
