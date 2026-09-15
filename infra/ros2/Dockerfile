@@ -48,8 +48,10 @@ RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         libasound2t64=1.2.15.3-1ubuntu1.1 \
     && rm -rf /var/lib/apt/lists/*
-COPY --from=portaudio-build /usr/local/lib/libportaudio.so* /usr/local/lib/
-RUN ldconfig
+COPY --from=portaudio-build /usr/local/lib/libportaudio.so.2.0.0 /usr/local/lib/
+RUN ln -s libportaudio.so.2.0.0 /usr/local/lib/libportaudio.so.2 \
+    && ln -s libportaudio.so.2 /usr/local/lib/libportaudio.so \
+    && ldconfig
 COPY infra/ros2/requirements-speech.txt /opt/alice/requirements-speech.txt
 RUN python -m pip install --no-cache-dir --requirement requirements-speech.txt
 
@@ -62,8 +64,10 @@ RUN apt-get update \
         libgl1=1.7.0-3 \
         libgles2=1.7.0-3 \
     && rm -rf /var/lib/apt/lists/*
-COPY --from=portaudio-build /usr/local/lib/libportaudio.so* /usr/local/lib/
-RUN ldconfig
+COPY --from=portaudio-build /usr/local/lib/libportaudio.so.2.0.0 /usr/local/lib/
+RUN ln -s libportaudio.so.2.0.0 /usr/local/lib/libportaudio.so.2 \
+    && ln -s libportaudio.so.2 /usr/local/lib/libportaudio.so \
+    && ldconfig
 COPY infra/ros2/requirements-perception.txt /opt/alice/requirements-perception.txt
 RUN python -m pip install --no-cache-dir --requirement requirements-perception.txt
 

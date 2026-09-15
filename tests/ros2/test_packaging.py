@@ -5,6 +5,7 @@ import sys
 import zipfile
 from email.parser import Parser
 from pathlib import Path
+from shutil import copy2, which
 
 import pytest
 from packaging.requirements import Requirement
@@ -88,3 +89,71 @@ def test_core_face_runtime_import_does_not_load_optional_ml() -> None:
     )
 
     assert result.returncode == 0, result.stderr
+
+
+def test_docker_context_keeps_reviewed_runtime_assets_and_excludes_local_files(
+    tmp_path: Path,
+) -> None:
+    if which("docker") is None:
+        pytest.skip("Docker is required to inspect the effective build context")
+    daemon = subprocess.run(
+        ["docker", "info", "--format", "{{.ServerVersion}}"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if daemon.returncode != 0:
+        pytest.skip("Docker daemon is required to inspect the effective build context")
+
+    repository = Path(__file__).resolve().parents[2]
+    context = tmp_path / "context"
+    output = tmp_path / "rootfs"
+    context.mkdir()
+    copy2(repository / ".dockerignore", context / ".dockerignore")
+    (context / "Dockerfile.context-test").write_text(
+        "FROM scratch\nCOPY . /context\n"
+    )
+
+    required = (
+        "pyproject.toml",
+        "uv.lock",
+        "src/alice/runtime.py",
+        "tests/ros2/test_runtime.py",
+        "ros2_ws/src/alice_nodes/package.xml",
+        "infra/ros2/entrypoint.sh",
+        "config/speech/sync-v1.json",
+        "hardware/alice-face-v1.yaml",
+    )
+    excluded = (
+        "hardware/electrical/unreviewed-local-note.md",
+        "infra/ros2/.env.local",
+        "src/alice/artifacts/local.json",
+        "config/models/local-face-landmarker.task",
+        "src/alice/__pycache__/runtime.pyc",
+    )
+    for relative in (*required, *excluded):
+        path = context / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(relative)
+
+    result = subprocess.run(
+        [
+            "docker",
+            "build",
+            "--network",
+            "none",
+            "--file",
+            str(context / "Dockerfile.context-test"),
+            "--output",
+            f"type=local,dest={output}",
+            str(context),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    for relative in required:
+        assert (output / "context" / relative).is_file(), relative
+    for relative in excluded:
+        assert not (output / "context" / relative).exists(), relative

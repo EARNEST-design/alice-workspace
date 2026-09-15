@@ -21,10 +21,14 @@ work.
 - Container interpreter: CPython 3.14.4; `rclpy` loaded from
   `/opt/ros/lyrical/lib/python3.14/site-packages`.
 - Pocket TTS model: package 3.1.0, built-in `english_2026-01` model, preset
-  voice `azelma`, loaded from the pre-existing read-only Hugging Face cache with
-  `HF_HUB_OFFLINE=1`.
+  voice `azelma`, loaded from the pre-existing read-only host cache at
+  `/home/alice/.cache/huggingface` with `HF_HUB_OFFLINE=1`. The resolved
+  model/tokenizer snapshot was `d29db7978e464fb90cb3359ee0c69a273b9142cc`
+  and the voice-embedding snapshot was
+  `e81d79e8194ad4c7ce879c87a4258ef20cbf2487`.
 - MediaPipe model: existing
-  `face_landmarker.task`, SHA-256
+  `/home/alice/alice-workspace/.worktrees/phase-1-passive-blendshapes/artifacts/passive-alice-face-pilot/model/face_landmarker.task`,
+  SHA-256
   `64184e229b263107bc2b804c6625db1341ff2bb731874b0bcc2fe6544e0bc9ff`,
   mounted read-only for qualification.
 - The direct application requirements were retained: Pocket TTS 3.1.0,
@@ -92,18 +96,22 @@ face-landmarker model, and performed offline Azelma inference: 24,000 Hz,
 
 | Target | Purpose | Image ID from this run |
 | --- | --- | --- |
-| `core` / `alice-ros2:base` | ROS, lightweight Alice dependencies and source | `sha256:86c48a61d43dbadaefccf57e1106119c6b8da300857b4d2db1e0a6234d9dfbb7` |
-| `speech` | CPU Torch, Pocket TTS, sounddevice and ALSA-only PortAudio | `sha256:fec9096f43f3304b2db4df64a864488007130a8ddf2b354b5ed4402a5afe5827` |
-| `perception` | MediaPipe, OpenCV and required GL libraries | `sha256:980edb480169a5ec1ff06c2a48f9f8321e11b1dce405c973a439dac5205f248d` |
-| `test` | Full dependency and repository-test environment | `sha256:49c790bcc7362a93260bc44edfdcbb0b519479bd33e3d594bc285a96946ce07a` |
+| `core` / `alice-ros2:base` | ROS, lightweight Alice dependencies and source | `sha256:116c0930b0144169fd1a6c87837b898ec4881ddb40df79dc5b6f8197ed986b52` |
+| `speech` | CPU Torch, Pocket TTS, sounddevice and ALSA-only PortAudio | `sha256:acee260a2044c2518da135400ac348ae8107fdc6ae049a545772dbc048f685bd` |
+| `perception` | MediaPipe, OpenCV and required GL libraries | `sha256:2a118231dbfacd3d3c90b708741f064ec941913abaf3bf89d810a9b24d18e806` |
+| `test` | Full dependency and repository-test environment | `sha256:39428688c46fe22d07f96905292d7aae3ebd0c4a3b0ccb276585666a19711c31` |
 
 All targets contain `/opt/alice/config`, `/opt/alice/hardware`,
 `/opt/alice/src`, and the system-compatible `/opt/alice/venv`. The speech and
 test requirements bind Linux amd64 CPU Torch to the exact CPython 3.14 wheel
 URL and SHA-256 rather than using a global secondary package index. Direct apt
 dependencies and the PortAudio source archive are version/checksum pinned.
-The Docker build context explicitly excludes caches, artifacts, local
-calibration, environments, model binaries, and build output.
+The repository-root Docker context starts from a catch-all exclusion. It
+re-includes dependency metadata, source, tests, ROS/container infrastructure,
+and an exact list of reviewed configuration and hardware files. New files under
+`config` or `hardware` remain excluded until explicitly reviewed and listed.
+Credentials, caches, artifacts, local calibration, model binaries, and build
+output remain excluded even under an otherwise allowed source directory.
 
 ## Verification
 
@@ -135,12 +143,20 @@ evidence. With `--network none`, read-only model caches, and no device mounts:
   synthesis.
 
 Build, probe, suite, and smoke output is retained under
-`artifacts/ros2/2026-09-15/`, including `docker-build-*-final.log`,
+`artifacts/ros2/2026-09-15/`, including
+`docker-build-*-fix-round1.log`, `image-packaging-fix-round1.log`,
 `python314-full-suite-qualified.log`, and `image-qualification-final.log`.
 An initial final-smoke command used the wrong local `AudioClip` attribute after
 successful inference; that command failure is retained separately as
 `image-qualification-final-attribute-failure.log` and was corrected to inspect
 `AudioClip.pcm`.
+
+The packaging review added a Docker BuildKit regression test that materializes
+the effective context into a scratch root filesystem. It proves that required
+runtime assets remain and a synthetic future hardware note, a nested `.env`, a
+nested artifact, bytecode, and a model weight remain excluded. The final
+focused packaging run reported `6 passed`. Rebuilt-image checks also confirmed
+the PortAudio SONAME files are real symlinks, with no `ldconfig` warning.
 
 ## Conclusion and limits
 
