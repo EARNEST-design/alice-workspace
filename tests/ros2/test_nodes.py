@@ -84,7 +84,7 @@ def test_maestro_refuses_home_without_current_successful_drain(tmp_path):
         rclpy.shutdown()
 
 
-def test_shared_face_adapter_is_lightweight_and_legacy_compatible():
+def test_shared_and_legacy_face_adapter_factories_are_callable():
     assert importlib.util.find_spec("alice.speech.face_adapter") is not None, (
         "missing shared face adapter"
     )
@@ -302,6 +302,417 @@ def test_over_budget_pcm_is_rejected_before_ring_or_timeline_mutates(tmp_path):
         assert node.pcm_guard.sample_offset == 0
         assert node.timeline.generated_samples == 0
         assert node.player.submitted_samples == 0
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+@pytest.mark.parametrize("role", ["expression", "motion", "maestro"])
+def test_first_control_deadline_starts_only_at_playing(role, tmp_path):
+    import time
+
+    import rclpy
+    from alice_nodes.base import RuntimePaths
+    from test_lifecycle import prepare, start
+
+    rclpy.init()
+    node = importlib.import_module(f"alice_nodes.{role}").create_node(
+        paths=RuntimePaths(
+            Path("/workspace/config"),
+            Path("/workspace/hardware"),
+            tmp_path,
+            Path("/workspace/config/speech"),
+        )
+    )
+    try:
+        request = prepare(node)
+        assert node.begin(request).accepted
+        node.start_run = lambda: None
+        assert start(node, request).accepted
+        now = time.monotonic_ns()
+        node.check_progress(
+            now + 1_000_000_000
+        )  # No PLAYING: separate startup allowance.
+        assert callable(getattr(node, "observe_playback", None)), (
+            "independent PLAYING observer missing"
+        )
+        from alice_interfaces.msg import PlaybackStatus
+        from alice_nodes.contracts import stream_header_to_msg
+        from alice_nodes.transport import StreamHeader
+
+        node.observe_playback(
+            PlaybackStatus(
+                header=stream_header_to_msg(
+                    StreamHeader(node.identity, 0, now, "audio-incarnation")
+                ),
+                schema_version="playback-status/v1",
+                state=PlaybackStatus.PLAYING,
+                submitted_samples=480,
+                played_samples=1,
+            )
+        )
+        node.check_progress(now + 249_000_000)
+        with pytest.raises(RuntimeError, match="control.*progress"):
+            node.check_progress(now + 251_000_000)
+        node._ended = "success"
+        with pytest.raises(RuntimeError, match="control.*progress"):
+            node.check_progress(now + 251_000_000)
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+def test_external_clause_relay_preserves_source_and_rejects_aged_queue(tmp_path):
+    import time
+
+    import rclpy
+    from alice_nodes.base import RuntimePaths
+    from alice_nodes.contracts import speech_clause_to_msg
+    from alice_nodes.session import create_node
+    from alice_nodes.transport import SequenceGuard, StreamHeader
+    from test_lifecycle import prepare, start
+
+    from alice.contracts.speech_stream import ClauseSequence, SpeechClause
+
+    rclpy.init()
+    node = create_node(
+        paths=RuntimePaths(
+            Path("/workspace/config"),
+            Path("/workspace/hardware"),
+            tmp_path,
+            Path("/workspace/config/speech"),
+        )
+    )
+    try:
+        request = prepare(node)
+        request.requester_incarnation = node.incarnation
+        assert node.begin(request).accepted
+        assert start(node, request).accepted
+        node.accept_external = True
+        node.external_incarnation = "source"
+        node.external_guard = SequenceGuard(node.identity, exact=True, max_gap_ns=None)
+        node.external_ledger = ClauseSequence()
+        clause = SpeechClause(
+            generation_id="generation",
+            clause_id="one",
+            sequence=0,
+            text="Hello",
+            vector=(0, 0, 0),
+            intensity=0,
+            seed=29,
+            end_of_response=True,
+        )
+        stamp = time.monotonic_ns()
+        node.external_clause(
+            speech_clause_to_msg(
+                clause, StreamHeader(node.identity, 0, stamp, "source")
+            )
+        )
+        queued = node.external.get_nowait()
+        assert callable(getattr(node, "relay_external", None)), (
+            "source-preserving relay missing"
+        )
+        relayed = node.relay_external(queued, now_ns=stamp + 249_000_000)
+        assert relayed.header.source_monotonic_ns == stamp
+        with pytest.raises(ValueError, match="expired"):
+            node.relay_external(queued, now_ns=stamp + 251_000_000)
+        assert node.sequences["clauses"] == 1
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+class StalledFirstChunkBackend:
+    identity = {"test": "stalled-first-chunk"}
+
+    def stream(self, text, *, voice, seed):
+        import time
+
+        time.sleep(60)
+        yield  # Never emits before the owned process is terminated.
+
+
+def test_cancel_stalled_first_tts_chunk_terminates_owned_process_and_writes_evidence(
+    tmp_path,
+):
+    import time
+
+    import rclpy
+    from alice_interfaces.msg import RunHealth
+    from alice_nodes.base import HEALTH, RuntimePaths
+    from alice_nodes.contracts import stream_header_to_msg
+    from alice_nodes.transport import StreamHeader
+    from alice_nodes.tts import create_node
+    from rclpy.executors import MultiThreadedExecutor
+    from test_lifecycle import prepare, start
+
+    from alice.contracts.speech_stream import SpeechClause
+    from alice.speech.tts_worker import PocketTtsWorker
+
+    rclpy.init()
+    node = create_node(
+        paths=RuntimePaths(
+            Path("/workspace/config"),
+            Path("/workspace/hardware"),
+            tmp_path,
+            Path("/workspace/config/speech"),
+        )
+    )
+    observer = rclpy.create_node("tts_stall_health_probe")
+    health = []
+    observer.create_subscription(RunHealth, "/alice/run/health", health.append, HEALTH)
+    executor = MultiThreadedExecutor(num_threads=2)
+    executor.add_node(node)
+    executor.add_node(observer)
+    worker = PocketTtsWorker(backend=StalledFirstChunkBackend())
+    try:
+        request = prepare(node)
+        assert node.begin(request).accepted
+        assert start(node, request).accepted
+        node.engine = worker
+        clause = SpeechClause(
+            generation_id="generation",
+            clause_id="one",
+            sequence=0,
+            text="Hello",
+            vector=(0, 0, 0),
+            intensity=0,
+            seed=29,
+            end_of_response=True,
+        )
+        node.submit(lambda: node.clause(clause))
+        deadline = time.monotonic() + 2
+        while not worker.is_alive and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert worker.is_alive
+        sequence = 0
+        deadline = time.monotonic() + 0.3
+        while time.monotonic() < deadline:
+            for peer, incarnation in node.peers.items():
+                if peer != node.role:
+                    node.receive_health(
+                        RunHealth(
+                            header=stream_header_to_msg(
+                                StreamHeader(
+                                    node.identity,
+                                    sequence,
+                                    time.monotonic_ns(),
+                                    incarnation,
+                                )
+                            ),
+                            schema_version="run-health/v1",
+                            state=RunHealth.ACTIVE,
+                        )
+                    )
+            sequence += 1
+            executor.spin_once(timeout_sec=0.01)
+        assert node.error is None
+        assert len(health) >= 3 and all(m.state == RunHealth.ACTIVE for m in health)
+        node.fail("cancel during first chunk")
+        deadline = time.monotonic() + 2
+        while (
+            worker.is_alive or not (node.local_dir / "terminal.json").exists()
+        ) and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert not worker.is_alive, "owned inference process survived cancellation"
+        assert (node.local_dir / "terminal.json").exists()
+        assert node.ledger.sent_samples == 0
+    finally:
+        executor.shutdown(timeout_sec=1)
+        observer.destroy_node()
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+def test_cancelled_queued_maestro_start_never_calls_adapter_factory(
+    tmp_path, monkeypatch
+):
+    import threading
+    import time
+
+    import rclpy
+    from alice_nodes.base import RuntimePaths
+    from alice_nodes.maestro import create_node
+    from test_lifecycle import prepare, start
+
+    rclpy.init()
+    node = create_node(
+        paths=RuntimePaths(
+            Path("/workspace/config"),
+            Path("/workspace/hardware"),
+            tmp_path,
+            Path("/workspace/config/speech"),
+        )
+    )
+    calls = []
+    monkeypatch.setattr(
+        "alice_nodes.maestro.face_factory", lambda *a, **kw: calls.append("factory")
+    )
+    entered, release = threading.Event(), threading.Event()
+    try:
+        request = prepare(node)
+        assert node.begin(request).accepted
+        node.submit(lambda: (entered.set(), release.wait(3)))
+        assert entered.wait(1)
+        starter = threading.Thread(target=lambda: start(node, request))
+        starter.start()
+        deadline = time.monotonic() + 1
+        while not node._lifecycle_busy and time.monotonic() < deadline:
+            time.sleep(0.005)
+        node.fail("cancel before START executes")
+        release.set()
+        starter.join(2)
+        assert calls == []
+        deadline = time.monotonic() + 1
+        while not node._completed and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert node.begin(prepare(node, "next-epoch")).accepted
+        assert node.runtime is None and calls == []
+    finally:
+        release.set()
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+def test_blocked_expression_computation_faults_with_live_peers_and_cannot_publish_late(
+    tmp_path,
+):
+    import threading
+    import time
+
+    import rclpy
+    from alice_interfaces.msg import ExpressionFrame, PlaybackStatus, RunHealth
+    from alice_nodes.base import HEALTH, LATEST, RuntimePaths
+    from alice_nodes.contracts import speech_state_to_msg, stream_header_to_msg
+    from alice_nodes.expression import create_node
+    from alice_nodes.transport import StreamHeader
+    from rclpy.executors import MultiThreadedExecutor
+    from test_lifecycle import prepare, start
+
+    from alice.speech.timeline import SpeechFrame
+
+    rclpy.init()
+    node = create_node(
+        paths=RuntimePaths(
+            Path("/workspace/config"),
+            Path("/workspace/hardware"),
+            tmp_path,
+            Path("/workspace/config/speech"),
+        )
+    )
+    observer = rclpy.create_node("stalled_expression_probe")
+    health, proposals = [], []
+    observer.create_subscription(RunHealth, "/alice/run/health", health.append, HEALTH)
+    observer.create_subscription(
+        ExpressionFrame, "/alice/expression/frame", proposals.append, LATEST
+    )
+    executor = MultiThreadedExecutor(num_threads=2)
+    executor.add_node(node)
+    executor.add_node(observer)
+    entered, release = threading.Event(), threading.Event()
+    try:
+        request = prepare(node)
+        assert node.begin(request).accepted
+        assert start(node, request).accepted
+        original = node.bridge.advance
+
+        def stalled(*args):
+            entered.set()
+            release.wait(3)
+            return original(*args)
+
+        node.bridge.advance = stalled
+        stamp = time.monotonic_ns()
+        node.observe_playback(
+            PlaybackStatus(
+                header=stream_header_to_msg(
+                    StreamHeader(node.identity, 0, stamp, "audio-incarnation")
+                ),
+                schema_version="playback-status/v1",
+                state=PlaybackStatus.PLAYING,
+                submitted_samples=480,
+                played_samples=1,
+            )
+        )
+        frame = SpeechFrame(
+            sample_index=1,
+            mouth_aperture=0.2,
+            speech_weight=1.0,
+            vector=(0, 0, 0),
+            intensity=0.1,
+        )
+        message = speech_state_to_msg(
+            frame,
+            StreamHeader(node.identity, 0, stamp, "audio-incarnation"),
+            sample_rate=24000,
+            phase="playing",
+            owner="audio-incarnation",
+        )
+        node.submit(lambda: node.speech(message))
+        assert entered.wait(1)
+        sequence = 0
+        deadline = time.monotonic() + 0.7
+        while time.monotonic() < deadline:
+            now = time.monotonic_ns()
+            for peer, incarnation in node.peers.items():
+                if peer != node.role:
+                    node.receive_health(
+                        RunHealth(
+                            header=stream_header_to_msg(
+                                StreamHeader(node.identity, sequence, now, incarnation)
+                            ),
+                            schema_version="run-health/v1",
+                            state=RunHealth.ACTIVE,
+                        )
+                    )
+            sequence += 1
+            executor.spin_once(timeout_sec=0.01)
+        assert "control source progress" in node.error
+        assert (node.local_dir / "terminal.json").exists()
+        assert not node.begin(prepare(node, "next-epoch")).accepted
+        assert len([m for m in health if m.state == RunHealth.ACTIVE]) >= 2
+        assert any(m.state == RunHealth.FAULT for m in health)
+        assert proposals == []
+        release.set()
+        deadline = time.monotonic() + 0.3
+        while time.monotonic() < deadline:
+            executor.spin_once(timeout_sec=0.01)
+        assert proposals == []
+    finally:
+        release.set()
+        executor.shutdown(timeout_sec=1)
+        observer.destroy_node()
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+def test_maestro_drain_cannot_authorize_home_before_first_control(tmp_path):
+    from types import SimpleNamespace
+
+    import rclpy
+    from alice_nodes.base import RuntimePaths
+    from alice_nodes.maestro import create_node
+    from test_lifecycle import prepare
+
+    rclpy.init()
+    node = create_node(
+        paths=RuntimePaths(
+            Path("/workspace/config"),
+            Path("/workspace/hardware"),
+            tmp_path,
+            Path("/workspace/config/speech"),
+        )
+    )
+    try:
+        assert node.begin(prepare(node)).accepted
+        node.playback = SimpleNamespace(
+            drained=True,
+            header=SimpleNamespace(identity=node.identity),
+            error=None,
+            response_final_seen=True,
+        )
+        with pytest.raises(RuntimeError, match="control"):
+            node.require_drain()
     finally:
         node.destroy_node()
         rclpy.shutdown()

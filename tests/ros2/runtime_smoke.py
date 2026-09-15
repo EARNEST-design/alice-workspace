@@ -32,6 +32,7 @@ for tree in (
         source_hash.update(str(source.relative_to("/workspace")).encode())
         source_hash.update(source.read_bytes())
 children = []
+launch_commands = {}
 try:
     for role in roles:
         log = (output / f"{role}.log").open("w")
@@ -54,6 +55,7 @@ try:
             "-p",
             "code_identity:=sha256:" + source_hash.hexdigest(),
         ]
+        launch_commands[role] = command
         children.append(
             subprocess.Popen(
                 command, stdout=log, stderr=subprocess.STDOUT, start_new_session=True
@@ -168,9 +170,105 @@ try:
         for line in (fault_runs[0] / "commands.jsonl").read_text().splitlines()
     ]
     assert not any(r.get("phase") in {"home", "post-speech"} for r in rows)
+    # Drop only control traffic, with every participant process and heartbeat live.
+    from alice_interfaces.msg import RunHealth
+
+    for suppressed in ("/alice/speech/state", "/alice/expression/frame"):
+        index = roles.index("expression")
+        child = children[index]
+        original_command = launch_commands["expression"]
+        child.send_signal(signal.SIGINT)
+        child.wait(timeout=8)
+        replacement_log = (
+            output / ("suppressed-" + suppressed.rsplit("/", 1)[-1] + ".log")
+        ).open("w")
+        replacement = original_command + ["-r", suppressed + ":=/alice/test/withheld"]
+        children[index] = subprocess.Popen(
+            replacement,
+            stdout=replacement_log,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+        time.sleep(1)
+        rclpy.init()
+        observer = Node("first_control_fault_probe")
+        observed_health = []
+        playing = []
+        observer.create_subscription(
+            RunHealth, "/alice/run/health", observed_health.append, 64
+        )
+        observer.create_subscription(
+            PlaybackStatus,
+            "/alice/audio/playback_status",
+            lambda m: playing.append(m) if m.state == PlaybackStatus.PLAYING else None,
+            128,
+        )
+        client = subprocess.Popen(
+            command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+        )
+        deadline = time.monotonic() + 40
+        while client.poll() is None and time.monotonic() < deadline:
+            rclpy.spin_once(observer, timeout_sec=0.01)
+        result, _ = client.communicate(timeout=5)
+        (
+            output / ("first-control-" + suppressed.rsplit("/", 1)[-1] + ".log")
+        ).write_text(result)
+        print(result, flush=True)
+        assert client.returncode != 0 and playing
+        fault = json.loads(result.splitlines()[0])
+        assert (
+            fault["outcome"] == "fault" and "control source progress" in fault["error"]
+        ), fault
+        epoch = fault["identity"]["epoch"]
+        run_dir = output / "runs" / hashlib.sha256(epoch.encode()).hexdigest()[:24]
+        incarnations = {
+            json.loads((run_dir / role / "terminal.json").read_text())["incarnation"]
+            for role in roles
+        }
+        # Every admitted participant reported live after PLAYING.
+        live = {
+            m.header.publisher_incarnation
+            for m in observed_health
+            if m.header.identity.epoch == epoch
+            and m.header.source_monotonic_ns >= playing[0].header.source_monotonic_ns
+            and m.state == RunHealth.ACTIVE
+        }
+        assert incarnations <= live, (incarnations - live, suppressed)
+        (run_dir / "first-control-observer.json").write_text(
+            json.dumps(
+                {
+                    "suppressed_topic": suppressed,
+                    "playing_source_ns": playing[0].header.source_monotonic_ns,
+                    "live_incarnations_after_playing": sorted(live),
+                    "health": [
+                        {
+                            "incarnation": m.header.publisher_incarnation,
+                            "source_ns": m.header.source_monotonic_ns,
+                            "state": m.state,
+                            "detail": m.detail,
+                        }
+                        for m in observed_health
+                        if m.header.identity.epoch == epoch
+                    ],
+                },
+                indent=2,
+            )
+        )
+        servo = json.loads((run_dir / "maestro/servo.json").read_text())
+        assert not servo["home_confirmed"]
+        rows = [
+            json.loads(line)
+            for line in (run_dir / "maestro/commands.jsonl").read_text().splitlines()
+        ]
+        assert not any(
+            row.get("phase") in {"speech", "home", "post-speech"} for row in rows
+        )
+        observer.destroy_node()
+        rclpy.shutdown()
     print(
         "eight-process smoke passed: two bounded runs, distinct epochs, "
-        "drain/Home/receipts/manifests; sibling stall stopped with no Home",
+        "drain/Home/receipts/manifests; sibling stall and first-control "
+        "suppression stopped with no Home",
         flush=True,
     )
 finally:

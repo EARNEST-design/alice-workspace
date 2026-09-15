@@ -29,7 +29,6 @@ class ExpressionNode(RuntimeNode):
             mode="authored",
             head_enabled=False,
         )
-        self.last_source = None
         write_json(self.local_dir / "model.json", self.bridge.identity)
 
     def speech(self, message):
@@ -41,11 +40,13 @@ class ExpressionNode(RuntimeNode):
             raise ValueError("speech owner incarnation mismatch")
         if message.phase != SpeechState.PLAYING or not frame.speech_weight:
             return
-        self.last_source = header.source_monotonic_ns
         expression = self.bridge.advance(frame, frame.sample_index, message.sample_rate)
         # Inference latency never turns an old source into a fresh proposal.
         if time.monotonic_ns() - header.source_monotonic_ns > 250_000_000:
             raise RuntimeError("expression inference expired original source")
+        if self.cancel.is_set():
+            return
+        self._control_source = header.source_monotonic_ns
         self.publisher.publish(
             wire.expression_frame_to_msg(
                 expression,
@@ -57,7 +58,7 @@ class ExpressionNode(RuntimeNode):
         self.progress += 1
 
     def finalize_run(self, outcome):
-        if self.bridge:
+        if self.bridge and outcome == "success":
             (self.local_dir / "state.json").write_text(self.bridge.snapshot())
             self.bridge.cancel()
 

@@ -9,11 +9,11 @@ import queue
 import threading
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from alice_interfaces.msg import RunHealth
+from alice_interfaces.msg import PlaybackStatus, RunHealth
 from alice_interfaces.srv import BeginRun, EndRun
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallbackGroup
 from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
@@ -115,12 +115,24 @@ def write_json(path: Path, value: object) -> None:
     temporary.replace(path)
 
 
+@dataclass
+class WorkItem:
+    identity: object
+    cancel: threading.Event
+    operation: Callable
+    finished: threading.Event = field(default_factory=threading.Event)
+    retired: bool = False
+    error: Exception | None = None
+    latest: str | None = None
+
+
 class RuntimeNode(Node):
     """All I/O hooks run outside run locks and the health callback group.
 
-    A bounded worker owns inference and evidence. Stream consumers revalidate
-    source age on dequeue. The independent watchdog revokes local capability
-    even when executor/service/inference callbacks stop making progress.
+    A bounded worker owns inference; an independent finalizer owns terminal
+    evidence. Every job captures its run identity and cancellation event. Evidence
+    completion does not permit admission until all prior jobs have retired.
+    The watchdog revokes capability even when inference stops making progress.
     """
 
     def __init__(self, role: str, *, paths: RuntimePaths | None = None):
@@ -165,11 +177,16 @@ class RuntimeNode(Node):
         self._active_since = 0
         self._stop = threading.Event()
         self.cancel = threading.Event()
-        self._pending_finalize = None
+        self._outstanding = 0
+        self._final_outstanding = 0
+        self._final_jobs = queue.Queue(maxsize=4)
         self._jobs = queue.Queue(maxsize=128)
         self._latest = {}
         self._worker = threading.Thread(
             target=self._work, name=f"{role}-worker", daemon=True
+        )
+        self._final_worker = threading.Thread(
+            target=self._final_work, name=f"{role}-finalizer", daemon=True
         )
         self._watch = threading.Thread(
             target=self._watchdog, name=f"{role}-watchdog", daemon=True
@@ -196,6 +213,18 @@ class RuntimeNode(Node):
             callback_group=self.group,
         )
         self.create_timer(0.05, self.publish_health, callback_group=self.group)
+        self._playing_since = None
+        self._control_source = None
+        self._control_drained = False
+        if role in {"expression", "motion", "maestro"}:
+            self.create_subscription(
+                PlaybackStatus,
+                "/alice/audio/playback_status",
+                self.observe_playback,
+                RELIABLE,
+                callback_group=self.group,
+            )
+        self._final_worker.start()
         self._worker.start()
         self._watch.start()
 
@@ -242,58 +271,85 @@ class RuntimeNode(Node):
 
     def submit(self, operation: Callable, *, latest: str | None = None):
         with self._lock:
-            if latest is not None:
-                if latest in self._latest:
-                    self._latest[latest] = operation
-                    return
-                self._latest[latest] = operation
-                item = latest
-            else:
-                item = operation
+            if latest is not None and latest in self._latest:
+                item = self._latest[latest]
+                item.operation = operation
+                return item
+            item = WorkItem(self.identity, self.cancel, operation, latest=latest)
+            if self.cancel.is_set():
+                item.retired = True
+                item.finished.set()
+                return item
             try:
                 self._jobs.put_nowait(item)
+                self._outstanding += 1
+                if latest is not None:
+                    self._latest[latest] = item
             except queue.Full:
+                item.retired = True
+                item.finished.set()
                 self.fail("bounded worker queue exhausted")
+            return item
 
     def call_worker(self, operation, timeout=45):
-        finished = threading.Event()
-        errors = []
-
-        def invoke():
-            try:
-                operation()
-            except Exception as exc:
-                errors.append(exc)
-            finally:
-                finished.set()
-
-        self.submit(invoke)
-        if not finished.wait(timeout):
+        item = self.submit(operation)
+        if not item.finished.wait(timeout):
+            with self._lock:
+                item.retired = True
             raise RuntimeError("worker lifecycle deadline expired")
-        if errors:
-            raise errors[0]
+        if item.error:
+            raise item.error
+        if item.retired or item.cancel.is_set():
+            raise RuntimeError("worker lifecycle cancelled")
 
     def _work(self):
         while not self._stop.is_set():
             try:
-                with self._lock:
-                    terminal = self._pending_finalize
-                    self._pending_finalize = None
-                if terminal is not None:
-
-                    def operation():
-                        self._finalize(terminal)
-                else:
-                    operation = self._jobs.get(timeout=0.05)
+                item = self._jobs.get(timeout=0.05)
             except queue.Empty:
                 continue
-            if isinstance(operation, str):
-                with self._lock:
-                    operation = self._latest.pop(operation)
             try:
-                operation()
+                with self._lock:
+                    if item.latest:
+                        self._latest.pop(item.latest, None)
+                    valid = (
+                        item.identity == self.identity
+                        and item.cancel is self.cancel
+                        and not item.cancel.is_set()
+                        and not item.retired
+                    )
+                    if not valid:
+                        item.retired = True
+                if valid:
+                    item.operation()
+            except Exception as exc:
+                item.error = exc
+                if item.identity == self.identity:
+                    self.fail(str(exc))
+            finally:
+                with self._lock:
+                    self._outstanding -= 1
+                    item.finished.set()
+
+    def _queue_finalize(self, outcome):
+        self._final_outstanding += 1
+        self._final_jobs.put_nowait((self.identity, self.cancel, outcome))
+
+    def _final_work(self):
+        while not self._stop.is_set():
+            try:
+                identity, cancel, outcome = self._final_jobs.get(timeout=0.05)
+            except queue.Empty:
+                continue
+            try:
+                if identity == self.identity and cancel is self.cancel:
+                    if outcome != "success" or not cancel.is_set():
+                        self._finalize(outcome)
             except Exception as exc:
                 self.fail(str(exc))
+            finally:
+                with self._lock:
+                    self._final_outstanding -= 1
 
     def subscribe_work(self, message_type, topic, callback, *, latest=False, qos=None):
         def receive(message):
@@ -348,8 +404,12 @@ class RuntimeNode(Node):
                     raise ValueError("lifecycle operation in progress")
                 if command.operation == "prepare":
                     if self.identity != binding.identity and self.identity is not None:
-                        if not self._completed:
-                            raise ValueError("one run is already active")
+                        if (
+                            not self._completed
+                            or self._outstanding
+                            or self._final_outstanding
+                        ):
+                            raise ValueError("prior run work has not retired")
                         if (
                             binding.identity.epoch in self._seen_epochs
                             or len(self._seen_epochs) >= 1024
@@ -379,7 +439,9 @@ class RuntimeNode(Node):
                             self.peers,
                         ) = {}, {}, {}, {}
                         self.cancel = threading.Event()
-                        self._pending_finalize = None
+                        self._playing_since = None
+                        self._control_source = None
+                        self._control_drained = False
                         self.progress = 0
                         self._active_since = 0
                         self.state = RunHealth.PREPARING
@@ -482,7 +544,8 @@ class RuntimeNode(Node):
                         self.fail(command.reason)
                     else:
                         self.state = RunHealth.FINALIZING
-                    self.submit(lambda: self._finalize(command.outcome))
+                    if command.outcome == "success":
+                        self._queue_finalize(command.outcome)
                 response.accepted = True
                 response.completed = self._completed
                 response.lifecycle_state = (
@@ -550,10 +613,24 @@ class RuntimeNode(Node):
             self.error = str(detail)[:256] or "runtime failure"
             self.state = RunHealth.FAULT
             self.cancel.set()
+            # Retire queued jobs before terminal evidence can admit another epoch.
+            while True:
+                try:
+                    item = self._jobs.get_nowait()
+                except queue.Empty:
+                    break
+                item.retired = True
+                item.finished.set()
+                self._outstanding -= 1
+            self._latest.clear()
+            terminal = hasattr(self, "local_dir") and not self._final_outstanding
             if hasattr(self, "local_dir") and self._ended in (None, "success"):
                 self._ended = "fault"
-                self._pending_finalize = "fault"
+                terminal = True
         self.stop_local()
+        if terminal:
+            with self._lock:
+                self._queue_finalize(self._ended or "fault")
 
     def stop_local(self):
         """Only immediate local signals; blocking cleanup belongs to workers."""
@@ -622,8 +699,37 @@ class RuntimeNode(Node):
             except Exception as exc:
                 self.fail(str(exc))
 
+    def observe_playback(self, message):
+        # Independent of inference: first progress begins at actual DAC playback.
+        if not self.current(message) or not self.peers or self.error:
+            return
+        try:
+            header = wire.stream_header_from_msg(message.header)
+            if not self.admit_header(header, "audio", "control-playback"):
+                return
+            value = wire.validate_playback_status(message)
+            if value.state == "playing" and self._playing_since is None:
+                self._playing_since = header.source_monotonic_ns
+            if value.drained:
+                # Drain cannot forgive a stream that never delivered control.
+                self.check_progress(time.monotonic_ns())
+                if self._control_source is None:
+                    raise RuntimeError("first control source progress missing at drain")
+                self._control_drained = True
+            if value.state in {"fault", "cancelled"}:
+                self.fail(value.error or "audio cancelled")
+        except Exception as exc:
+            self.fail(str(exc))
+
     def check_progress(self, now):
-        pass
+        if self._playing_since is not None and not self._control_drained:
+            source = (
+                self._control_source
+                if self._control_source is not None
+                else self._playing_since
+            )
+            if now - source > LIMIT_NS:
+                raise RuntimeError("original control source progress expired")
 
     def destroy_node(self):
         if self.identity is not None and not self._completed:
@@ -634,6 +740,7 @@ class RuntimeNode(Node):
         self._stop.set()
         self._worker.join(timeout=2)
         self._watch.join(timeout=1)
+        self._final_worker.join(timeout=2)
         return super().destroy_node()
 
 

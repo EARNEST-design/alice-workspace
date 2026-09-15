@@ -127,9 +127,21 @@ class SessionNode(RuntimeNode):
                 return
             clause = wire.speech_clause_from_msg(message)
             self.external_ledger.commit(clause)
-            self.external.put_nowait(clause)
+            self.external.put_nowait((header, clause))
         except Exception as exc:
             self.fail(str(exc))
+
+    def relay_external(self, queued, *, now_ns=None):
+        header, clause = queued
+        now_ns = time.monotonic_ns() if now_ns is None else now_ns
+        if (
+            header.identity != self.identity
+            or not 0 <= now_ns - header.source_monotonic_ns <= 250_000_000
+        ):
+            raise ValueError("external clause original source expired at relay")
+        return wire.speech_clause_to_msg(
+            clause, self.header("clauses", header.source_monotonic_ns)
+        )
 
     def rpc(self, name, request, *, timeout=5):
         if name == "session":
@@ -288,13 +300,13 @@ class SessionNode(RuntimeNode):
                     if time.monotonic() > deadline:
                         raise RuntimeError("external source deadline expired")
                     try:
-                        clause = self.external.get(timeout=0.05)
+                        queued = self.external.get(timeout=0.05)
                     except queue.Empty:
                         continue
+                    message = self.relay_external(queued)
+                    clause = queued[1]
                     ledger.commit(clause)
-                    self.publisher.publish(
-                        wire.speech_clause_to_msg(clause, self.header("clauses"))
-                    )
+                    self.publisher.publish(message)
                     self.committed += 1
                     if clause.end_of_response:
                         ledger.finish()

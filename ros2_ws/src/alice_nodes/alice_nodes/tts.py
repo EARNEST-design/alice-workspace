@@ -1,6 +1,7 @@
 """Lazy offline TTS with bounded transport credits; synthetic by default."""
 
 import asyncio
+import threading
 import time
 
 import numpy as np
@@ -20,6 +21,8 @@ class TtsNode(RuntimeNode):
         super().__init__("tts", **kwargs)
         self.declare_parameter("tts_mode", "synthetic")
         self.engine = None
+        self._inference_done = threading.Event()
+        self._inference_done.set()
         self.publisher = self.create_publisher(PcmChunk, "/alice/speech/pcm", RELIABLE)
         self.create_subscription(
             ClauseMsg,
@@ -69,7 +72,7 @@ class TtsNode(RuntimeNode):
                 async for _ in self.engine.stream(warmup):
                     pass
 
-            asyncio.run(asyncio.wait_for(warm(), 35))
+            self.run_inference(lambda: asyncio.wait_for(warm(), 35))
             self.model_identity = self.engine.identity
         write_json(self.local_dir / "model.json", self.model_identity)
 
@@ -140,9 +143,47 @@ class TtsNode(RuntimeNode):
                         )
                         first = False
 
-        asyncio.run(produce())
+        self.run_inference(produce)
+        if self.cancel.is_set():
+            return
         self.source_final = clause.end_of_response
         self.progress += 1
+
+    def run_inference(self, operation):
+        with self._lock:
+            if self.cancel.is_set():
+                raise RuntimeError("TTS cancelled")
+            self._inference_done.clear()
+            engine, cancel = self.engine, self.cancel
+
+        async def run():
+            task = asyncio.create_task(operation())
+
+            async def interrupt():
+                while not cancel.is_set():
+                    await asyncio.sleep(0.002)
+                # Use the existing owned-process terminate/join/kill mechanism,
+                # on its owning event loop even when stream() has no first chunk.
+                if engine is not None:
+                    await engine.close()
+                task.cancel()
+
+            stopper = asyncio.create_task(interrupt())
+            try:
+                await task
+            except asyncio.CancelledError:
+                raise RuntimeError("TTS cancelled") from None
+            finally:
+                if cancel.is_set():
+                    await stopper
+                else:
+                    stopper.cancel()
+                    await asyncio.gather(stopper, return_exceptions=True)
+
+        try:
+            asyncio.run(run())
+        finally:
+            self._inference_done.set()
 
     def send(self, clause, pcm, first, final):
         deadline = time.monotonic() + 3
@@ -177,9 +218,12 @@ class TtsNode(RuntimeNode):
             raise RuntimeError("TTS source not final")
 
     def finalize_run(self, outcome):
-        if outcome != "success" and self.engine is not None:
-            asyncio.run(self.engine.close())
-            self.engine = None
+        if outcome != "success":
+            if not self._inference_done.wait(2):
+                raise RuntimeError("TTS cancellation cleanup deadline expired")
+            if self.engine is not None:
+                asyncio.run(self.engine.close())
+                self.engine = None
         write_json(
             self.local_dir / "tts.json",
             {
@@ -189,9 +233,10 @@ class TtsNode(RuntimeNode):
         )
 
     def destroy_node(self):
+        result = super().destroy_node()
         if self.engine is not None:
             asyncio.run(self.engine.close())
-        return super().destroy_node()
+        return result
 
 
 def create_node(**kwargs):

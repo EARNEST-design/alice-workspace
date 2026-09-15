@@ -144,3 +144,57 @@ No physical motion, audio route, camera accuracy, or Compose deployment is
 claimed. Replay/synthetic inputs are authored test data with seed 29 (fixture
 clauses retain seeds 29/30); there is no participant data or training/evaluation
 split in this systems experiment.
+
+## Task 3 review repair round 1
+
+The original qualification above is retained at commit `69cf969`. Review found
+missing first-control deadlines, fault evidence queued behind inference, stale
+lifecycle jobs and refreshed external-clause relay timestamps. The repair adds
+independent PLAYING observers for Expression/Motion/Maestro; completed control
+must progress within 250 ms of original source time, including the first
+sample. Drain requires prior control before Home, even for a short response.
+Startup/prebuffer allowance and all transport/sample limits remain unchanged.
+
+Every worker job captures its run identity and cancellation event. Cancelled or
+timed-out queued START never invokes its adapter factory. Fault evidence runs
+on a separate finalizer; `_completed` alone does not admit the next epoch while
+an old computation or finalizer remains. A stalled expression call cannot
+publish late or mutate a later run. TTS cancellation is monitored on its owning
+asyncio loop and invokes the existing bounded owned-process stop before any
+first chunk is required. External clauses preserve original time through their
+queue, with another age check before relay and no sequence mutation on rejection.
+
+`task3-r1-green-04` passed **119 focused tests in 10.29 seconds**, covering
+nodes, lifecycle, generated conversions and transport. This includes a real
+spawned TTS test backend blocked before its first chunk with live ACTIVE health,
+blocked expression with all validated peer health live and no late proposal,
+blocked-finalizer heartbeat liveness, queued/timed-out lifecycle retirement,
+and 249/251 ms relay/control boundaries. Broad legacy suites were not repeated
+because this repair changes no legacy implementation. Existing fork warnings
+from the earlier full suite retain their disposition; inherited CMake warnings
+and disabled byte-compilation notices remain visible in fresh builds.
+
+`task3-r1-smoke-03` passed **five offline eight-process scenarios**: two
+successful distinct epochs, suspended-expression failure, SpeechState remapped
+away from Expression, and ExpressionFrame remapped away from Motion. Both
+control-loss cases retain all eight ACTIVE heartbeats after PLAYING and fault
+for original control-source progress; neither emits speech commands,
+post-speech pose or Home. Their `first-control-observer.json` records contain
+211 and 203 health messages respectively. Success still drains 24,000 transport
+plus 7,200 tail samples with recorder manifests and Home. All process logs,
+including replacement expression processes, have no traceback.
+
+The first round smoke overlapped a focused build and its second remap scenario
+faulted on a health lease instead of the intended control-progress condition.
+Build contention is suspected, not proven. That failure is retained as
+`task3-r1-smoke-01`; isolated `-02` and final `-03` satisfy the unchanged strict
+healthy-heartbeat assertions. All runtime validation is `--network none`,
+uses the same qualified image/UDP configuration and fresh temporary colcon
+builds, and exposes no devices. The original evidence manifest is untouched;
+`task3-r1-artifact-manifest.json` binds the repair's source and retained evidence.
+
+The narrow real-model PREPARE check `task3-r1-warm-01` also passes offline after
+the event-loop change: Pocket English-2026-01 warms successfully, stays alive,
+and publishes zero run transport samples. It retains the previously qualified
+read-only cache, configuration hash and model revision; this remains PREPARE
+qualification, not physical or end-to-end real-model streaming acceptance.

@@ -15,7 +15,13 @@ old stream authority or resume motion.
 Control is latest-only, retaining the embedded original DAC frame and its
 source timestamp through expression and motion. Receivers validate the first
 publisher against the prepared roster; every active control hop retains the
-250 ms age and progress gap. Reliable PCM and clauses use exact sequence and
+250 ms age and progress gap. Expression, Motion and Maestro independently
+observe validated PLAYING status outside their computation worker. First
+control must complete within 250 ms of the original PLAYING source time; each
+later completed computation/control sample renews only its original DAC source
+time. Startup and prebuffering retain their separate allowance. Drain cannot
+forgive missing first control, and requesting finalization does not disable
+the active deadline. Reliable PCM and clauses use exact sequence and
 metadata ledgers. PCM production intervals may be sparse while buffered DAC
 output remains healthy; this does not waive packet age or local underflow.
 
@@ -29,7 +35,13 @@ configuration files.
 
 ## Ownership and cleanup
 
-Inference and log finalization run on bounded dedicated workers. Health runs
+Inference and log finalization run on separate bounded dedicated workers.
+Every queued job captures its immutable run identity and cancellation event;
+timeout or cancellation retires queued lifecycle work before hooks execute.
+An already executing hook must retire before another run can be admitted.
+Terminal evidence completion and job retirement are separate conditions.
+Maestro also checks revocation atomically before creating/starting its adapter.
+Health runs
 independently every 50 ms with a bounded shared receive depth and a per-peer
 map. Local watchdogs revoke activity even when a sibling's callback or worker
 blocks. PortAudio only copies PCM and signals cancellation. Maestro alone owns
@@ -42,8 +54,15 @@ current-run audio drain permits Maestro's selected post-speech pose and Home.
 Session waits for runtime.done, successful Home/readback/restoration, durable
 local audio and command logs, and recorder finalization before action success.
 Receipt publication remains live during the serial owner's Home work. A local
-fault finalizes evidence without depending on a live session and never grants
-Home or jaw restoration.
+fault finalizes evidence without depending on a live session or the inference
+worker and never grants Home or jaw restoration. TTS monitors cancellation on
+the model-owning event loop and invokes the existing bounded owned-process
+terminate/join/kill cleanup even before the first PCM chunk. A blocked expression
+computation cannot prevent fault evidence: no concurrent model snapshot is
+attempted, late results are rejected, and a new epoch remains inadmissible until
+the old computation returns. External clauses retain their admitted original
+source timestamps through the Session queue and are checked again for the
+250 ms age limit immediately before relay; relay never refreshes their age.
 
 ## Evidence and limitations
 

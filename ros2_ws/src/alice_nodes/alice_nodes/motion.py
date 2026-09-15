@@ -36,6 +36,9 @@ class MotionNode(RuntimeNode):
             raise ValueError("embedded speech publisher incarnation mismatch")
         frame = wire.speech_state_from_msg(speech)
         proposal = compose_frame(expression, frame, self.sync)
+        if self.cancel.is_set():
+            return
+        self._control_source = header.source_monotonic_ns
         self.publisher.publish(
             wire.face_target_to_msg(
                 proposal,

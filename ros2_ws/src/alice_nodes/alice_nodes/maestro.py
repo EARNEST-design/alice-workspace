@@ -43,21 +43,23 @@ class MaestroNode(RuntimeNode):
         self.playback = None
         self.record_index = 0
         self.runtime = None
-        self.last_source = None
 
     def start_run(self):
-        self.runtime = FaceRuntime(
-            face_factory(
-                self.full,
-                self.identity.generation_id,
-                self.binding.hardware,
-                {},
-                self.local_dir,
-                config_root=self.config_root,
-            ),
-            on_fault=lambda: self.fail("face runtime fault"),
-        )
-        self.runtime.start()
+        with self._lock:
+            if self.cancel.is_set():
+                raise RuntimeError("START cancelled before adapter creation")
+            self.runtime = FaceRuntime(
+                face_factory(
+                    self.full,
+                    self.identity.generation_id,
+                    self.binding.hardware,
+                    {},
+                    self.local_dir,
+                    config_root=self.config_root,
+                ),
+                on_fault=lambda: self.fail("face runtime fault"),
+            )
+            self.runtime.start()
         if not self.runtime.ready.wait(5):
             raise RuntimeError("face startup deadline expired")
         self.runtime.raise_if_failed()
@@ -79,7 +81,7 @@ class MaestroNode(RuntimeNode):
             message.played_sample,
             source_monotonic_ns=header.source_monotonic_ns,
         )
-        self.last_source = header.source_monotonic_ns
+        self._control_source = header.source_monotonic_ns
         self.progress += 1
 
     def status(self, message):
@@ -101,6 +103,8 @@ class MaestroNode(RuntimeNode):
             self.fail(str(exc))
 
     def require_drain(self):
+        if self._control_source is None:
+            raise RuntimeError("successful drain requires first control progress")
         if (
             not self.playback
             or not self.playback.drained
@@ -163,18 +167,11 @@ class MaestroNode(RuntimeNode):
         if self.runtime:
             # Revocation is immediate; serial-owner cleanup never grants Home.
             self.runtime.cancel_signal.set()
-            self.submit(lambda: self.runtime.abort(self.error or "cancelled"))
 
     def check_progress(self, now):
         if self.runtime and self.runtime.error:
             raise RuntimeError(str(self.runtime.error))
-        if (
-            self.last_source
-            and self._ended is None
-            and not (self.playback and self.playback.drained)
-            and now - self.last_source > 250_000_000
-        ):
-            raise RuntimeError("original control source progress expired")
+        super().check_progress(now)
 
     def finalize_run(self, outcome):
         if self.runtime:

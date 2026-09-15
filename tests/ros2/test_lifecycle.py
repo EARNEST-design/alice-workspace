@@ -212,7 +212,7 @@ def test_local_watchdog_faults_when_peer_callbacks_stop(node):
     assert node.cancel.is_set()
 
 
-def test_prepare_and_finalization_do_not_block_health(node):
+def test_blocked_prepare_does_not_block_health(node):
     import threading
 
     import rclpy
@@ -330,3 +330,116 @@ def test_prepare_hook_has_dedicated_worker_ownership(node):
     node.prepare_run = lambda: owners.append(threading.current_thread().name)
     assert node.begin(prepare(node)).accepted
     assert owners == ["motion-worker"]
+
+
+def test_fault_evidence_does_not_wait_for_blocked_inference(node):
+    import threading
+
+    entered, release = threading.Event(), threading.Event()
+    assert node.begin(prepare(node)).accepted
+
+    def inference():
+        entered.set()
+        release.wait(3)
+
+    node.submit(inference)
+    try:
+        assert entered.wait(1)
+        node.fail("cancel during inference")
+        deadline = time.monotonic() + 0.7
+        while (
+            not (node.local_dir / "terminal.json").exists()
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.01)
+        assert (node.local_dir / "terminal.json").exists()
+        assert not node.begin(prepare(node, "next-epoch")).accepted
+    finally:
+        release.set()
+
+
+def test_cancelled_queued_start_is_retired_before_next_run(node):
+    import threading
+
+    entered, release = threading.Event(), threading.Event()
+    calls = []
+    request = prepare(node)
+    assert node.begin(request).accepted
+    node.start_run = lambda: calls.append(node.identity.epoch)
+
+    def blocked():
+        entered.set()
+        release.wait(3)
+
+    node.submit(blocked)
+    assert entered.wait(1)
+    replies = []
+    starter = threading.Thread(target=lambda: replies.append(start(node, request)))
+    starter.start()
+    try:
+        deadline = time.monotonic() + 1
+        while not node._lifecycle_busy and time.monotonic() < deadline:
+            time.sleep(0.005)
+        node.fail("cancel queued start")
+        assert not node.begin(prepare(node, "next-epoch")).accepted
+    finally:
+        release.set()
+        starter.join(2)
+    assert not calls
+    assert replies and not replies[0].accepted
+    deadline = time.monotonic() + 1
+    while not node._completed and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert node.begin(prepare(node, "next-epoch")).accepted
+    assert not calls
+
+
+def test_timed_out_worker_job_never_runs_after_release(node):
+    import threading
+
+    entered, release = threading.Event(), threading.Event()
+    assert node.begin(prepare(node)).accepted
+    node.submit(lambda: (entered.set(), release.wait(2)))
+    assert entered.wait(1)
+    calls = []
+    try:
+        with pytest.raises(RuntimeError, match="deadline"):
+            node.call_worker(lambda: calls.append("late"), timeout=0.02)
+    finally:
+        release.set()
+    time.sleep(0.1)
+    assert calls == []
+
+
+def test_blocked_finalizer_keeps_publishing_health(node):
+    import threading
+
+    import rclpy
+    from alice_interfaces.msg import RunHealth
+    from alice_nodes.base import HEALTH
+    from rclpy.executors import MultiThreadedExecutor
+
+    assert node.begin(prepare(node)).accepted
+    entered, release = threading.Event(), threading.Event()
+    node.finalize_run = lambda outcome: (entered.set(), release.wait(2))
+    observer = rclpy.create_node("finalizer_health_observer")
+    received = []
+    observer.create_subscription(
+        RunHealth, "/alice/run/health", received.append, HEALTH
+    )
+    executor = MultiThreadedExecutor(num_threads=2)
+    executor.add_node(node)
+    executor.add_node(observer)
+    try:
+        node.fail("cancel")
+        assert entered.wait(1)
+        deadline = time.monotonic() + 0.3
+        while time.monotonic() < deadline:
+            executor.spin_once(timeout_sec=0.02)
+        assert len(received) >= 3
+        assert all(message.state == RunHealth.FAULT for message in received)
+        assert not node._completed
+    finally:
+        release.set()
+        executor.shutdown(timeout_sec=1)
+        observer.destroy_node()

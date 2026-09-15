@@ -193,3 +193,24 @@ SpeechState, ExpressionFrame and FaceTarget retain their 250 ms active limits;
 local PCM underflow still cancels immediately. The integration test covers a
 fresh packet after a long production interval, expired and missing-sequence
 rejections, and corrected retry with an unchanged ledger.
+
+
+### Task 3 review repair: participant and relay enforcement
+
+The wire schemas and default transport guards remain unchanged. Runtime jobs
+capture the admitted identity and cancellation event, and lifecycle timeout
+retires the queued hook. Local terminal evidence may complete while a cancelled
+inference is still unwinding; a different epoch is rejected until both queued/
+executing jobs and finalization have retired. START cannot create the Maestro
+adapter after revocation. TTS cancellation uses its existing owned-process stop
+on the owning event loop, independently of receipt of a first chunk.
+
+Expression, Motion and Maestro independently observe validated PLAYING status.
+The original PLAYING source time starts a 250 ms first-control deadline; later
+completed computation/control output retains and renews only the original DAC
+source timestamp. Requesting EndRun does not waive this limit. Startup before
+PLAYING keeps its separate allowance. Session's external-clause relay keeps the
+original external timestamp, rechecks age before publication, and adds only its
+own stream sequence and publisher incarnation. A clause older than 250 ms in
+the relay queue is rejected before publication or the relay's output-sequence
+mutation. The sparse PCM production exception does not apply to this age rule.
