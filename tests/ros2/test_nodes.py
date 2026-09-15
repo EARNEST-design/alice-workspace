@@ -809,3 +809,18 @@ def test_recorder_admitted_writes_finish_before_success_closes_events(tmp_path):
         release.set()
         node.destroy_node()
         rclpy.shutdown()
+
+
+def test_maestro_hardware_factory_rechecks_unavailable_host_visibility(monkeypatch):
+    from types import SimpleNamespace
+
+    from alice_nodes.maestro import MaestroNode
+
+    calls = []
+    monkeypatch.setattr(
+        "alice_nodes.maestro.face_factory", lambda *a, **kw: calls.append("factory")
+    )
+    node = SimpleNamespace(binding=SimpleNamespace(hardware=True))
+    with pytest.raises(ValueError, match="host FD visibility"):
+        MaestroNode.start_run(node)
+    assert not calls

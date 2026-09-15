@@ -14,14 +14,18 @@ def proof(**changes):
         "epoch": "epoch-one",
         "boot_id": BOOT,
         "namespace": "time:[4026531834]",
+        "children_namespace": "time:[4026531834]",
         "offsets": ZERO,
     }
     return module.proof_from_metadata(**(args | changes))
 
 
 def test_private_namespace_targets_share_only_the_zero_offset_host_proof():
-    assert proof().startswith("host-monotonic-zero/v1:")
-    assert proof(namespace="time:[4026532555]") == proof()
+    assert proof().startswith("host-monotonic-zero/v2:")
+    assert (
+        proof(namespace="time:[4026532555]", children_namespace="time:[4026532555]")
+        == proof()
+    )
     assert proof(epoch="epoch-two") != proof()
     assert proof(boot_id="650e8400-e29b-41d4-a716-446655440000") != proof()
 
@@ -72,4 +76,27 @@ def test_missing_kernel_metadata_is_not_replaced_with_a_fallback(monkeypatch):
 
     monkeypatch.setattr(module.Path, "read_text", unavailable)
     with pytest.raises(FileNotFoundError):
+        module.clock_proof("epoch-one")
+
+
+@pytest.mark.parametrize(
+    "children_namespace",
+    ["", "time:123", "pid:[4026531834]", "time:[bad]", "time:[4026532555]"],
+)
+def test_offsets_must_belong_to_current_namespace(children_namespace):
+    with pytest.raises(ValueError, match="namespace"):
+        proof(children_namespace=children_namespace)
+
+
+def test_missing_children_namespace_is_not_replaced(monkeypatch):
+    module = importlib.import_module("alice_nodes.clock")
+    original = module.os.readlink
+
+    def readlink(path):
+        if path == "/proc/self/ns/time_for_children":
+            raise FileNotFoundError("missing child namespace")
+        return original(path)
+
+    monkeypatch.setattr(module.os, "readlink", readlink)
+    with pytest.raises(FileNotFoundError, match="child namespace"):
         module.clock_proof("epoch-one")

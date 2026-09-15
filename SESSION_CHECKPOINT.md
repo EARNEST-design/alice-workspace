@@ -1,7 +1,22 @@
 # Alice session checkpoint
 
-**Saved 2026-09-15: Task 4 ROS 2 Compose implementation complete, awaiting
-coordinator task and whole-migration review.** Work remains in the preserved
+**Saved 2026-09-15: Task 4 scoped review fixes complete, awaiting re-review.**
+Clock v2 binds current/children namespaces before accepting offsets. ROS hardware
+admission is explicitly unavailable pending a trusted complete host-owner
+visibility mechanism; even enabled overlays cannot arm. Legacy CLI behavior and
+speaker-only/simulated ROS operation are preserved. This coordinator amendment
+supersedes the earlier ready-for-hardware command. No new servo/camera trial.
+
+Round 1 final images share source SHA256
+`c4a4a56755d81d9f507d09712b36576f7cba3b0fc926c93ac76b70d544eb8835`.
+Final covering: 150 passed, one skip covered by seven host Compose checks,
+two existing fork warnings, Ruff and mypy (87 files) pass. Three actual-container
+cases pass: default, all-eight participant binding, and mismatched-child
+rejection. No-device hidden-owner RED/GREEN proves enabled hardware rejects
+before mutation/factories despite empty fuser output. Details and exact images
+are in the appended Task 4 report and `task4-r1-artifact-manifest.json`.
+
+The pre-review implementation and evidence below remain preserved. Work remains in the preserved
 `feature/streaming-affect-motion` worktree. No merge, push or pruning performed.
 
 - Eight default idle non-root, read-only, capability-dropped containers run on
@@ -31,7 +46,7 @@ coordinator task and whole-migration review.** Work remains in the preserved
   cancel/evidence completes, then an explicit five-second failed-cleanup exit 1
   avoids destroyed-guard callbacks and indefinite Python join. This qualified
   rclpy-version workaround and failed status remain documented, not waived.
-- Coordinator ruling versions clock proof as `host-monotonic-zero/v1`: same
+- Original coordinator ruling versioned clock proof as `host-monotonic-zero/v1`: same
   kernel boot plus strictly parsed zero monotonic/boottime offsets; reject bad,
   missing or nonzero metadata. Docker private namespace identity is diagnostic.
 - Selective user-approved robot description from exact `13c2549` is qualified

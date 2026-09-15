@@ -65,7 +65,7 @@ def test_explicit_overlays_use_only_scoped_inputs():
     assert set(audio["services"]) == {"audio"}
     assert "devices" not in audio["services"]["audio"]
     hardware = yaml.safe_load((INFRA / "compose.hardware.yaml").read_text())
-    assert hardware["services"]["maestro"]["pid"] == "host"
+    assert "pid" not in hardware["services"]["maestro"]
     assert len(hardware["services"]["maestro"]["devices"]) == 2
     assert len(hardware["services"]["perception"]["devices"]) == 1
     assert "privileged" not in json.dumps(hardware)

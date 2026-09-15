@@ -60,6 +60,8 @@ def main():
             "offline-profile",
             "speaker",
             "preview",
+            "clock-bound",
+            "clock-binding",
             "callback-underflow",
             "source-exhaustion",
             "queued-start",
@@ -128,7 +130,11 @@ def main():
         )
         # A pass-through Maestro instrumentation wrapper records the original
         # timestamp at the actual admission method; injections remain test-only.
-        for selected in {role, "maestro"}:
+        for selected in (
+            set(ROLES)
+            if scenario in {"clock-bound", "clock-binding"}
+            else {role, "maestro"}
+        ):
             services[selected] = {
                 "volumes": [f"{snapshot}:/qualification:ro"],
                 "command": [
@@ -291,10 +297,11 @@ def main():
                 script = (
                     "import json,os;from pathlib import Path;"
                     "from alice_nodes.clock import clock_proof;"
+                    "bound=os.readlink('/proc/self/ns/time')==os.readlink('/proc/self/ns/time_for_children');"
                     "text=Path('/proc/self/timens_offsets').read_text();"
                     "rows=[r.split() for r in text.splitlines()];"
                     "print(json.dumps({'proof':clock_proof(" + repr(salt) + "),"
-                    "'zero':sorted(rows)==[['boottime','0','0'],['monotonic','0','0']]}))"
+                    "'current_matches_children':bound,'zero':sorted(rows)==[['boottime','0','0'],['monotonic','0','0']]}))"
                 )
                 value = json.loads(
                     subprocess.check_output(
@@ -316,7 +323,11 @@ def main():
                 "all_zero_offsets": all(v["zero"] for v in proofs),
                 "same_versioned_epoch_salted_proof": len({v["proof"] for v in proofs})
                 == 1,
-                "version": "host-monotonic-zero/v1",
+                "version": "host-monotonic-zero/v2",
+                "probe_scope": "exec child; participant calls recorded separately",
+                "all_current_match_children": all(
+                    v["current_matches_children"] for v in proofs
+                ),
                 "raw_ids_or_proofs_retained": False,
             }
             (run / "clock-domain.json").write_text(json.dumps(evidence, indent=2))
@@ -424,12 +435,32 @@ def main():
             success = scenario in {
                 "stale-epoch",
                 "default",
+                "clock-bound",
                 "success",
                 "offline",
                 "offline-profile",
                 "speaker",
             }
             assert (result["outcome"] == "success") == success, result
+            if scenario in {"clock-bound", "clock-binding"}:
+                proof_records = {
+                    p.stem.removeprefix("participant-clock-"): json.loads(p.read_text())
+                    for p in run.glob("participant-clock-*.json")
+                }
+                if scenario == "clock-bound":
+                    assert set(proof_records) == set(ROLES)
+                    assert all(
+                        v["accepted"]
+                        and v["current_matches_children"]
+                        and v["zero_offsets"]
+                        for v in proof_records.values()
+                    )
+                else:
+                    assert not proof_records["maestro"]["accepted"]
+                    assert not proof_records["maestro"]["current_matches_children"]
+                    assert "namespace" in result["error"]
+                    assert not list(run.glob("*/maestro/commands.jsonl"))
+
             terminals = list(run.glob("*/maestro/terminal.json"))
             if terminals:
                 folder = terminals[0].parent

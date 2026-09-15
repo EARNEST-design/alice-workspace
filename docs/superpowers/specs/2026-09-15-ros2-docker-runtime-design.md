@@ -318,3 +318,31 @@ clock bypass, bound widening, daemon change or hardware acceptance follows.
 This is the coordinator's recorded technical correction, not new user approval.
 ADR0012 and the dated experiment preserve rationale, primary sources and original
 failed evidence. The actual eight containers must qualify the revised proof.
+
+
+## Task 4 review amendment: bound clock metadata and unavailable ROS hardware
+
+Coordinator technical ruling, not new user approval: clock proof is now
+`host-monotonic-zero/v2`. Linux exposes `timens_offsets` from
+`time_ns_for_children`; the participant must read and validate both local
+`/proc/self/ns/time` and `/proc/self/ns/time_for_children` links and require their
+equality before interpreting the complete zero monotonic/boottime records.
+Missing/malformed/unequal binding rejects before lifecycle mutation/factories.
+Different participants may retain different valid namespace IDs. Version 1 and
+mixed proofs reject; no timestamp translation or bound widening is introduced.
+Actual participant-process evidence is distinguished from `docker exec` probes.
+Primary source: https://github.com/torvalds/linux/blob/master/kernel/time/namespace.c
+
+The current unprivileged deployment cannot prove complete host FD visibility.
+Seeing host PIDs or enumerating a namespace-local `/proc` does not prove access
+to every owner's FD table; empty fuser output is not proof of absence. The
+coordinator chooses explicit unavailable-only ROS hardware admission until a
+trusted host visibility mechanism is separately designed and qualified. All
+hardware-marked BeginRun requests reject before mutation/factories, irrespective
+of overlay enablement; Maestro rechecks before its hardware adapter factory.
+The preparation overlay no longer grants host PID visibility. No production
+privileges or host services/settings are added. The shared legacy CLI owner
+helper is unchanged; simulated and speaker-only ROS paths remain available.
+This supersedes the earlier ready-for-hardware-command expectation and is an
+explicit live-hardware deployment gap, not completed physical acceptance.
+Primary restriction: https://man7.org/linux/man-pages/man1/fuser.1.html

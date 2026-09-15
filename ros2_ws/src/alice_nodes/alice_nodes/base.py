@@ -38,6 +38,16 @@ SUCCESS_WORK_TIMEOUT_S = 1.0
 SHUTDOWN_HANDLER_TIMEOUT_S = 5.0
 
 
+def require_ros_hardware_visibility():
+    # PID namespace visibility alone cannot prove access to every host FD table.
+    # No trusted complete host verifier is qualified for this deployment. Never
+    # infer absence of owners of either Maestro interface from empty fuser output.
+    raise ValueError(
+        "ROS hardware unavailable: complete host FD visibility for Maestro "
+        "interfaces 00/02 is not qualified"
+    )
+
+
 @dataclass(frozen=True)
 class RuntimePaths:
     config: Path
@@ -428,6 +438,8 @@ class RuntimeNode(Node):
             response.clock_verified = proof_ok
             if binding.hardware and not self.get_parameter("hardware_enabled").value:
                 raise ValueError("deployment does not enable hardware")
+            if binding.hardware:
+                require_ros_hardware_visibility()
             if (
                 binding.config_sha256
                 != config_digest(self.paths.config, binding.selected_profile)

@@ -16,7 +16,13 @@ from alice.hardware.manifest import load_manifest
 from alice.speech.face_adapter import face_factory
 from alice.speech.face_runtime import FaceRuntime
 from alice_nodes import contracts as wire
-from alice_nodes.base import RELIABLE, RuntimeNode, spin, write_json
+from alice_nodes.base import (
+    RELIABLE,
+    RuntimeNode,
+    require_ros_hardware_visibility,
+    spin,
+    write_json,
+)
 
 
 class MaestroNode(RuntimeNode):
@@ -45,6 +51,8 @@ class MaestroNode(RuntimeNode):
         self.runtime = None
 
     def start_run(self):
+        if self.binding.hardware:
+            require_ros_hardware_visibility()
         with self._lock:
             if self.cancel.is_set():
                 raise RuntimeError("START cancelled before adapter creation")

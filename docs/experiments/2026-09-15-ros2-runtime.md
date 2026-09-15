@@ -499,3 +499,58 @@ harnesses, source/model manifests and coordinator clock/timing rulings. Build
 07 broad-matrix evidence is explicitly distinct from build 08 targeted evidence.
 No new servo or camera trial ran. Whole-migration review and physical acceptance
 remain coordinator/operator follow-up; the real-model 20 ms p99 gap is open.
+
+
+### Task 4 review fix round 1
+
+The review found two admission gaps. Clock v1 validated zero offsets without
+binding them to the current namespace, although Linux reads `timens_offsets`
+from `time_ns_for_children`. Clock v2 requires valid, equal local current/child
+namespace links before interpreting those records; different participants may
+still have different IDs. Missing/malformed/unequal binding and v1 proofs reject
+before lifecycle mutation or factories. Initial focused RED has 30 failures
+(including the changed required API argument); GREEN has 61 passes. Subsequent
+covering includes the added ownership tests.
+
+A no-device hidden-owner probe uses two regular files representing interfaces
+00/02, a non-dumpable owner and an unprivileged checker in an isolated,
+capability-dropped container. The owner's FD table is inaccessible to the checker;
+`fuser` returns 1 with empty stdout/stderr. Old image 08 admits the hardware-marked
+request and mutates identity (`task4-r1-hidden-owner-red-02.log`). The first probe
+attempt failed before admission because ROS logging targeted a read-only home;
+that harness failure remains `-red-01.log`. The corrected probe uses a writable
+local log directory. No serial/camera device is mapped or opened.
+
+Per coordinator ruling, live ROS hardware admission is explicitly unavailable
+until a trusted complete host visibility mechanism is separately designed and
+qualified. This is an availability limitation, not a newly invented positive
+proof. Every hardware-marked BeginRun rejects before mutation/factories, even
+when hardware is enabled, and Maestro rechecks immediately before its factory.
+The hardware preparation overlay drops its unnecessary host-PID grant. No
+production privileges, host service or host setting changes are introduced.
+Shared legacy CLI behavior and simulated/speaker-only operation remain unchanged.
+The initial owner tests fail 3/3 before the fix. Final hidden-owner GREEN shows
+accepted=false, identity_mutated=false and zero prepare/factory calls, despite
+the same misleading empty fuser result.
+
+The final round-1 images share source SHA256
+`c4a4a56755d81d9f507d09712b36576f7cba3b0fc926c93ac76b70d544eb8835`;
+`task4-r1-image-source-manifests.json` identifies each immutable image and exact
+input hash. `task4-r1-container-01` passes three actual-container scenarios:
+ordinary default success, eight participant-process valid-binding proofs, and
+Maestro's mismatched-child binding rejection. Test-only instrumentation records
+booleans in the actual participants' admission calls, with no raw IDs/proofs;
+separate docker-exec probes are explicitly labeled as child-process evidence.
+All retained post-stop logs and terminal hashes pass the three-set audit. No
+Maestro commands or lifecycle directory exist for rejected binding admission.
+
+The first covering run had six legacy tests fail because its harness omitted
+worktree Git metadata; no production fix was made for that. Corrected covering
+passes 150 tests with one host-Docker skip and two existing fork warnings, plus
+Ruff and 87-file mypy. Seven host Compose checks cover the skip. Final pinned-image
+covering also passes 150 tests in 25.29 s, Ruff and 87-file mypy
+(`task4-r1-covering-final.log`); the artifact manifest retains
+all RED/GREEN and failed harness attempts. The original 35-case matrix and real
+speaker evidence remain independently identified; no unchanged broad matrix or
+new speaker/servo/camera trial was repeated for these admission-only changes.
+The real-model timing target and physical acceptance limitations remain open.

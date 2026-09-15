@@ -577,6 +577,7 @@ def test_cancellation_interrupts_success_wait_without_waiting_for_stuck_job(node
         "0" * 64,
         "host-monotonic-zero/v0:" + "0" * 64,
         "host-monotonic-zero/v1:" + "0" * 64,
+        "host-monotonic-zero/v2:" + "0" * 64,
     ],
 )
 def test_clock_proof_incompatibility_rejects_before_prepare_or_factory(node, bad_proof):
@@ -590,3 +591,47 @@ def test_clock_proof_incompatibility_rejects_before_prepare_or_factory(node, bad
     assert "clock-domain mismatch" in reply.error
     assert node.identity is None
     assert not calls
+
+
+@pytest.mark.parametrize("children_namespace", ["", "time:[bad]", "time:[1]", None])
+def test_offset_binding_rejection_precedes_mutation_and_factories(
+    node, monkeypatch, children_namespace
+):
+    import alice_nodes.clock as clock
+
+    request = prepare(node)
+    original = clock.os.readlink
+
+    def readlink(path):
+        if path == "/proc/self/ns/time_for_children":
+            if children_namespace is None:
+                raise FileNotFoundError("missing child namespace")
+            return children_namespace
+        return original(path)
+
+    calls = []
+    node.prepare_run = lambda: calls.append("prepare")
+    node.start_run = lambda: calls.append("factory")
+    monkeypatch.setattr(clock.os, "readlink", readlink)
+    reply = node.begin(request)
+    assert not reply.accepted
+    assert "namespace" in reply.error
+    assert node.identity is None and not calls
+
+
+def test_ros_hardware_rejects_unqualified_host_visibility_before_mutation(
+    node, monkeypatch
+):
+    from rclpy.parameter import Parameter
+
+    node.set_parameters([Parameter("hardware_enabled", value=True)])
+    request = prepare(node)
+    request.hardware = True
+    calls = []
+    node.prepare_run = lambda: calls.append("prepare")
+    node.start_run = lambda: calls.append("factory")
+    reply = node.begin(request)
+    assert not reply.accepted
+    assert "host FD visibility" in reply.error
+    assert "00/02" in reply.error
+    assert node.identity is None and not calls

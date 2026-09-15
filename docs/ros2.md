@@ -28,10 +28,13 @@ python3 infra/ros2/deploy.py run -- ros2 run alice_nodes alice run \
 ```
 
 Run commands inside the tools container so the clock-domain proof is computed
-from the actual deployment kernel metadata. The versioned proof validates the
-same kernel boot and strictly zero monotonic/boottime offsets; Docker 29.5+ gives
-containers private namespace identities. Missing/malformed/nonzero metadata and
-incompatible proofs reject admission. ADR 0012 records this coordinator technical
+from the actual deployment kernel metadata. The `host-monotonic-zero/v2` proof first requires valid, equal local
+`time` and `time_for_children` namespace links, binding the kernel offset records
+to the current participant. It then validates the same kernel boot and strictly
+zero monotonic/boottime offsets; Docker 29.5+ gives
+containers private namespace identities. Missing/malformed/nonzero metadata, unequal local namespace links and
+incompatible proofs (including v1) reject admission. Different participants may
+still have different namespace IDs. ADR 0012 records this coordinator technical
 correction and its Linux/Docker evidence. No clock translation is permitted. Direct Compose
 use requires a pre-created writable output directory and exact image identity
 environment values; the launcher supplies them. Do not use an old image ID as
@@ -74,44 +77,43 @@ This is speaker-only with simulated Maestro/perception. Announce playback before
 an attended qualification. Raw waveform retention is off by default. Use a
 fresh project/output for every qualification attempt and retain failed runs.
 
-## Explicit hardware deployment
+## Hardware configuration preparation (admission unavailable)
 
-Physical facial acceptance remains pending: the prior camera observation showed
-little motion despite changed PWM. Do not start another servo run until that
-concrete operator issue is resolved. The following command is prepared for the
-next attended test; it has not been physically qualified by the ROS migration.
+ROS hardware admission is currently unavailable. The coordinator's Task 4
+review amendment requires fail-closed rejection until complete host ownership
+visibility for both Maestro interfaces 00/02 has a separately designed and
+qualified mechanism. Every hardware-marked ROS BeginRun rejects before lifecycle
+mutation or factories, even with `hardware_enabled=true`; Maestro also checks
+immediately before its adapter factory. This does not change the approved legacy
+CLI workflow. Simulated and speaker-only ROS paths remain available.
 
-Set the numeric serial/video groups and resolve exact `/dev/ttyACM*` and
-`/dev/video*` nodes for the reviewed serial00037376 interfaces00/02 and C525
-capture interface. `.env.example` lists the required environment variables.
-The hardware overlay grants device cgroup access only to those selected nodes.
-Read-only by-id directory mounts preserve canonical symlinks; other dangling
-links confer no device access. Sysfs metadata remains available for major/minor,
-USB serial and interface checks. Re-enumeration requires regenerating mappings;
-the runtime rejects identity mismatch.
+A non-root process can see host PIDs but cannot necessarily inspect another
+user's or a non-dumpable process's FD table. Namespace-local `/proc` checks cannot
+prove host completeness, and empty `fuser` output cannot establish absence of
+owners. The unused host-PID grant has therefore been removed. No extra capability,
+privileged container, host daemon or setting change is supplied as a workaround.
 
-Maestro alone uses host PID visibility so the existing `fuser` check includes
-host competitors on both interfaces. No process-control capability is granted;
-non-root visibility can still be restricted by host `/proc` policy. Any ambiguous
-ownership result rejects startup; it must never be interpreted as an empty
-host ownership check. Serial access also uses an exclusive open. The auxiliary
-interface receives read-only device access for the preserved ownership/identity
-check, not commands. Camera hardware remains confined to perception.
+The hardware overlay retains only scoped device/cache/group configuration as
+preparation for future qualification. It is not an arming command. Resolve the
+reviewed serial 00037376 interfaces 00/02, selected C525 capture node, read-only
+model asset and numeric groups using `.env.example`, then inspect configuration:
 
 ```bash
-python3 infra/ros2/deploy.py up --overlay offline --overlay audio --overlay hardware
-# Only after the unresolved visible-motion issue is resolved by the operator:
-python3 infra/ros2/deploy.py run --overlay offline --overlay audio --overlay hardware \
-  -- ros2 run alice_nodes alice run --fixture stream-visible-demo-v1.jsonl \
-  --hardware --sad-hold-ms 1500
+python3 infra/ros2/deploy.py config --overlay offline --overlay audio --overlay hardware
 ```
 
-Both deployment hardware enablement and an explicitly hardware-marked action
-are required; overlay startup alone never arms. Allowed facial channels remain
-6/3/4/5/9/11, jaw runtime 0/0 with successful Home restoration 0/11,100 ms mouth
-lead,250 ms age/progress/gap bounds,25 s active run,10 s total output,2 s maximum
-sad hold and 6 s pose deadline. Process kill revokes software ownership but cannot
-power off a physical controller, which may retain its last PWM.
+Do not present `up` plus `run --hardware` as a currently supported ROS hardware
+trial: admission deliberately rejects it. A future host-visibility mechanism
+must prove both interfaces completely and preserve identity, ownership, cancel,
+calibration and limit checks before this restriction can change.
+
+Physical facial acceptance also remains pending: the prior camera observation
+showed little motion despite changed PWM. No new servo/camera trial was run.
+Neither process death nor owner revocation cuts physical controller power/PWM.
+The retained scope is facial channels 6/3/4/5/9/11, jaw runtime 0/0 with successful
+Home restoration 0/11, 100 ms mouth lead, 250 ms age/progress/gap guards, 25 s
+active run, 10 s output, 2 s sad hold and 6 s pose deadline. This amendment changes
+availability, not those limits or the unresolved operator issue.
 
 ## Optional provisional robot preview
 

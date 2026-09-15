@@ -1,4 +1,5 @@
-# Explicit attended action --hardware is still required. Never autoplays/arms.
+# Configuration preparation only: ROS hardware admission is unavailable until
+# complete host ownership visibility for both Maestro interfaces is qualified.
 services:
   session: {command: [alice-node, session, --ros-args, -p, "hardware_enabled:=true"]}
   tts: {command: [alice-node, tts, --ros-args, -p, "hardware_enabled:=true", -p, "tts_mode:=pocket"]}
@@ -8,7 +9,6 @@ services:
   recorder: {command: [alice-node, recorder, --ros-args, -p, "hardware_enabled:=true"]}
   maestro:
     command: [alice-node, maestro, --ros-args, -p, "hardware_enabled:=true"]
-    pid: host
     group_add: ["${ALICE_SERIAL_GID:?Set numeric serial group}"]
     devices:
       - "${ALICE_MAESTRO_IF00:?Resolve command interface}:${ALICE_MAESTRO_IF00}:rw"

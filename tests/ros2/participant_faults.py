@@ -13,6 +13,47 @@ def main():
 
     role, fault = sys.argv[1:3]
     sys.argv = [sys.argv[0], *sys.argv[3:]]
+    if fault in {"clock-bound", "clock-binding"}:
+        import alice_nodes.base as base
+        import alice_nodes.clock as clock
+
+        readlink = clock.os.readlink
+        if fault == "clock-binding" and role == "maestro":
+            clock.os.readlink = lambda path: (
+                "time:[1]"
+                if path == "/proc/self/ns/time_for_children"
+                else readlink(path)
+            )
+        original_proof = clock.clock_proof
+
+        def participant_proof(epoch):
+            current = clock.os.readlink("/proc/self/ns/time")
+            children = clock.os.readlink("/proc/self/ns/time_for_children")
+            rows = [
+                r.split()
+                for r in Path("/proc/self/timens_offsets").read_text().splitlines()
+            ]
+            evidence = {
+                "participant_process": True,
+                "current_matches_children": current == children,
+                "zero_offsets": sorted(rows)
+                == [["boottime", "0", "0"], ["monotonic", "0", "0"]],
+                "version": clock.VERSION,
+                "raw_ids_or_proofs_retained": False,
+            }
+            try:
+                proof = original_proof(epoch)
+                evidence["accepted"] = True
+                return proof
+            except Exception:
+                evidence["accepted"] = False
+                raise
+            finally:
+                Path("/artifacts/participant-clock-" + role + ".json").write_text(
+                    json.dumps(evidence)
+                )
+
+        base.clock_proof = participant_proof
     module = importlib.import_module("alice_nodes." + role)
     if os.environ.get("ALICE_CLOCK_FAULT") == "1":
         import alice_nodes.base
@@ -32,6 +73,7 @@ def main():
             "recorder": "RecorderNode",
             "motion": "MotionNode",
             "session": "SessionNode",
+            "perception": "PerceptionNode",
         }[role],
     )
     if role == "maestro":
