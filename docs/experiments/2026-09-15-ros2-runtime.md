@@ -2,6 +2,12 @@
 
 Date: 2026-09-15. Worktree: `feature/streaming-affect-motion`.
 
+Current implementation is `5ed4e23`, with final scoped re-review complete. The
+dated sections below preserve earlier task evidence and identities; the final
+fix-wave section records current images and production model verification.
+Live ROS hardware remains unavailable pending complete host ownership proof.
+Use `docs/ros2.md` for current deployment commands and scoped cache mounts.
+
 ## Implementation and scope
 
 The eight `alice_nodes` entrypoints are `session`, `tts`, `audio`, `expression`,
@@ -554,3 +560,75 @@ all RED/GREEN and failed harness attempts. The original 35-case matrix and real
 speaker evidence remain independently identified; no unchanged broad matrix or
 new speaker/servo/camera trial was repeated for these admission-only changes.
 The real-model timing target and physical acceptance limitations remain open.
+
+### Final migration fix wave
+
+Whole-migration review identified invalid admission flags on cancelled actions,
+a missing first-DAC deadline and model checksums verified only by qualification
+helpers. Commit `5ed4e23` fixes all three and distinguishes older evidence in the
+runbook. Accepted actions keep accepted=true through cancellation or runtime
+faults; genuine pre-admission rejection remains separate. Audio arms an
+independent 250 ms first-DAC deadline after prebuffer completion at device startup,
+without inventing a source timestamp. Production Pocket PREPARE verifies the
+approved model, tokenizer and Azelma bytes before worker construction. Run
+evidence records that loaded worker's asset identity, even if cache contents
+later change; a dead worker cannot silently reload unchecked bytes.
+
+All four final role images share source SHA256
+`f7b99195cbd2ae7d72a7f097f88e549ef47654abd268a52db60045f38efa573a`.
+`final-fix-image-source-manifests.json` records immutable image IDs and per-file
+hashes. `final-fix-full-01.sh` uses the exact test image, read-only sources/Git
+metadata and an offline cache with an inner strict shell. It exits 0 with
+1,079 tests passed, three skips, two existing fork warnings in 78.95 s;
+Ruff passes and mypy passes 87 files. `final-fix-host-01.log` records nine
+covering passes, including all three container skips. No production image
+input changed after this verification.
+
+The focused actual-container matrix retains both attempts. Container01 passes
+seven cases: default success; cancellation during preparation, playback and
+finalization; first-DAC loss; checksum mismatch; stalled-TTS cancellation.
+Its offline helper fails before inference because docker exec bypasses ROS
+entrypoint setup. The corrected invocation runs only offline in container02,
+on unchanged images. Every complete action result is validated and retained,
+including accepted, run/epoch/generation, responder, outcome and artifact.
+All eight passed cases have eight post-stop service exits of zero and no ROS
+teardown exceptions. The original helper failure remains visible.
+
+First-DAC injection opens/starts a test stream that never calls back. The local
+fault is `first DAC progress expired`, with zero submitted samples and no DAC
+source timestamp. The 250 ms expiration predicate is observed by the existing
+20 ms watchdog after 259.033 ms; this does not claim a physical stop within250 ms.
+The checksum-mismatch run rejects PREPARE before its worker-constructor sentinel
+or model evidence appears. Focused tests also cover missing/escaping assets,
+healthy first/subsequent DAC progress and warm/dead worker cache changes.
+
+Real offline Azelma produces 178,560 transport samples plus 7,200 tail samples:
+185,760 generated/submitted/played, drained=true, zero underflows, maximum ring
+48,000, simulated DAC. Production `tts/model.json` includes the three approved
+asset path/hash/size identities. Its SHA256
+`aff1d6272e2b57f879400cbcb9781893262b625d9b0c9733fc72c2048f0bcc73`
+is in both TTS terminal and recorder manifest. The returned artifact
+`eef084eedbebded42c75d3f91e381054e0ddfc72cdfccb300ce8924c904efe74`
+hashes the recorder terminal, which binds its manifest. The first independent
+audit incorrectly expected the manifest hash directly; its failed script/log
+remain alongside the corrected successful audit.
+
+This single offline run has 383 admissions, p99=16.964663 ms and
+max=21.683351 ms. Earlier runs exceeded the 20 ms p99 target; no causal
+performance fix or repeatable timing qualification is claimed. No speaker,
+servo or camera trial ran during these repairs. Build08 speaker evidence is
+separate, and physical facial/PWM cutoff acceptance remains pending.
+
+`final-fix-artifact-manifest.json` binds commit `5ed4e23`, exact image/source
+identities, the preceding fix manifest and 1,927 evidence files (8,714,687 bytes),
+including failed attempts. Coordinator verification independently checks those
+hashes in `coordinator-final-fix-manifest-verification.json`. Existing fork/CMake
+warning debt and live ROS hardware unavailability remain explicitly disclosed.
+
+The sole scoped re-review closed I1–I3 and the runbook chronology correction,
+with no new breakage. All required implementation review findings are closed;
+the existing timing/hardware/physical acceptance limitations remain open.
+Review reports, all six rulings, briefs, diffs and the final progress ledger are
+preserved in `artifacts/ros2/2026-09-15/sdd-final-review/` with a verified archive
+manifest; only this plan's redundant scratch directory is removed. The branch,
+worktree, earlier manifests and local experiment artifacts remain intact.

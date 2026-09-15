@@ -97,13 +97,15 @@ def test_terminal_fault_cannot_be_completed():
 - [x] Run real offline Azelma through the Compose graph with simulated DAC and compare sample accounting/invariants to the baseline. Inspect the existing speaker route read-only and test the explicit audio overlay with simulated servos if available. Do not run servos while their prior physical-motion issue is unresolved.
 - [x] Integrate user-supplied `alice_description` from `codex/robot-description` (`13c2549`) selectively into the ROS workspace. Requalify Xacro/URDF/TF on Lyrical and add optional headless preview services; preserve provisional geometry and preview namespace, with no PWM bridge or extra actuation scope.
 - [x] Run full Python regressions, ROS contract/launch/integration checks, Ruff/mypy where applicable and `git diff --check`. Document exact commands/results and limits. Under the reviewed ownership amendment, retain hardware configuration inspection only: live ROS hardware admission rejects until a trusted complete host-ownership mechanism is qualified; do not assert hardware readiness or physical acceptance.
-- [ ] Request whole-migration review, fix material findings and verify fixes. Update plan/checkpoint/ADR and artifact manifest. Commit, preserve the branch and artifacts, and report build/test evidence plus outstanding physical acceptance.
+- [x] Request whole-migration review, fix material findings and verify fixes. Update plan/checkpoint/ADR and artifact manifest. Commit, preserve the branch and artifacts, and report build/test evidence plus outstanding physical acceptance.
 
 ## Execution record
 
 Tasks 1–4 have completed their implementation review gates. Task 1 ends at
 `dd84f2c`, Task 2 at `eb5aa0e`, Task 3 at `0da16b0`, and Task 4 at `0bb2f29`.
-Whole-migration review is now pending; its final checkbox remains open.
+Whole-migration review and its single final fix wave are complete at `5ed4e23`.
+The scoped re-review closed all three Important findings and the documentation
+correction, with no new breakage. Existing fork/CMake noise is non-blocking debt.
 Baseline for migration code: `3f4093b`.
 
 Task 4 qualified the eight-container default graph, real offline Azelma,
@@ -118,5 +120,16 @@ The reviewed coordinator amendment keeps live ROS hardware unavailable until a
 qualified complete host-ownership mechanism exists. This takes precedence over
 the earlier hardware-ready command and does not change the legacy bench CLI.
 Clock proof v2 binds current/child namespace metadata before accepting zero
-offsets. Real-model p99 admission latency remains above the 20 ms target; physical
-facial acceptance and general exact physical stop timing remain unqualified.
+offsets. The final fix wave preserves admitted action result semantics, expires
+missing first-DAC progress, and verifies model assets in production before loading.
+Final images passed 1,079 tests, Ruff/mypy, nine host checks and eight targeted
+container outcomes across two retained attempts. The initial offline helper
+failure remains recorded; only its corrected case was rerun on unchanged images.
+
+Latest offline p99 admission latency is 16.965 ms, while earlier runs exceeded
+the 20 ms target. Repeatable timing, physical facial acceptance and general exact
+physical stop timing remain unqualified. Review reports, ledger, diffs and all
+six rulings are archived at `artifacts/ros2/2026-09-15/sdd-final-review/`; the
+separate `coordinator-final-rulings.md` preserves the decisions in order. Only
+the redundant scratch directory for this completed plan is removed. No merge,
+push or worktree/artifact pruning is performed.

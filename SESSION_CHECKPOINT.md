@@ -1,17 +1,22 @@
 # Alice session checkpoint
 
-**Saved 2026-09-15: ROS 2 Docker implementation review gates complete;
-whole-migration review pending.** Preserve the existing worktree and artifacts:
+**Saved 2026-09-15: ROS 2 Docker implementation and final review complete;
+live ROS hardware and physical acceptance remain unavailable/pending.** Preserve the existing worktree and artifacts:
 `/home/alice/alice-workspace/.worktrees/streaming-affect-motion`
 (branch `feature/streaming-affect-motion`). No merge, push or pruning performed.
 
 - [Runbook](/home/alice/alice-workspace/.worktrees/streaming-affect-motion/docs/ros2.md)
   and [evidence](/home/alice/alice-workspace/.worktrees/streaming-affect-motion/docs/experiments/2026-09-15-ros2-runtime.md).
-- Tasks 1–4 have clean implementation reviews, with Task 4 repairs at `0bb2f29`.
-  Continue the coordinator's whole-migration review from baseline `3f4093b` using
-  `.superpowers/sdd/2026-09-15-ros2-docker-runtime/progress.md`; do not redispatch
-  completed implementation tasks. The deferred Minor is existing fork/CMake
-  verification noise. All six coordinator rulings are in the ledger.
+- Tasks 1–4 have clean implementation reviews. Whole-migration review found
+  three Important issues and one documentation correction, fixed at `5ed4e23`:
+  accepted action cancellation/fault semantics, first DAC progress expiry, and
+  production verification/evidence of loaded model assets. The sole scoped
+  re-review closed all four findings with no new breakage. Do not redispatch
+  completed work. Existing fork/CMake verification noise is non-blocking debt.
+  The review ledger, reports and diffs are archived under
+  `artifacts/ros2/2026-09-15/sdd-final-review/`, with a verified archive manifest.
+  All six coordinator rulings are also in `coordinator-final-rulings.md` beside
+  that directory. Only the redundant plan scratch copy was removed.
 - Eight separate idle, non-root, read-only containers use an internal UDP bridge.
   Default simulation needs no devices or model cache. Offline Azelma, selected
   speaker and provisional robot preview are explicit options.
@@ -24,21 +29,32 @@ whole-migration review pending.** Preserve the existing worktree and artifacts:
   namespace links within each participant, complete zero monotonic/boottime
   offsets and a common kernel boot. Different containers may have different
   valid namespace IDs. No timestamp translation or safety-bound widening.
-- Original full verification: 1,046 passed, three skips covered by nine host
-  checks, two existing fork warnings; Ruff/mypy (87 files) pass. Actual build07
-  matrix passed 35 functional scenarios plus four focused supplements. Build08
-  passed default/SIGTERM, public launcher and announced speaker-only checks.
+- Final verification: 1,079 passed, three skips covered by nine host checks,
+  two existing fork warnings; Ruff/mypy (87 files) pass. Eight targeted actual
+  container outcomes pass across two retained attempts: default, cancellation
+  during preparation/playback/finalization, first DAC loss, model mismatch,
+  stalled-TTS cancellation and real offline Azelma. The first offline helper
+  failed before inference; only that helper was corrected and that case rerun.
 - Final repaired image source SHA256:
-  `c4a4a56755d81d9f507d09712b36576f7cba3b0fc926c93ac76b70d544eb8835`.
-  Its 150 covering tests, seven host checks, three actual-container clock/default
-  cases and no-device hidden-owner regression pass. Exact image identities and
-  failed attempts are in `task4-r1-artifact-manifest.json` and its predecessor.
+  `f7b99195cbd2ae7d72a7f097f88e549ef47654abd268a52db60045f38efa573a`.
+  Exact role image IDs, commands and 1,927 hashed evidence files are bound in
+  `artifacts/ros2/2026-09-15/final-fix-artifact-manifest.json`. Production TTS
+  verifies model/tokenizer/Azelma bytes before loading, binds evidence to the
+  loaded worker lifetime and rejects silent reload after worker death.
+- Earlier evidence retains its own identities: build07 passed 35 functional
+  cases plus four supplements; build08 passed 1,046 tests, default/SIGTERM,
+  public launcher and announced speaker-only checks. The subsequent clock/owner
+  repair passed 150 covering tests, seven host checks and three container cases.
 - Speaker-only Azelma used the selected SN6140 Pulse route and PortAudio DAC:
   185,760 samples played, zero underflows; Maestro/perception were simulated.
   This is stream evidence, not acoustic measurement or physical facial acceptance.
-- Real-model admission p99 remains 21.176 ms against a 20 ms target. Coarse
-  observer stop gaps reach 255–258 ms; precise self-crash marker tests measured
-  about 208/209 ms to last mock receipt. None proves physical PWM cutoff.
+- Latest real-model run with simulated DAC: 185,760 samples played with zero
+  underflows, p99 admission 16.965 ms and maximum 21.683 ms. Earlier p99 runs
+  were 21–22 ms against the 20 ms target; repeatable timing acceptance remains
+  open. First DAC expiry uses the 250 ms predicate; the watchdog observed the
+  injected failure after 259.033 ms. Coarse observer stop gaps reach 255–258 ms;
+  precise self-crash marker tests measured about 208/209 ms to last mock receipt.
+  These measurements do not prove a general exact 250 ms stop or physical PWM cutoff.
 - Active simultaneous SIGTERM can leave session handlers unquiesced. Local
   cancellation/evidence completes, followed by explicit failed cleanup after a
   five-second deadline and exit 1. The qualified rclpy workaround is version-bound.
@@ -46,6 +62,10 @@ whole-migration review pending.** Preserve the existing worktree and artifacts:
   passed Lyrical headless preview checks, retaining provisional geometry and
   `alice_preview`. No PWM bridge or added actuation scope.
 - No new servo/camera trial ran. The prior visible-motion issue remains unresolved.
+- Next work is a separately designed and qualified complete host-ownership
+  mechanism before enabling ROS hardware, plus repeatable timing and physical
+  acceptance. Simulation, offline TTS, speaker overlay and provisional preview
+  are available through the runbook. Preserve legacy calibration and bench CLI.
 
 The following hardware checkpoint remains valid and physically unaccepted; the
 ROS migration does not resolve or supersede its pending visible-motion check.
