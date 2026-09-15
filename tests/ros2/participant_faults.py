@@ -76,6 +76,86 @@ def main():
             "perception": "PerceptionNode",
         }[role],
     )
+    if fault == "cancel-prepare" and role == "tts":
+        original_prepare_cancel = cls.prepare_run
+
+        def prepare_cancel(self):
+            original_prepare_cancel(self)
+            Path("/artifacts/cancel-stage.json").write_text(
+                json.dumps({"stage": "prepare"})
+            )
+            time.sleep(0.5)  # finite test-only pause after preparation, before reply
+
+        cls.prepare_run = prepare_cancel
+    if fault == "cancel-finalize" and role == "session":
+        original_finish_cancel = cls.finish_peer
+
+        def finish_cancel(self, name, outcome, reason, handle):
+            if handle is not None:
+                Path("/artifacts/cancel-stage.json").write_text(
+                    json.dumps({"stage": "finalize"})
+                )
+                self.cancel.wait(0.5)
+                if handle.is_cancel_requested:
+                    raise InterruptedError("action cancelled during finalization")
+            return original_finish_cancel(self, name, outcome, reason, handle)
+
+        cls.finish_peer = finish_cancel
+    if fault == "asset-mismatch" and role == "tts":
+        original_worker = module.PocketTtsWorker
+
+        def observed_worker(**kwargs):
+            Path("/artifacts/unverified-worker-constructed.json").write_text("{}")
+            return original_worker(**kwargs)
+
+        module.PocketTtsWorker = observed_worker
+    if fault == "first-dac-loss" and role == "audio":
+        from types import SimpleNamespace
+
+        class NoCallbackStream:
+            def __init__(self, **kwargs):
+                self.active = False
+
+            def start(self):
+                self.origin = time.monotonic()
+                self.active = True
+                Path("/artifacts/device-started.json").write_text(
+                    json.dumps(
+                        {"started_ns": time.monotonic_ns(), "device_double": True}
+                    )
+                )
+
+            @property
+            def time(self):
+                return time.monotonic() - self.origin
+
+            def abort(self):
+                self.active = False
+
+            def close(self):
+                pass
+
+        sys.modules["sounddevice"] = SimpleNamespace(OutputStream=NoCallbackStream)
+        original_progress = cls.check_progress
+
+        def first_progress(self, now):
+            try:
+                original_progress(self, now)
+            except RuntimeError as exc:
+                Path("/artifacts/first-dac-loss.json").write_text(
+                    json.dumps(
+                        {
+                            "error": str(exc),
+                            "detected_ns": now,
+                            "armed_ns": self.first_dac_deadline_ns - 250_000_000,
+                            "last_dac_ns": self.last_dac_ns,
+                            "submitted_samples": self.player.submitted_samples,
+                        }
+                    )
+                )
+                raise
+
+        cls.check_progress = first_progress
     if role == "maestro":
         original_target = cls.target
         original_finalize = cls.finalize_run

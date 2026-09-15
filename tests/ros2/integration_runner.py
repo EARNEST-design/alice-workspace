@@ -15,6 +15,10 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 ROLES = "session tts audio expression motion maestro perception recorder".split()
 SCENARIOS = [
+    "cancel-prepare",
+    "cancel-finalize",
+    "first-dac-loss",
+    "asset-mismatch",
     "selfkill-session",
     "selfkill-audio",
     "first-control-motion",
@@ -104,6 +108,8 @@ def main():
         run = output / scenario
         run.mkdir()
         project = f"alice-q-{os.getpid()}-{index}"
+        if "ALICE_TTS_CACHE" in os.environ:
+            env["ALICE_TTS_CACHE"] = os.environ["ALICE_TTS_CACHE"]
         env["ALICE_ARTIFACTS"] = str(run)
         env["ROS_DOMAIN_ID"] = str(80 + index)
         compose = [
@@ -114,7 +120,7 @@ def main():
             "-f",
             str(ROOT / "infra/ros2/compose.yaml"),
         ]
-        if scenario in {"offline", "offline-profile", "speaker"}:
+        if scenario in {"offline", "offline-profile", "speaker", "asset-mismatch"}:
             compose += ["-f", str(ROOT / "infra/ros2/compose.offline.yaml")]
         if scenario == "speaker":
             compose += ["-f", str(ROOT / "infra/ros2/compose.audio.yaml")]
@@ -145,7 +151,23 @@ def main():
                 ],
             }
             services[selected]["healthcheck"] = {"disable": True}
+        if scenario == "asset-mismatch":
+            cache = run / "fixture-cache"
+            cache.mkdir()
+            # Public model snapshot location; deliberately wrong tiny fixture bytes.
+            model = (
+                cache
+                / "snapshots/d29db7978e464fb90cb3359ee0c69a273b9142cc"
+                / "languages/english_2026-01/model.safetensors"
+            )
+            model.parent.mkdir(parents=True)
+            model.write_bytes(b"deliberately mismatched model fixture")
+            env["ALICE_TTS_CACHE"] = str(cache)
         extra_role = {
+            "cancel-prepare": "tts",
+            "cancel-finalize": "session",
+            "first-dac-loss": "audio",
+            "asset-mismatch": "tts",
             "selfkill-session": "session",
             "selfkill-audio": "audio",
             "first-control-motion": "motion",
@@ -164,6 +186,14 @@ def main():
                 ],
                 "healthcheck": {"disable": True},
             }
+        if scenario in {"first-dac-loss", "asset-mismatch"}:
+            selected = "audio" if scenario == "first-dac-loss" else "tts"
+            parameter = (
+                "audio_device_enabled:=true"
+                if selected == "audio"
+                else "tts_mode:=pocket"
+            )
+            services[selected]["command"] += ["--ros-args", "-p", parameter]
         if scenario == "first-control-motion":
             services["motion"]["command"] += [
                 "--ros-args",
@@ -351,7 +381,15 @@ def main():
             assert json.loads(network)[0]["Internal"]
             if scenario in {"offline", "offline-profile", "speaker"}:
                 subprocess.run(
-                    [*compose, "exec", "-T", "tts", "python", "-"],
+                    [
+                        *compose,
+                        "exec",
+                        "-T",
+                        "tts",
+                        "/opt/alice/entrypoint.sh",
+                        "python",
+                        "-",
+                    ],
                     input=(snapshot / "model_assets.py").read_text(),
                     text=True,
                     env=env,
@@ -528,6 +566,39 @@ def main():
                             )
                         )
                         assert max(ages) <= 250
+            if scenario in {
+                "cancel-prepare",
+                "cancel-finalize",
+                "cancel",
+                "cancel-hold",
+            }:
+                assert result["accepted"] and result["outcome"] == "cancelled", result
+            if scenario == "first-dac-loss":
+                evidence = json.loads((run / "first-dac-loss.json").read_text())
+                assert evidence["error"] == "first DAC progress expired", evidence
+                assert (
+                    evidence["submitted_samples"] == 0
+                    and evidence["last_dac_ns"] is None
+                )
+                assert (
+                    250_000_000
+                    < evidence["detected_ns"] - evidence["armed_ns"]
+                    < 350_000_000
+                )
+            if scenario == "asset-mismatch":
+                assert "model cache checksum mismatch" in result["error"], result
+                assert not (run / "unverified-worker-constructed.json").exists()
+                assert not list(run.glob("*/tts/model.json"))
+            if scenario in {"offline", "offline-profile"}:
+                model_path = next(run.glob("*/tts/model.json"))
+                model = json.loads(model_path.read_text())
+                inspected = json.loads((run / "model-assets.json").read_text())
+                assert model["loaded_assets"]["assets"] == inspected["assets"]
+                terminal = json.loads((model_path.parent / "terminal.json").read_text())
+                assert (
+                    terminal["files"]["model.json"]
+                    == hashlib.sha256(model_path.read_bytes()).hexdigest()
+                )
             if scenario == "callback-underflow":
                 audio = json.loads(next(run.glob("*/audio/audio.json")).read_text())
                 assert audio["underflows"] == 1 and not audio["drained"]

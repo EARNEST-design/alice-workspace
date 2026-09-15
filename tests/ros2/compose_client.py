@@ -223,6 +223,10 @@ def main():
                 )
             )
             should_cancel |= (
+                options.scenario in {"cancel-prepare", "cancel-finalize"}
+                and (output / "cancel-stage.json").exists()
+            )
+            should_cancel |= (
                 options.scenario in {"tts-stall-cancel", "expression-stall-cancel"}
                 and (
                     output
@@ -247,10 +251,21 @@ def main():
                 break
         if future.done():
             result = future.result().result
+            validated = wire.validate_run_speech_result(
+                result,
+                expected_identity=wire.run_identity_from_msg(result.identity),
+                expected_responder_incarnation=result.responder_incarnation,
+            )
+            assert validated.accepted, "admitted action lost admission at completion"
             value = {
-                "outcome": {0: "success", 1: "cancelled", 2: "fault"}[
-                    result.terminal_outcome
-                ],
+                "accepted": validated.accepted,
+                "responder_incarnation": validated.responder_incarnation,
+                "identity": {
+                    "run_id": result.identity.run_id,
+                    "epoch": result.identity.epoch,
+                    "generation_id": result.identity.generation_id,
+                },
+                "outcome": validated.terminal_outcome,
                 "error": result.error,
                 "epoch": result.identity.epoch,
                 "artifact": result.artifact_identity,

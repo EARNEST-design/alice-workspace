@@ -195,3 +195,26 @@ helper is unchanged; simulated and speaker-only ROS paths remain available.
 This supersedes the earlier ready-for-hardware-command expectation and is an
 explicit live-hardware deployment gap, not completed physical acceptance.
 Primary restriction: https://man7.org/linux/man-pages/man1/fuser.1.html
+
+## Final contract repairs
+
+RunSpeech result `accepted` records action admission by the validated goal
+callback. It remains true when preparation, execution or finalization later
+fails or is cancelled. Invalid or concurrent goals are rejected before execution;
+terminal outcome/error remain distinct from this admission fact.
+
+Audio arms a separate 250 ms first-DAC deadline only after the startup prebuffer
+is ready, before opening/starting the selected device. A successful start with
+no callback must expire locally. This deadline does not supply a DAC source
+timestamp or consume the separate prebuffer/warmup allowance. Real first clock
+progress then supplies the existing original-source stall deadline.
+
+Real ROS Pocket PREPARE verifies the approved model, tokenizer and Azelma
+snapshot bytes using the same Hugging Face cache root as the loader, before
+constructing/loading its worker. Missing, escaping or mismatched files reject.
+Each run's `tts/model.json` embeds those loaded asset hashes and is itself hashed
+by the terminal manifest. Warm runs retain that worker's verified identity;
+inspecting later cache contents cannot relabel an already loaded engine. A dead
+worker cannot silently respawn; a fresh PREPARE must verify before replacement.
+These ROS-only rules preserve the legacy CLI worker behavior. Independent
+qualification cache inspections remain separately labeled current-cache evidence.

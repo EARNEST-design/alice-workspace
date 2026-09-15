@@ -10,10 +10,21 @@ from alice_interfaces.msg import SpeechClause as ClauseMsg
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 
 from alice.contracts.speech_stream import ClauseSequence, SpeechClause
-from alice.speech.tts_worker import PocketTtsWorker
+from alice.speech.tts_worker import PocketTtsWorker as BasePocketTtsWorker
 from alice_nodes import contracts as wire
 from alice_nodes.base import RELIABLE, RuntimeNode, spin, write_json
+from alice_nodes.model_assets import verify_model_assets
 from alice_nodes.transport import CreditLedger, PcmPacket, SequenceGuard
+
+
+class PocketTtsWorker(BasePocketTtsWorker):
+    """A verified ROS worker lifetime must never silently load another model."""
+
+    def _start(self):
+        if getattr(self, "_loaded_once", False) and not self.is_alive:
+            raise RuntimeError("verified worker exited; a fresh PREPARE is required")
+        super()._start()
+        self._loaded_once = True
 
 
 class TtsNode(RuntimeNode):
@@ -55,7 +66,14 @@ class TtsNode(RuntimeNode):
         if mode not in {"synthetic", "pocket"}:
             raise ValueError("unknown TTS mode")
         if mode == "pocket":
+            if self.engine is not None and not self.engine.is_alive:
+                asyncio.run(self.engine.close())
+                self.engine = None
             if self.engine is None:
+                # Bind exact cache bytes to this worker lifetime, before even
+                # constructing it. Warm runs retain the loaded identity rather
+                # than labeling a later cache inspection as loaded model bytes.
+                self.loaded_assets = verify_model_assets()
                 self.engine = PocketTtsWorker(offline=True)
 
             async def warm():
@@ -73,7 +91,9 @@ class TtsNode(RuntimeNode):
                     pass
 
             self.run_inference(lambda: asyncio.wait_for(warm(), 35))
-            self.model_identity = self.engine.identity
+            self.model_identity = dict(
+                self.engine.identity, loaded_assets=self.loaded_assets
+            )
         write_json(self.local_dir / "model.json", self.model_identity)
 
     def credit(self, message):

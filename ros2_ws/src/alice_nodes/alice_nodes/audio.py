@@ -76,6 +76,7 @@ class AudioNode(RuntimeNode):
         self.clause_sequence = 0
         self.response_final = self.drained = self.playing = False
         self.last_dac_ns = None
+        self.first_dac_deadline_ns = None
         self.last_status = None
         self.last_credit = -1
         self.status_sent = 0
@@ -156,6 +157,9 @@ class AudioNode(RuntimeNode):
                 self.publish_status()
             if self.cancel.is_set():
                 return
+            # A distinct deadline covers device startup/first callback only after
+            # the prebuffer is ready. It is never a fabricated DAC source time.
+            self.first_dac_deadline_ns = time.monotonic_ns() + 250_000_000
             self.playing = True
             if (
                 self.binding.hardware
@@ -310,6 +314,13 @@ class AudioNode(RuntimeNode):
     def check_progress(self, now):
         if self.player and self.player.error:
             raise RuntimeError(self.player.error)
+        if (
+            self.playing
+            and self.last_dac_ns is None
+            and self.first_dac_deadline_ns is not None
+            and now > self.first_dac_deadline_ns
+        ):
+            raise RuntimeError("first DAC progress expired")
         if (
             self.playing
             and self.last_dac_ns is not None

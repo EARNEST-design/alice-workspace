@@ -188,7 +188,9 @@ class SessionNode(RuntimeNode):
 
     def execute(self, handle):
         prepared = []
-        result = RunSpeech.Result(responder_incarnation=self.incarnation)
+        # execute is entered only after goal() validates and admits the action.
+        # Admission survives later participant preparation/execution failures.
+        result = RunSpeech.Result(accepted=True, responder_incarnation=self.incarnation)
         try:
             goal = wire.validate_run_speech_goal(handle.request)
             # Repeated fixture actions also receive a fresh authoritative epoch.
@@ -332,7 +334,6 @@ class SessionNode(RuntimeNode):
                 "session",
             ]:
                 self.finish_peer(name, EndRun.Request.SUCCESS, "completed", handle)
-            result.accepted = True
             result.terminal_outcome = RunSpeech.Result.SUCCESS
             result.artifact_identity = self.recorder_artifact
             handle.succeed()

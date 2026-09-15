@@ -153,10 +153,29 @@ The launcher stops all profiles belonging to its project, including preview.
 A custom `/fixtures` bind preserves the installed visible-face configuration.
 
 
-The 2026-09-15 final images passed 1046 Python/ROS tests, Ruff, strict mypy and
-nine host covering checks. The separate-container matrix passed 35 functional
-cases plus four focused crash/retirement cases; final-image normal, SIGTERM and
-speaker checks are retained separately. Offline speaker output completed with
-185,760 samples and zero underflows on the selected route. Real offline
+The 2026-09-15 build08 images passed 1046 Python/ROS tests, Ruff, strict mypy
+and nine host covering checks. The build07 separate-container matrix passed 35
+functional cases plus four focused crash/retirement cases. Build08 normal,
+SIGTERM, launcher and speaker checks are retained separately. The subsequent
+clock/ownership repair (source
+`c4a4a56755d81d9f507d09712b36576f7cba3b0fc926c93ac76b70d544eb8835`)
+passed 150 covering tests, seven host checks and three actual-container cases,
+plus Ruff/mypy; no speaker rerun was performed for that repair. Build08 speaker
+output completed with 185,760 samples and zero underflows on the selected route. Real offline
 source-to-admission p99 remains 21.176 ms against the 20 ms target; this timing
 gap and pending physical facial acceptance are not waived by functional passes.
+
+
+The final cancellation/DAC/asset repair (source
+`f7b99195cbd2ae7d72a7f097f88e549ef47654abd268a52db60045f38efa573a`)
+passed 1079 Python/ROS tests, Ruff, mypy (87 files) and nine host checks. Eight targeted
+container outcomes passed across two retained attempts: default success,
+preparation/playback/finalization cancellation, first-DAC loss, model checksum
+rejection, real offline inference and stalled-TTS cancellation. The first
+attempt's offline helper failed before inference because its exec lacked ROS
+setup; the corrected offline-only attempt passed on unchanged images. Production
+TTS evidence now includes verified model, tokenizer and Azelma asset hashes.
+No speaker or servo replay was performed for these repairs. Detailed final-wave
+identities/results are in `artifacts/ros2/2026-09-15/final-fix-artifact-manifest.json`.
+The single supplementary offline run's p99 was 16.965 ms (maximum 21.683 ms);
+it does not waive the earlier migration timing-acceptance gap.
