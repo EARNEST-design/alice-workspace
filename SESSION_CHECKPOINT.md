@@ -1,5 +1,23 @@
 # Alice session checkpoint
 
+**Saved 2026-09-15: ROS 2 Docker migration design ready for review.** The user
+requested the whole current pipeline run as separate nodes in the latest ROS 2
+environment, packaged as a Docker project. The proposed scope is existing
+speech, emotion/expression, facial control and robot-camera observation; live
+microphone/LLM conversation is a separate extension unless requested.
+
+- [Proposed ROS 2 Docker design](/home/alice/alice-workspace/.worktrees/streaming-affect-motion/docs/superpowers/specs/2026-09-15-ros2-docker-runtime-design.md)
+- Target: ROS 2 Lyrical Luth / Ubuntu 26.04, pinned official image; eight separate
+  Compose services with typed ROS interfaces and preserved audio-clock timing.
+- Research verified host Docker availability and candidate Python 3.14 wheels.
+  No ROS implementation, image build or hardware run has been performed.
+- Next: obtain approval of the concrete design, write the implementation plan,
+  then qualify Python 3.14 and implement with simulation-first tests. Continue
+  in the worktree below; do not reset or remove its experiment artifacts.
+
+The following hardware checkpoint remains valid and physically unaccepted; the
+ROS migration does not resolve or supersede its pending visible-motion check.
+
 **Saved 2026-09-11: Task 6 software qualified; latest facial tuning awaits a
 visible-motion trial.** 879 tests pass. Combined speech/face execution is
 implemented; the latest full-blink/final-sad-pose run changed controller PWM but
