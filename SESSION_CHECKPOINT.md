@@ -17,11 +17,17 @@ microphone/LLM conversation is a separate extension unless requested.
   retains the 250 ms active timing guard, validates service/action replies,
   and preserves transactional clause bounds. Fresh Lyrical contract regression:
   156 tests passed; base imports work without ML dependencies.
-- Task 3 (eight runtime nodes) is next, followed by full Compose qualification.
-  The earlier Lyrical full regression passed 881 tests with one optional Node.js
-  preview skip; the original host baseline passed 879 tests. Follow the ledger
-  in `.superpowers/sdd/2026-09-15-ros2-docker-runtime/progress.md` inside the
-  preserved worktree; do not redispatch completed tasks or clear artifacts.
+- Task 3 (eight runtime nodes) is complete at `0da16b0`, with clean review
+  after two lifecycle/timing repair rounds. Final covering checks passed 124
+  tests and five isolated eight-process scenarios, including first-control
+  loss with live health publishers. Success waits for admitted work; fault
+  evidence stays independent of stalled work. Original full regression passed
+  988 tests (two known skips and two existing warnings). This is process-level
+  evidence; Task 4 will qualify separate Compose containers and the optional
+  robot description. The earlier Python qualification passed 881 tests.
+- Continue with Task 4 using the ledger in
+  `.superpowers/sdd/2026-09-15-ros2-docker-runtime/progress.md` inside the
+  preserved worktree. Do not redispatch completed tasks or clear artifacts.
 
 User identified the existing `alice_description` on `codex/robot-description`
 (commit `13c2549`). Task 4 will selectively reuse it as an optional Lyrical
