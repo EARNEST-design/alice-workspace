@@ -41,7 +41,7 @@ def test_built_wheel_runs_entry_points_without_repository_files(
         "install",
         "--python",
         str(environment / "bin" / "python"),
-        str(wheel),
+        f"{wheel}[perception]",
         cwd=outside_repository,
     )
     clean_env = dict(os.environ)
@@ -138,7 +138,13 @@ def test_built_wheel_keeps_ml_dependencies_behind_optional_extra(
             if requirement.split(";", 1)[0].strip().startswith(dependency)
         )
         assert matching
-        assert all("extra == 'ml'" in requirement for requirement in matching)
+        assert all(
+            "extra == 'ml'" in requirement or "extra == 'full'" in requirement
+            for requirement in matching
+        )
     pocket = tuple(r for r in requirements if r.startswith("pocket-tts"))
     assert pocket
-    assert all("extra == 'speech'" in requirement for requirement in pocket)
+    assert all(
+        "extra == 'speech'" in requirement or "extra == 'full'" in requirement
+        for requirement in pocket
+    )

@@ -6,22 +6,32 @@ build-backend = "hatchling.build"
 name = "alice"
 version = "0.1.0"
 description = "Alice robotics perception and learning contracts"
-requires-python = ">=3.12,<3.14"
+requires-python = ">=3.12,<3.15"
 dependencies = [
-  "mediapipe",
   "numpy",
-  "opencv-contrib-python",
   "pydantic>=2,<3",
   "pyserial>=3.5,<4",
   "pyyaml",
 ]
 
 [project.optional-dependencies]
+perception = [
+  "mediapipe",
+  "opencv-contrib-python",
+]
 speech = [
   "pocket-tts==3.1.0",
   "sounddevice==0.5.6",
 ]
 ml = [
+  "safetensors>=0.8.0",
+  "torch>=2.14.0",
+]
+full = [
+  "mediapipe",
+  "opencv-contrib-python",
+  "pocket-tts==3.1.0",
+  "sounddevice==0.5.6",
   "safetensors>=0.8.0",
   "torch>=2.14.0",
 ]
@@ -37,7 +47,9 @@ alice-motion-readiness = "alice.experiments.motion_readiness_cli:main"
 
 [dependency-groups]
 dev = [
+  "mediapipe",
   "mypy",
+  "opencv-contrib-python",
   "pytest",
   "ruff",
   "safetensors>=0.8.0",
