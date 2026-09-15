@@ -29,11 +29,11 @@
 **Consumes:** Pinned base image and current locked package/model versions; existing `src/alice`, tests and configs.
 **Produces:** `alice-ros2:base` plus Docker build targets `core`, `speech`, `perception`, `test`; portable `/opt/alice/config`, `/opt/alice/hardware`, `/opt/alice/src`, system-compatible virtualenv `/opt/alice/venv`; no devices at build/run. Later tasks add colcon packages. Keep shared lightweight dependencies importable without Torch/MediaPipe.
 
-- [ ] Write packaging/import tests before changing metadata. Probe Python 3.14 in a disposable container copy, not the checked-in Python constraint. Record exact import/inference failures.
-- [ ] Retain direct dependency versions; resolve a Python 3.14 lock and run the existing suite in the pinned Lyrical container. Verify pinned CPU Torch, MediaPipe model opening and real offline Azelma synthesis against mounted caches; synthetic substitute is not inference qualification.
-- [ ] On success widen support to `<3.15`, move camera dependencies into a documented `perception` extra, ensure `dev` includes what the full test suite needs, and preserve a full-install path via extras. Avoid importing optional ML from the servo path.
-- [ ] Add explicit build-context exclusions and pinned install inputs. Image entrypoint sources `/opt/ros/lyrical/setup.bash` and, when present, `/opt/alice/ros/install/setup.bash`, then `exec`s argv. Use no host ROS install.
-- [ ] Test lightweight and full image imports, record output under `artifacts/ros2/2026-09-15/`, update qualification report, inspect diff and commit.
+- [x] Write packaging/import tests before changing metadata. Probe Python 3.14 in a disposable container copy, not the checked-in Python constraint. Record exact import/inference failures.
+- [x] Retain direct dependency versions; resolve a Python 3.14 lock and run the existing suite in the pinned Lyrical container. Verify pinned CPU Torch, MediaPipe model opening and real offline Azelma synthesis against mounted caches; synthetic substitute is not inference qualification.
+- [x] On success widen support to `<3.15`, move camera dependencies into a documented `perception` extra, ensure `dev` includes what the full test suite needs, and preserve a full-install path via extras. Avoid importing optional ML from the servo path.
+- [x] Add explicit build-context exclusions and pinned install inputs. Image entrypoint sources `/opt/ros/lyrical/setup.bash` and, when present, `/opt/alice/ros/install/setup.bash`, then `exec`s argv. Use no host ROS install.
+- [x] Test lightweight and full image imports, record output under `artifacts/ros2/2026-09-15/`, update qualification report, inspect diff and commit.
 
 Packaging test example (adapt actual interpreter/container wrapper, keep assertions):
 
@@ -95,9 +95,10 @@ def test_terminal_fault_cannot_be_completed():
 - [ ] Add non-root/read-only/capability-dropped services, correctly scoped volumes, stable serial/C525 mappings and selected audio route, numeric device groups, offline cache and local artifacts. Add explicit installed-resource roots, launch files, health diagnostics, configuration snapshots and config/model digests. No broad device mount or automatic hardware arming.
 - [ ] Exercise synthetic success and cancellation, stale/gapped/duplicate transport, PCM backpressure, callback underflow, controller fault, delayed expression, node kill/restart and recorder failure. Check no late commands/recovery after fault; measure source-to-admission age and stop latency. Confirm each queued resource and run duration is bounded.
 - [ ] Run real offline Azelma through the Compose graph with simulated DAC and compare sample accounting/invariants to the baseline. Inspect the existing speaker route read-only and test the explicit audio overlay with simulated servos if available. Do not run servos while their prior physical-motion issue is unresolved.
+- [ ] Integrate user-supplied `alice_description` from `codex/robot-description` (`13c2549`) selectively into the ROS workspace. Requalify Xacro/URDF/TF on Lyrical and add optional headless preview services; preserve provisional geometry and preview namespace, with no PWM bridge or extra actuation scope.
 - [ ] Run full Python regressions, ROS contract/launch/integration checks, Ruff/mypy where applicable and `git diff --check`. Document exact commands/results and limits. Leave a hardware command ready for the next attended test, without asserting physical acceptance.
 - [ ] Request whole-migration review, fix material findings and verify fixes. Update plan/checkpoint/ADR and artifact manifest. Commit, preserve the branch and artifacts, and report build/test evidence plus outstanding physical acceptance.
 
 ## Execution record
 
-No tasks complete yet. Baseline commit for migration code: `3f4093b`.
+Task 1 complete at `dd84f2c`, review clean after build-context allowlist fix. Python 3.14 suite: 881 passed, one optional Node skip, two existing fork warnings. Four images rebuilt and focused packaging/content checks passed. Tasks 2–4 remain. Baseline commit for migration code: `3f4093b`.

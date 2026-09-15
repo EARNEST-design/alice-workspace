@@ -298,3 +298,7 @@ plan with tests written before behavior changes.
 Local evidence: `SESSION_CHECKPOINT.md`, ADRs 0001/0010/0011, `pyproject.toml`,
 `uv.lock`, existing node-candidate modules, host version output and
 `docker buildx imagetools inspect ros:lyrical-ros-base-resolute`.
+
+## User-supplied description integration
+
+On 2026-09-15 the user identified `codex/robot-description` as the existing Alice model. Integrate the original `alice_description` package from commit `13c25490d78ccec05a6f2714deafb5c39c60862b` into the Lyrical workspace, with an optional headless visualization profile. Preserve its `/alice_preview` namespace and provisional geometry assumptions. Keep the eight primary runtime services and existing calibrated actuation contracts. Robot-state and joint-state publishers are additional opt-in visualization services, with no device access or PWM conversion. Requalify its Xacro/URDF/TF behavior under Lyrical.

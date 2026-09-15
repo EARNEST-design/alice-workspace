@@ -1,19 +1,29 @@
 # Alice session checkpoint
 
-**Saved 2026-09-15: ROS 2 Docker migration design ready for review.** The user
+**Saved 2026-09-15: ROS 2 Docker migration approved; implementation in progress.** The user
 requested the whole current pipeline run as separate nodes in the latest ROS 2
 environment, packaged as a Docker project. The proposed scope is existing
 speech, emotion/expression, facial control and robot-camera observation; live
 microphone/LLM conversation is a separate extension unless requested.
 
-- [Proposed ROS 2 Docker design](/home/alice/alice-workspace/.worktrees/streaming-affect-motion/docs/superpowers/specs/2026-09-15-ros2-docker-runtime-design.md)
+- [Approved ROS 2 Docker design](/home/alice/alice-workspace/.worktrees/streaming-affect-motion/docs/superpowers/specs/2026-09-15-ros2-docker-runtime-design.md)
 - Target: ROS 2 Lyrical Luth / Ubuntu 26.04, pinned official image; eight separate
   Compose services with typed ROS interfaces and preserved audio-clock timing.
-- Research verified host Docker availability and candidate Python 3.14 wheels.
-  No ROS implementation, image build or hardware run has been performed.
-- Next: obtain approval of the concrete design, write the implementation plan,
-  then qualify Python 3.14 and implement with simulation-first tests. Continue
-  in the worktree below; do not reset or remove its experiment artifacts.
+- Python 3.14 qualification built the pinned Lyrical core, speech, perception
+  and test images. Real offline Azelma synthesis and MediaPipe model opening
+  passed with no devices or runtime network. No new hardware trial has run.
+- [Implementation plan](/home/alice/alice-workspace/.worktrees/streaming-affect-motion/docs/superpowers/plans/2026-09-15-ros2-docker-runtime.md)
+- Task 1 is complete at `dd84f2c`, with clean review and explicit reviewed
+  build inputs. Task 2 (typed ROS interfaces and transport guards) is next. The Lyrical
+  regression run passed 881 tests with one optional Node.js preview skip; the
+  original host baseline passed 879 tests. Follow the task ledger in
+  `.superpowers/sdd/2026-09-15-ros2-docker-runtime/progress.md` inside the
+  preserved worktree; do not redispatch completed tasks or clear artifacts.
+
+User identified the existing `alice_description` on `codex/robot-description`
+(commit `13c2549`). Task 4 will selectively reuse it as an optional Lyrical
+visualization profile, preserving provisional geometry and `/alice_preview`.
+It does not replace servo calibration or add a PWM-to-joint conversion.
 
 The following hardware checkpoint remains valid and physically unaccepted; the
 ROS migration does not resolve or supersede its pending visible-motion check.
