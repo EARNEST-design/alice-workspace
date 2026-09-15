@@ -1,0 +1,32 @@
+uint8 FIXTURE=0
+uint8 COMMITTED_CLAUSES=1
+
+string<=32 schema_version
+RunIdentity identity
+uint8 source
+string<=128 fixture_name
+string<=64 selected_profile
+uint32 seed
+bool hardware
+uint32 sad_hold_ms
+string<=64 config_sha256
+string<=64 calibration_sha256
+string<=128 clock_domain_fingerprint
+string<=128 requester_incarnation
+---
+uint8 SUCCESS=0
+uint8 CANCELLED=1
+uint8 FAULT=2
+
+RunIdentity identity
+bool accepted
+string<=256 error
+uint8 terminal_outcome
+string<=128 artifact_identity
+---
+StreamHeader header
+uint32 committed_clauses
+uint64 generated_samples
+uint64 submitted_samples
+uint64 played_samples
+uint8 playback_state

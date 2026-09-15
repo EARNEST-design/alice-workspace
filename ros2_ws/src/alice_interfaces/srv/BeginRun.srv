@@ -1,0 +1,27 @@
+uint8 PREPARE=0
+uint8 START=1
+
+string<=32 schema_version
+RunIdentity identity
+uint8 operation
+string<=64 selected_profile
+uint32 seed
+bool hardware
+uint32 sad_hold_ms
+string<=64 config_sha256
+string<=64 calibration_sha256
+string<=128 clock_domain_fingerprint
+string<=128 requester_incarnation
+PeerIdentity[<=8] peers
+---
+uint8 PREPARED=0
+uint8 ACTIVE=1
+
+RunIdentity identity
+bool accepted
+bool idempotent
+string<=256 error
+string<=32 responder_node_name
+string<=128 responder_incarnation
+bool clock_verified
+uint8 lifecycle_state

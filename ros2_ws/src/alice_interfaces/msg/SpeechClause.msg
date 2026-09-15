@@ -1,0 +1,9 @@
+StreamHeader header
+string<=32 schema_version
+string<=128 clause_id
+uint32 clause_sequence
+string<=1000 text
+float64[3] affect_vector
+float64 intensity
+uint32 seed
+bool end_of_response

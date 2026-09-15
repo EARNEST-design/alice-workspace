@@ -1,0 +1,11 @@
+StreamHeader header
+string<=32 schema_version
+string<=128 clause_id
+uint32 clause_sequence
+uint64 global_sample_offset
+uint32 sample_rate
+float32[<=3840] samples
+bool first_packet
+SpeechClause clause
+bool clause_final
+bool response_final

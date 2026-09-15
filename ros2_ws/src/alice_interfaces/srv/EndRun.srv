@@ -1,0 +1,25 @@
+uint8 SUCCESS=0
+uint8 CANCELLED=1
+uint8 FAULT=2
+
+string<=32 schema_version
+RunIdentity identity
+uint8 outcome
+string<=256 reason
+string<=128 requester_incarnation
+---
+uint8 RESULT_SUCCESS=0
+uint8 RESULT_CANCELLED=1
+uint8 RESULT_FAULT=2
+uint8 STATE_FINALIZING=0
+uint8 STATE_COMPLETED=1
+
+RunIdentity identity
+bool accepted
+bool idempotent
+bool completed
+string<=256 error
+uint8 terminal_outcome
+uint8 lifecycle_state
+string<=128 artifact_identity
+string<=128 responder_incarnation

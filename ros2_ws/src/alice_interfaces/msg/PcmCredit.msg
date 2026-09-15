@@ -1,0 +1,4 @@
+StreamHeader header
+string<=32 schema_version
+uint64 capacity_samples
+uint64 cumulative_consumed_samples
