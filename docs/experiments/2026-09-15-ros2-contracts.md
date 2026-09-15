@@ -179,3 +179,17 @@ corroborate completion with playback/Home/recorder evidence.
 Conclusion: the three Task 2 review findings are fixed within the shared
 contract scope and the scoped regression passes. Runtime composition and
 physical motion remain unqualified by this contract-only experiment.
+
+### Task 3 sparse PCM production admission
+
+`PcmStreamGuard(identity, max_gap_ns=250_000_000)` retains its reviewed default.
+The audio participant explicitly uses `max_gap_ns=None` for the interval
+between *production* of reliable PCM packets. Offline TTS can compute the next
+chunk while an already buffered DAC continues playing. This option does not
+waive the 250 ms age of each packet on reception, publisher incarnation, exact
+sequence/sample offsets, or transactional metadata validation. TTS production,
+startup prebuffer and run deadlines remain separately bounded. DAC progress,
+SpeechState, ExpressionFrame and FaceTarget retain their 250 ms active limits;
+local PCM underflow still cancels immediately. The integration test covers a
+fresh packet after a long production interval, expired and missing-sequence
+rejections, and corrected retry with an unchanged ledger.

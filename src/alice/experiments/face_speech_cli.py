@@ -6,38 +6,25 @@ import argparse
 import asyncio
 import hashlib
 import json
-import secrets
 import shutil
 import signal
 import subprocess
 import sys
 import time
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator
 from pathlib import Path
-from threading import Event
 from typing import Any
 
 from alice.contracts.actuation import ActuatorTarget
 from alice.contracts.motion import TargetUpdate
 from alice.contracts.speech_stream import ClauseSequence, SpeechClause
-from alice.experiments.jaw_trial_cli import _check_owners, _exclusive_transport, _write
-from alice.experiments.motion_readiness import (
-    inspect_controller_identity,
-    load_readiness_device_config,
-)
+from alice.experiments.jaw_trial_cli import _check_owners as _check_owners
+from alice.experiments.jaw_trial_cli import _write
 from alice.hardware.face_scope import FACE_CHANNELS, face_manifest, face_profiles
-from alice.hardware.maestro_face import MaestroFaceAdapter
-from alice.hardware.manifest import HardwareManifest, load_manifest
-from alice.safety.supervisor import (
-    OperatorApproval,
-    PreflightEvidence,
-    SafetySupervisor,
-)
+from alice.hardware.manifest import load_manifest
 from alice.speech.composer import compose_frame
 from alice.speech.expression_bridge import ExpressionBridge
-from alice.speech.face_runtime import FaceRuntime, SimulatedFaceDriver
-from alice.speech.face_stream import FaceCommandStream
-from alice.speech.jaw_trial import trial_limits
+from alice.speech.face_runtime import FaceRuntime
 from alice.speech.stream_cli import _derivatives, _preview, _RecordingWorker
 from alice.speech.stream_playback import SimulatedPlayback, SoundDevicePlayback
 from alice.speech.stream_session import SpeechStreamSession
@@ -47,97 +34,12 @@ from alice.speech.tts_worker import PocketTtsWorker
 ROOT = Path(__file__).resolve().parents[3]
 
 
-def _factory(
-    full: HardwareManifest,
-    generation: str,
-    hardware: bool,
-    report: dict[str, Any],
-    output: Path,
-) -> Callable[[Event], FaceCommandStream]:
-    def create(cancel: Event) -> FaceCommandStream:
-        scope = face_manifest(full)
-        gate = SafetySupervisor(
-            manifest=scope, clock=time.monotonic_ns, limits=trial_limits()
-        )
-        token = secrets.token_urlsafe(32)
-        raw: MaestroFaceAdapter | None = None
-        approval_time = time.monotonic_ns()
-        driver: MaestroFaceAdapter | SimulatedFaceDriver
-        try:
-            if hardware:
-                devices = load_readiness_device_config(
-                    ROOT / "config/experiments/streaming-motion-readiness-v1.yaml"
-                )
-                identity = inspect_controller_identity(
-                    full.controller.command_device_path, devices.controller
-                )
-                report["controller_identity"] = identity.model_dump(mode="json")
-                report["interface_ownership"] = _check_owners(full)
-                raw = MaestroFaceAdapter(
-                    manifest=scope,
-                    stable_device_path=full.controller.command_device_path,
-                    expected_controller_serial="00037376",
-                    required_enable_token=token,
-                    clock=time.monotonic_ns,
-                    permit_verifier=gate.actuation_permit_verifier,
-                    transport_factory=_exclusive_transport,
-                    timeout_seconds=0.05,
-                    settle_timeout_ns=500_000_000,
-                    poll_interval_ns=5_000_000,
-                )
-                raw.open(token, cancel=cancel)
-                before = raw.read_only_preflight(tuple(FACE_CHANNELS))
-                report["preflight"] = before.model_dump(mode="json")
-                _write(output / "startup.json", report)
-                if before.controller_error_register:
-                    raise RuntimeError("Maestro error register is not clear")
-                snapshot = raw.initialize_disabled_home(token)
-                report["initialized_preflight"] = snapshot.model_dump(mode="json")
-                report["disabled_pwm_start_is_not_measured_mechanics"] = True
-                driver = raw
-            else:
-                driver = SimulatedFaceDriver(scope)
-                snapshot = driver.read_only_preflight(tuple(FACE_CHANNELS))
-            run_id = f"face-{time.time_ns()}"
-            evidence = PreflightEvidence(
-                run_id=run_id,
-                hardware_id=scope.hardware_id,
-                calibration_sha256=scope.calibration_sha256,
-                controller_serial=scope.controller.serial_number,
-                requirement_results={
-                    r.requirement_id: True for r in scope.preflight_requirements
-                },
-                competing_process_detected=False,
-                controller_error_codes=(),
-                home_verified=True,
-                observed_monotonic_ns=snapshot.observed_monotonic_ns,
-            )
-            if (
-                not gate.preflight(evidence).accepted
-                or not gate.arm(
-                    OperatorApproval(
-                        approval_id="explicit-attended-run"
-                        if hardware
-                        else "simulated",
-                        run_id=run_id,
-                        confirmed_monotonic_ns=approval_time,
-                    )
-                ).accepted
-            ):
-                raise RuntimeError("selected-face preflight/arming rejected")
-            if raw is not None:
-                raw.enable_fast_jaw_response(token)
-                report["jaw_response_override"] = raw.jaw_response_override
-            _write(output / "startup.json", report)
-            return FaceCommandStream(
-                gate, driver, token, full, generation_id=generation
-            )
-        except BaseException:
-            if raw is not None:
-                raw.close()
-            raise
+def _factory(full, generation, hardware, report, output):
+    from alice.speech.face_adapter import face_factory
 
-    return create
+    return face_factory(
+        full, generation, hardware, report, output, config_root=ROOT / "config"
+    )
 
 
 async def _run(

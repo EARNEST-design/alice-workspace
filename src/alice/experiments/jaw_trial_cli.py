@@ -7,7 +7,7 @@ import hashlib
 import json
 import secrets
 import shutil
-import subprocess
+import subprocess as subprocess
 import sys
 import time
 from datetime import datetime, timezone
@@ -23,6 +23,8 @@ from alice.safety.supervisor import (
     PreflightEvidence,
     SafetySupervisor,
 )
+from alice.speech.face_adapter import _check_owners as _shared_check_owners
+from alice.speech.face_adapter import _exclusive_transport, _write
 from alice.speech.jaw_playback import run_jaw_playback
 from alice.speech.jaw_trial import (
     JawCommandStream,
@@ -79,52 +81,6 @@ def scoped_manifest(full: HardwareManifest) -> HardwareManifest:
         }
     )
     return HardwareManifest.model_validate(document)
-
-
-def _write(path: Path, value: object) -> None:
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(value, indent=2) + "\n")
-    temporary.replace(path)
-
-
-def _exclusive_transport(path: str, timeout_seconds: float) -> Any:
-    import serial
-
-    return serial.Serial(
-        path,
-        baudrate=9600,
-        timeout=timeout_seconds,
-        write_timeout=timeout_seconds,
-        exclusive=True,
-    )
-
-
-def _check_owners(full: HardwareManifest) -> dict[str, object]:
-    paths = (
-        full.controller.command_device_path,
-        full.controller.command_device_path.replace("-if00", "-if02"),
-    )
-    for path, interface in zip(paths, ("00", "02"), strict=True):
-        Path(path).resolve(strict=True)
-        identity = _resolve_linux_usb_identity(path)
-        if (
-            identity.serial_number != "00037376"
-            or identity.interface_number != interface
-        ):
-            raise ValueError("Maestro interface identity mismatch")
-    result = subprocess.run(
-        ["fuser", *paths], capture_output=True, text=True, timeout=5
-    )
-    if result.returncode != 1 or result.stderr.strip() or result.stdout.strip():
-        raise ValueError(
-            "Maestro interfaces are busy or ownership could not be checked"
-        )
-    return {
-        "paths": paths,
-        "returncode": result.returncode,
-        "stdout": result.stdout,
-        "stderr": result.stderr,
-    }
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -481,6 +437,10 @@ def main(argv: list[str] | None = None) -> int:
             if cleanup_errors:
                 exit_code = 2
     return exit_code
+
+
+def _check_owners(full):
+    return _shared_check_owners(full, resolver=_resolve_linux_usb_identity)
 
 
 if __name__ == "__main__":

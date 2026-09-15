@@ -229,25 +229,17 @@ def test_restarted_publisher_cannot_continue_prior_stream_sequence() -> None:
     with pytest.raises(ValueError, match="incarnation"):
         guard.admit(restarted, now_monotonic_ns=1_010_000_000)
 
-    assert guard.admit(
-        _header(1, 1_010_000_000), now_monotonic_ns=1_010_000_000
-    )
+    assert guard.admit(_header(1, 1_010_000_000), now_monotonic_ns=1_010_000_000)
 
 
 def test_coalesced_latest_stream_skips_sequences_within_time_gap_bound() -> None:
     guard = SequenceGuard(IDENTITY, exact=False)
 
     assert guard.admit(_header(0), now_monotonic_ns=1_000_000_000)
-    assert guard.admit(
-        _header(5, 1_200_000_000), now_monotonic_ns=1_200_000_000
-    )
+    assert guard.admit(_header(5, 1_200_000_000), now_monotonic_ns=1_200_000_000)
     with pytest.raises(ValueError, match="progress gap"):
-        guard.admit(
-            _header(9, 1_450_000_001), now_monotonic_ns=1_450_000_001
-        )
-    assert guard.admit(
-        _header(9, 1_450_000_000), now_monotonic_ns=1_450_000_000
-    )
+        guard.admit(_header(9, 1_450_000_001), now_monotonic_ns=1_450_000_001)
+    assert guard.admit(_header(9, 1_450_000_000), now_monotonic_ns=1_450_000_000)
 
 
 def test_credit_is_cumulative_and_duplicate_cannot_enlarge_window() -> None:
@@ -491,3 +483,34 @@ def test_oversize_pcm_rejection_does_not_consume_sequence() -> None:
         response_final=True,
     )
     assert guard.admit(valid, now_monotonic_ns=1_000_000_000) == 160
+
+
+def test_pcm_sparse_production_does_not_waive_age_sequence_or_transactionality():
+    from dataclasses import replace
+
+    first = PcmPacket(
+        _header(0), "clause-0", 0, 0, 24000, (0.1,) * 480, True, _clause(), False, False
+    )
+    default = PcmStreamGuard(IDENTITY)
+    default.admit(first, now_monotonic_ns=1_000_000_000)
+    second = replace(
+        first,
+        header=_header(1, 2_000_000_000),
+        global_sample_offset=480,
+        first_packet=False,
+        clause=None,
+    )
+    with pytest.raises(ValueError, match="gap"):
+        default.admit(second, now_monotonic_ns=2_000_000_000)
+    sparse = PcmStreamGuard(IDENTITY, max_gap_ns=None)
+    sparse.admit(first, now_monotonic_ns=1_000_000_000)
+    with pytest.raises(ValueError, match="expired"):
+        sparse.admit(second, now_monotonic_ns=2_251_000_000)
+    with pytest.raises(ValueError, match="sequence"):
+        sparse.admit(
+            replace(second, header=_header(2, 2_000_000_000)),
+            now_monotonic_ns=2_000_000_000,
+        )
+    assert sparse.sample_offset == 480
+    assert sparse.admit(second, now_monotonic_ns=2_000_000_000) == 480
+    assert sparse.sample_offset == 960

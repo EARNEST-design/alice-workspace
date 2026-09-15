@@ -78,6 +78,7 @@ from alice.safety.supervisor import (
     SafetyLimits,
     SafetySupervisor,
 )
+from alice.speech.device_identity import LinuxUsbIdentity, _resolve_linux_usb_identity
 
 _PLACEHOLDER_PREFIX = "REQUIRED_"
 _PREFLIGHT_ACK = "I CONFIRM PREFLIGHT WITH MASTER SERVO POWER OFF"
@@ -200,14 +201,6 @@ class HardwareApproval(BaseModel):
         "I APPROVE READ-ONLY PREFLIGHT WITH SERVO POWER OFF"
     ]
     confirmation_text: NonEmptyString
-
-
-class LinuxUsbIdentity(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    serial_number: NonEmptyString
-    interface_number: NonEmptyString
-    resolved_tty: NonEmptyString
 
 
 class PowerEnableChallenge(BaseModel):
@@ -951,35 +944,6 @@ def _fresh(
         monotonic_age >= max_age_ns
     ):
         raise ValueError(f"{label} is stale")
-
-
-def _resolve_linux_usb_identity(stable_path: str) -> LinuxUsbIdentity:
-    """Resolve actual tty ancestry through sysfs, independent of link naming."""
-
-    link = Path(stable_path)
-    if not link.is_symlink():
-        raise ValueError("stable USB device path is not a symlink")
-    resolved = link.resolve(strict=True)
-    tty_device = Path("/sys/class/tty") / resolved.name / "device"
-    current = tty_device.resolve(strict=True)
-    interface: str | None = None
-    serial: str | None = None
-    for parent in (current, *current.parents):
-        interface_path = parent / "bInterfaceNumber"
-        serial_path = parent / "serial"
-        if interface is None and interface_path.is_file():
-            interface = interface_path.read_text(encoding="ascii").strip().zfill(2)
-        if serial is None and serial_path.is_file():
-            serial = serial_path.read_text(encoding="ascii").strip()
-        if interface is not None and serial is not None:
-            break
-    if interface is None or serial is None:
-        raise ValueError("USB serial/interface identity is unavailable in sysfs")
-    return LinuxUsbIdentity(
-        serial_number=serial,
-        interface_number=interface,
-        resolved_tty=str(resolved),
-    )
 
 
 def _challenge(

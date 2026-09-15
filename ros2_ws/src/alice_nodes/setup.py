@@ -12,6 +12,7 @@ setup(
         (f"share/{package_name}", ["package.xml"]),
     ],
     install_requires=["setuptools"],
+    entry_points={"console_scripts": [f"{role} = alice_nodes.{role}:main" for role in ("session", "tts", "audio", "expression", "motion", "maestro", "perception", "recorder")] + ["alice = alice_nodes.cli:main"]},
     zip_safe=True,
     maintainer="Alice maintainers",
     maintainer_email="alice@example.invalid",

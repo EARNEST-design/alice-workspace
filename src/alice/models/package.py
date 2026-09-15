@@ -51,6 +51,7 @@ from alice.motion.face_events import (
     FaceEventPolicy,
 )
 from alice.motion.streaming import ProductionCandidateComposer
+from alice.speech.device_identity import FilesystemIdentity
 
 _WEIGHTS_PATH = "weights/residual.safetensors"
 _TRAINING_RECORD_PATH = "records/training.json"
@@ -316,14 +317,6 @@ class LoadedMotionModel:
     metrics_reference: str
     seed_policy: SeedPolicy
     candidate_composer: ProductionCandidateComposer
-
-
-@dataclass(frozen=True, slots=True)
-class FilesystemIdentity:
-    """Stable identity of one snapshotted filesystem object."""
-
-    device: int
-    inode: int
 
 
 @dataclass(frozen=True, slots=True)

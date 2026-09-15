@@ -338,9 +338,11 @@ class PcmPacket:
 class PcmStreamGuard:
     """Admit complete, exact-order PCM packets with transactional validation."""
 
-    def __init__(self, identity: RunIdentity) -> None:
+    def __init__(
+        self, identity: RunIdentity, *, max_gap_ns: int | None = MAX_PROGRESS_GAP_NS
+    ) -> None:
         self.identity = identity
-        self._sequences = SequenceGuard(identity, exact=True)
+        self._sequences = SequenceGuard(identity, exact=True, max_gap_ns=max_gap_ns)
         self._sample_rate: int | None = None
         self._sample_offset = 0
         self._expected_clause = 0
