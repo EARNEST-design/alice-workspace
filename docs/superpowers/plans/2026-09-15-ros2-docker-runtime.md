@@ -91,14 +91,32 @@ def test_terminal_fault_cannot_be_completed():
 **Consumes:** Runnable Task 3 nodes and Task 1 images.
 **Produces:** Tested one-command Docker Compose default simulation, explicit speaker/hardware overlays, build/run/fault evidence, reproducible runbook and checkpoint.
 
-- [ ] Write integration checks for all eight separate containers on the internal bridge; no default devices/privileges/host IPC/network. Build the project and test DDS UDP discovery on the actual bridge rather than only same-container launch.
-- [ ] Add non-root/read-only/capability-dropped services, correctly scoped volumes, stable serial/C525 mappings and selected audio route, numeric device groups, offline cache and local artifacts. Add explicit installed-resource roots, launch files, health diagnostics, configuration snapshots and config/model digests. No broad device mount or automatic hardware arming.
-- [ ] Exercise synthetic success and cancellation, stale/gapped/duplicate transport, PCM backpressure, callback underflow, controller fault, delayed expression, node kill/restart and recorder failure. Check no late commands/recovery after fault; measure source-to-admission age and stop latency. Confirm each queued resource and run duration is bounded.
-- [ ] Run real offline Azelma through the Compose graph with simulated DAC and compare sample accounting/invariants to the baseline. Inspect the existing speaker route read-only and test the explicit audio overlay with simulated servos if available. Do not run servos while their prior physical-motion issue is unresolved.
-- [ ] Integrate user-supplied `alice_description` from `codex/robot-description` (`13c2549`) selectively into the ROS workspace. Requalify Xacro/URDF/TF on Lyrical and add optional headless preview services; preserve provisional geometry and preview namespace, with no PWM bridge or extra actuation scope.
-- [ ] Run full Python regressions, ROS contract/launch/integration checks, Ruff/mypy where applicable and `git diff --check`. Document exact commands/results and limits. Leave a hardware command ready for the next attended test, without asserting physical acceptance.
+- [x] Write integration checks for all eight separate containers on the internal bridge; no default devices/privileges/host IPC/network. Build the project and test DDS UDP discovery on the actual bridge rather than only same-container launch.
+- [x] Add non-root/read-only/capability-dropped services, correctly scoped volumes, stable serial/C525 mappings and selected audio route, numeric device groups, offline cache and local artifacts. Add explicit installed-resource roots, launch files, health diagnostics, configuration snapshots and config/model digests. No broad device mount or automatic hardware arming.
+- [x] Exercise synthetic success and cancellation, stale/gapped/duplicate transport, PCM backpressure, callback underflow, controller fault, delayed expression, node kill/restart and recorder failure. Check no late commands/recovery after fault; measure source-to-admission age and stop latency. Confirm each queued resource and run duration is bounded.
+- [x] Run real offline Azelma through the Compose graph with simulated DAC and compare sample accounting/invariants to the baseline. Inspect the existing speaker route read-only and test the explicit audio overlay with simulated servos if available. Do not run servos while their prior physical-motion issue is unresolved.
+- [x] Integrate user-supplied `alice_description` from `codex/robot-description` (`13c2549`) selectively into the ROS workspace. Requalify Xacro/URDF/TF on Lyrical and add optional headless preview services; preserve provisional geometry and preview namespace, with no PWM bridge or extra actuation scope.
+- [x] Run full Python regressions, ROS contract/launch/integration checks, Ruff/mypy where applicable and `git diff --check`. Document exact commands/results and limits. Under the reviewed ownership amendment, retain hardware configuration inspection only: live ROS hardware admission rejects until a trusted complete host-ownership mechanism is qualified; do not assert hardware readiness or physical acceptance.
 - [ ] Request whole-migration review, fix material findings and verify fixes. Update plan/checkpoint/ADR and artifact manifest. Commit, preserve the branch and artifacts, and report build/test evidence plus outstanding physical acceptance.
 
 ## Execution record
 
-Tasks 1–3 are complete with clean scoped reviews. Task 1 ends at `dd84f2c`, Task 2 at `eb5aa0e`, Task 3 at `0da16b0`. Task 3 original full regression passed 988 tests (two known skips and two existing warnings); final lifecycle repairs passed 124 focused tests and five isolated eight-process scenarios. Task 4 separate-container deployment and robot-description qualification remain. Baseline commit for migration code: `3f4093b`.
+Tasks 1–4 have completed their implementation review gates. Task 1 ends at
+`dd84f2c`, Task 2 at `eb5aa0e`, Task 3 at `0da16b0`, and Task 4 at `0bb2f29`.
+Whole-migration review is now pending; its final checkbox remains open.
+Baseline for migration code: `3f4093b`.
+
+Task 4 qualified the eight-container default graph, real offline Azelma,
+announced speaker-only output and the optional imported robot description.
+Original full verification passed 1,046 tests (three skips covered by nine host
+checks; two existing warnings), Ruff and mypy. Final clock/ownership repairs
+passed 150 covering tests, seven host checks, three actual-container scenarios
+and a no-device hidden-owner regression. Evidence remains tied to each exact
+source/image revision; prior broader tests are not relabeled as final-image runs.
+
+The reviewed coordinator amendment keeps live ROS hardware unavailable until a
+qualified complete host-ownership mechanism exists. This takes precedence over
+the earlier hardware-ready command and does not change the legacy bench CLI.
+Clock proof v2 binds current/child namespace metadata before accepting zero
+offsets. Real-model p99 admission latency remains above the 20 ms target; physical
+facial acceptance and general exact physical stop timing remain unqualified.

@@ -1,59 +1,51 @@
 # Alice session checkpoint
 
-**Saved 2026-09-15: Task 4 scoped review fixes complete, awaiting re-review.**
-Clock v2 binds current/children namespaces before accepting offsets. ROS hardware
-admission is explicitly unavailable pending a trusted complete host-owner
-visibility mechanism; even enabled overlays cannot arm. Legacy CLI behavior and
-speaker-only/simulated ROS operation are preserved. This coordinator amendment
-supersedes the earlier ready-for-hardware command. No new servo/camera trial.
+**Saved 2026-09-15: ROS 2 Docker implementation review gates complete;
+whole-migration review pending.** Preserve the existing worktree and artifacts:
+`/home/alice/alice-workspace/.worktrees/streaming-affect-motion`
+(branch `feature/streaming-affect-motion`). No merge, push or pruning performed.
 
-Round 1 final images share source SHA256
-`c4a4a56755d81d9f507d09712b36576f7cba3b0fc926c93ac76b70d544eb8835`.
-Final covering: 150 passed, one skip covered by seven host Compose checks,
-two existing fork warnings, Ruff and mypy (87 files) pass. Three actual-container
-cases pass: default, all-eight participant binding, and mismatched-child
-rejection. No-device hidden-owner RED/GREEN proves enabled hardware rejects
-before mutation/factories despite empty fuser output. Details and exact images
-are in the appended Task 4 report and `task4-r1-artifact-manifest.json`.
-
-The pre-review implementation and evidence below remain preserved. Work remains in the preserved
-`feature/streaming-affect-motion` worktree. No merge, push or pruning performed.
-
-- Eight default idle non-root, read-only, capability-dropped containers run on
-  an internal UDP bridge with no model cache or device requirements. Offline
-  TTS, selected speaker, hardware, tools and provisional preview are explicit.
 - [Runbook](/home/alice/alice-workspace/.worktrees/streaming-affect-motion/docs/ros2.md)
-  and [dated evidence](/home/alice/alice-workspace/.worktrees/streaming-affect-motion/docs/experiments/2026-09-15-ros2-runtime.md)
-  record commands, exact image/source/model identities and acceptance limits.
-- Tasks 1–3 retain clean scoped reviews. Task 4 base is `ce7480d`; final image
-  source SHA256 is `6390a6263c19b5642b60a3cd9310fe98caacbbcf5d2503b711500057f8b230c1`.
-  The task report is `.superpowers/sdd/2026-09-15-ros2-docker-runtime/task-4-report.md`.
-- Final full verification: 1046 passed, three skips covered by nine host tests,
-  two existing fork warnings; Ruff and strict mypy (87 files) pass. Actual build
-  07 matrix: 35 functional cases plus four focused crash/retirement cases pass.
-  Final build 08 normal/SIGTERM, public launcher and speaker checks pass with
-  separately identified evidence. All failed attempts remain preserved.
-- Announced speaker-only offline Azelma completed on the SN6140 analog Pulse
-  route: DAC clock, 185,760 samples played, zero underflows. Maestro/perception
-  remained simulated; no new servo or camera trial ran. This is stream evidence,
-  not independent acoustic measurement or physical facial acceptance.
-- Real-model source-to-admission p99 remains 21.176 ms (target 20 ms), maximum
-  23.221 ms. Strict 250 ms guards remain unchanged. Coarse observer stop gaps
-  reach 255–258 ms and are not relabeled exact deadline proof; self-crash marker
-  checks retain 207.914/209.117 ms to last mock receipt. Physical PWM cutoff is
-  not proven by process death.
-- Active all-node SIGTERM can leave session ROS handlers unquiesced; local
-  cancel/evidence completes, then an explicit five-second failed-cleanup exit 1
-  avoids destroyed-guard callbacks and indefinite Python join. This qualified
-  rclpy-version workaround and failed status remain documented, not waived.
-- Original coordinator ruling versioned clock proof as `host-monotonic-zero/v1`: same
-  kernel boot plus strictly parsed zero monotonic/boottime offsets; reject bad,
-  missing or nonzero metadata. Docker private namespace identity is diagnostic.
-- Selective user-approved robot description from exact `13c2549` is qualified
-  for Lyrical headless preview only, preserving provisional geometry and the
-  `alice_preview` namespace. No PWM bridge or added actuation scope.
-- Continue coordinator reviews using the existing progress ledger and artifact
-  manifest. Preserve the worktree, failed attempts and unrelated hardware notes.
+  and [evidence](/home/alice/alice-workspace/.worktrees/streaming-affect-motion/docs/experiments/2026-09-15-ros2-runtime.md).
+- Tasks 1–4 have clean implementation reviews, with Task 4 repairs at `0bb2f29`.
+  Continue the coordinator's whole-migration review from baseline `3f4093b` using
+  `.superpowers/sdd/2026-09-15-ros2-docker-runtime/progress.md`; do not redispatch
+  completed implementation tasks. The deferred Minor is existing fork/CMake
+  verification noise. All six coordinator rulings are in the ledger.
+- Eight separate idle, non-root, read-only containers use an internal UDP bridge.
+  Default simulation needs no devices or model cache. Offline Azelma, selected
+  speaker and provisional robot preview are explicit options.
+- **Live ROS hardware is unavailable** until a trusted mechanism can establish
+  complete host ownership visibility for both Maestro interfaces. Enabled
+  hardware overlays/actions still reject before mutation/factories. This reviewed
+  coordinator amendment supersedes the earlier hardware-ready command; it adds
+  no privileges or host service. Legacy bench CLI behavior is unchanged.
+- Clock proof `host-monotonic-zero/v2` requires valid matching current/child
+  namespace links within each participant, complete zero monotonic/boottime
+  offsets and a common kernel boot. Different containers may have different
+  valid namespace IDs. No timestamp translation or safety-bound widening.
+- Original full verification: 1,046 passed, three skips covered by nine host
+  checks, two existing fork warnings; Ruff/mypy (87 files) pass. Actual build07
+  matrix passed 35 functional scenarios plus four focused supplements. Build08
+  passed default/SIGTERM, public launcher and announced speaker-only checks.
+- Final repaired image source SHA256:
+  `c4a4a56755d81d9f507d09712b36576f7cba3b0fc926c93ac76b70d544eb8835`.
+  Its 150 covering tests, seven host checks, three actual-container clock/default
+  cases and no-device hidden-owner regression pass. Exact image identities and
+  failed attempts are in `task4-r1-artifact-manifest.json` and its predecessor.
+- Speaker-only Azelma used the selected SN6140 Pulse route and PortAudio DAC:
+  185,760 samples played, zero underflows; Maestro/perception were simulated.
+  This is stream evidence, not acoustic measurement or physical facial acceptance.
+- Real-model admission p99 remains 21.176 ms against a 20 ms target. Coarse
+  observer stop gaps reach 255–258 ms; precise self-crash marker tests measured
+  about 208/209 ms to last mock receipt. None proves physical PWM cutoff.
+- Active simultaneous SIGTERM can leave session handlers unquiesced. Local
+  cancellation/evidence completes, followed by explicit failed cleanup after a
+  five-second deadline and exit 1. The qualified rclpy workaround is version-bound.
+- User-supplied `alice_description` from `codex/robot-description` (`13c2549`)
+  passed Lyrical headless preview checks, retaining provisional geometry and
+  `alice_preview`. No PWM bridge or added actuation scope.
+- No new servo/camera trial ran. The prior visible-motion issue remains unresolved.
 
 The following hardware checkpoint remains valid and physically unaccepted; the
 ROS migration does not resolve or supersede its pending visible-motion check.
