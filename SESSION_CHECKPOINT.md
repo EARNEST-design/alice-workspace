@@ -13,11 +13,14 @@ microphone/LLM conversation is a separate extension unless requested.
   and test images. Real offline Azelma synthesis and MediaPipe model opening
   passed with no devices or runtime network. No new hardware trial has run.
 - [Implementation plan](/home/alice/alice-workspace/.worktrees/streaming-affect-motion/docs/superpowers/plans/2026-09-15-ros2-docker-runtime.md)
-- Task 1 is complete at `dd84f2c`, with clean review and explicit reviewed
-  build inputs. Task 2 (typed ROS interfaces and transport guards) is next. The Lyrical
-  regression run passed 881 tests with one optional Node.js preview skip; the
-  original host baseline passed 879 tests. Follow the task ledger in
-  `.superpowers/sdd/2026-09-15-ros2-docker-runtime/progress.md` inside the
+- Tasks 1 and 2 are complete with clean reviews. Task 2 final fix `eb5aa0e`
+  retains the 250 ms active timing guard, validates service/action replies,
+  and preserves transactional clause bounds. Fresh Lyrical contract regression:
+  156 tests passed; base imports work without ML dependencies.
+- Task 3 (eight runtime nodes) is next, followed by full Compose qualification.
+  The earlier Lyrical full regression passed 881 tests with one optional Node.js
+  preview skip; the original host baseline passed 879 tests. Follow the ledger
+  in `.superpowers/sdd/2026-09-15-ros2-docker-runtime/progress.md` inside the
   preserved worktree; do not redispatch completed tasks or clear artifacts.
 
 User identified the existing `alice_description` on `codex/robot-description`

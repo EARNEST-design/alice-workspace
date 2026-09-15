@@ -54,7 +54,7 @@ def test_core_imports_without_ml():
 **Consumes:** Existing `SpeechClause`, `SpeechFrame`, `TargetUpdate`, `BlendshapeObservation` validation; base image from Task 1.
 **Produces:** Generated `alice_interfaces` typed messages/services/actions; pure Python `alice_nodes.transport` guards, conversions in `alice_nodes.contracts`. Exact node-to-node API is committed by this task and used by Task 3.
 
-- [ ] Write failing tests for immutable run identity, expired/future timestamps, monotonic sequences, fault latching, cumulative credits (duplicate credit cannot enlarge window), malformed/NaN PCM and clause ordering. Example behavior:
+- [x] Write failing tests for immutable run identity, expired/future timestamps, monotonic sequences, fault latching, cumulative credits (duplicate credit cannot enlarge window), malformed/NaN PCM and clause ordering. Example behavior:
 
 ```python
 def test_terminal_fault_cannot_be_completed():
@@ -64,10 +64,10 @@ def test_terminal_fault_cannot_be_completed():
         guard.complete()
 ```
 
-- [ ] Define `RunIdentity` (run_id, epoch, generation_id), `StreamHeader` (identity, sequence, source_monotonic_ns), `SpeechClause`, `PcmChunk`, `PcmCredit`, `SpeechState`, `ExpressionFrame`, `FaceTarget`, `RunHealth`, `PlaybackStatus`, `ServoReceipt`, `FaceObservation` and bounded auxiliary data. Carry full clause metadata in the first PCM packet so cross-topic ordering cannot race admission. Subsequent packets identify the clause and global sample offset.
-- [ ] Define `BeginRun` carrying identity, selected profile, seed, hardware flag, sad hold and clock-domain identity; `EndRun` with explicit terminal outcome; `RunSpeech` action for mounted named fixture or external committed-clause source. Include accepted/error results and action progress. Use idempotent terminal handling.
-- [ ] Implement converters through existing Pydantic contracts and the pure transport guards. Reject unknown schema, calibration, nonfinite values, wrong dimensions, duplicate/out-of-order streams and oversize messages before state mutation. Stale epochs are ignored, not admitted as new runs.
-- [ ] Build `alice_interfaces`/`alice_nodes` with colcon and run round-trip tests using real generated classes in Docker. Add typed validation tests for all consumed control messages, inspect diff and commit.
+- [x] Define `RunIdentity` (run_id, epoch, generation_id), `StreamHeader` (identity, sequence, source_monotonic_ns), `SpeechClause`, `PcmChunk`, `PcmCredit`, `SpeechState`, `ExpressionFrame`, `FaceTarget`, `RunHealth`, `PlaybackStatus`, `ServoReceipt`, `FaceObservation` and bounded auxiliary data. Carry full clause metadata in the first PCM packet so cross-topic ordering cannot race admission. Subsequent packets identify the clause and global sample offset.
+- [x] Define `BeginRun` carrying identity, selected profile, seed, hardware flag, sad hold and clock-domain identity; `EndRun` with explicit terminal outcome; `RunSpeech` action for mounted named fixture or external committed-clause source. Include accepted/error results and action progress. Use idempotent terminal handling.
+- [x] Implement converters through existing Pydantic contracts and the pure transport guards. Reject unknown schema, calibration, nonfinite values, wrong dimensions, duplicate/out-of-order streams and oversize messages before state mutation. Stale epochs are ignored, not admitted as new runs.
+- [x] Build `alice_interfaces`/`alice_nodes` with colcon and run round-trip tests using real generated classes in Docker. Add typed validation tests for all consumed control messages, inspect diff and commit.
 
 ### Task 3: Implement all runtime nodes against the typed contracts
 
