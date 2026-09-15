@@ -1,0 +1,7 @@
+FROM ros:jazzy-ros-base@sha256:386d06ec6d4188f731bae5678e07b4cb64a4e4d4152090c0bd1f881dcf7706f5
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ros-jazzy-xacro ros-jazzy-robot-state-publisher \
+    ros-jazzy-joint-state-publisher-gui ros-jazzy-rviz2 \
+    ros-jazzy-urdfdom-py liburdfdom-tools python3-pytest python3-numpy \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /ws

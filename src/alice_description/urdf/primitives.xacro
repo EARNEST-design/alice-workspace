@@ -1,0 +1,49 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+  <material name="shell"><color rgba="0.73 0.84 0.87 1"/></material>
+  <material name="orange"><color rgba="1 0.37 0.065 1"/></material>
+  <material name="dark"><color rgba="0.055 0.07 0.08 1"/></material>
+  <material name="skin"><color rgba="0.94 0.72 0.57 1"/></material>
+  <material name="eye_white"><color rgba="0.96 0.98 0.97 1"/></material>
+  <material name="iris"><color rgba="0.12 0.48 0.40 1"/></material>
+  <material name="lip"><color rgba="0.60 0.18 0.22 1"/></material>
+
+  <xacro:macro name="box_visual" params="size xyz material">
+    <visual><origin xyz="${xyz}" rpy="0 0 0"/>
+      <geometry><box size="${size}"/></geometry><material name="${material}"/>
+    </visual>
+  </xacro:macro>
+  <xacro:macro name="sphere_visual" params="radius xyz material">
+    <visual><origin xyz="${xyz}" rpy="0 0 0"/>
+      <geometry><sphere radius="${radius}"/></geometry><material name="${material}"/>
+    </visual>
+  </xacro:macro>
+  <xacro:macro name="cylinder_visual" params="radius length xyz material rpy:='0 0 0'">
+    <visual><origin xyz="${xyz}" rpy="${rpy}"/>
+      <geometry><cylinder radius="${radius}" length="${length}"/></geometry>
+      <material name="${material}"/>
+    </visual>
+  </xacro:macro>
+  <xacro:macro name="box_collision" params="size xyz">
+    <collision><origin xyz="${xyz}" rpy="0 0 0"/>
+      <geometry><box size="${size}"/></geometry></collision>
+  </xacro:macro>
+  <xacro:macro name="fixed_joint" params="name parent child xyz">
+    <joint name="${name}" type="fixed"><parent link="${parent}"/><child link="${child}"/>
+      <origin xyz="${xyz}" rpy="0 0 0"/></joint>
+  </xacro:macro>
+  <!-- Limits below describe display sliders only, never hardware travel. -->
+  <xacro:macro name="hinge" params="name parent child xyz axis lower upper">
+    <joint name="${name}" type="revolute"><parent link="${parent}"/><child link="${child}"/>
+      <origin xyz="${xyz}" rpy="0 0 0"/><axis xyz="${axis}"/>
+      <limit lower="${lower}" upper="${upper}" effort="0" velocity="1"/>
+    </joint>
+  </xacro:macro>
+  <xacro:macro name="slide" params="name parent child xyz axis lower upper mimic:=''">
+    <joint name="${name}" type="prismatic"><parent link="${parent}"/><child link="${child}"/>
+      <origin xyz="${xyz}" rpy="0 0 0"/><axis xyz="${axis}"/>
+      <limit lower="${lower}" upper="${upper}" effort="0" velocity="${0.02*s}"/>
+      <xacro:if value="${mimic != ''}"><mimic joint="${mimic}" multiplier="1" offset="0"/></xacro:if>
+    </joint>
+  </xacro:macro>
+</robot>

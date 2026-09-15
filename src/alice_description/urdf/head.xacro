@@ -1,0 +1,75 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+  <xacro:macro name="eye" params="side sign joint_name">
+    <link name="${side}_eye">
+      <xacro:sphere_visual radius="${0.014*s}" xyz="0 0 0" material="eye_white"/>
+      <xacro:sphere_visual radius="${0.008*s}" xyz="${0.011*s} 0 0" material="iris"/>
+      <xacro:sphere_visual radius="${0.004*s}" xyz="${0.017*s} 0 0" material="dark"/>
+    </link>
+    <xacro:hinge name="${joint_name}" parent="head" child="${side}_eye"
+      xyz="${0.051*s} ${sign*0.026*s} ${0.080*s}" axis="0 0 1" lower="-0.35" upper="0.35"/>
+    <link name="${side}_upper_lid">
+      <xacro:box_visual size="${0.006*s} ${0.029*s} ${0.009*s}" xyz="0 0 0" material="skin"/>
+    </link>
+    <xacro:slide name="${'upper_eyelids' if side == 'left' else 'right_upper_eyelid_mimic'}"
+      parent="head" child="${side}_upper_lid" xyz="${0.064*s} ${sign*0.026*s} ${0.094*s}"
+      axis="0 0 -1" lower="0" upper="${0.014*s}" mimic="${'' if side == 'left' else 'upper_eyelids'}"/>
+    <link name="${side}_lower_lid">
+      <xacro:box_visual size="${0.006*s} ${0.029*s} ${0.006*s}" xyz="0 0 0" material="skin"/>
+    </link>
+    <xacro:slide name="${'lower_eyelids' if side == 'left' else 'right_lower_eyelid_mimic'}"
+      parent="head" child="${side}_lower_lid" xyz="${0.064*s} ${sign*0.026*s} ${0.066*s}"
+      axis="0 0 1" lower="0" upper="${0.011*s}" mimic="${'' if side == 'left' else 'lower_eyelids'}"/>
+    <link name="${side}_mouth_corner">
+      <xacro:sphere_visual radius="${0.004*s}" xyz="0 0 0" material="lip"/>
+    </link>
+    <xacro:slide name="${side}_mouth_corner" parent="head" child="${side}_mouth_corner"
+      xyz="${0.060*s} ${sign*0.018*s} ${0.038*s}" axis="0 0 1" lower="${-0.005*s}" upper="${0.005*s}"/>
+  </xacro:macro>
+
+  <xacro:macro name="head_assembly" params="">
+    <link name="neck_yaw_link">
+      <xacro:cylinder_visual radius="${0.022*s}" length="${neck}" xyz="0 0 ${neck/2}" material="dark"/>
+    </link>
+    <xacro:hinge name="neck_rotation" parent="torso" child="neck_yaw_link"
+      xyz="0 0 ${hip_to_neck}" axis="0 0 1" lower="-0.65" upper="0.65"/>
+    <link name="neck_roll_link"/>
+    <xacro:hinge name="head_tilt" parent="neck_yaw_link" child="neck_roll_link"
+      xyz="0 0 ${neck/2}" axis="1 0 0" lower="-0.25" upper="0.25"/>
+    <link name="head">
+      <xacro:sphere_visual radius="${head_radius}" xyz="0 0 ${head_radius}" material="skin"/>
+      <!-- Hair is a schematic cap and rear locks, not a reproduced scan. -->
+      <xacro:cylinder_visual radius="${head_radius*0.92}" length="${0.022*s}"
+        xyz="${-0.007*s} 0 ${0.113*s}" material="dark"/>
+      <xacro:box_visual size="${0.050*s} ${0.125*s} ${0.086*s}"
+        xyz="${-0.037*s} 0 ${0.065*s}" material="dark"/>
+      <xacro:sphere_visual radius="${0.009*s}" xyz="${0.064*s} 0 ${0.059*s}" material="skin"/>
+      <xacro:box_visual size="${0.007*s} ${0.030*s} ${0.007*s}"
+        xyz="${0.059*s} 0 ${0.038*s}" material="dark"/>
+      <collision><origin xyz="0 0 ${head_radius}" rpy="0 0 0"/>
+        <geometry><sphere radius="${head_radius}"/></geometry></collision>
+    </link>
+    <xacro:hinge name="face_pitch" parent="neck_roll_link" child="head"
+      xyz="0 0 ${neck/2}" axis="0 1 0" lower="-0.30" upper="0.30"/>
+    <link name="head_top"/>
+    <xacro:fixed_joint name="head_top_fixed" parent="head" child="head_top" xyz="0 0 ${2*head_radius}"/>
+    <link name="jaw">
+      <xacro:box_visual size="${0.025*s} ${0.035*s} ${0.017*s}"
+        xyz="${0.025*s} 0 ${-0.006*s}" material="skin"/>
+      <xacro:box_visual size="${0.005*s} ${0.027*s} ${0.004*s}"
+        xyz="${0.039*s} 0 ${0.002*s}" material="lip"/>
+    </link>
+    <xacro:hinge name="mouth_open" parent="head" child="jaw"
+      xyz="${0.023*s} 0 ${0.032*s}" axis="0 1 0" lower="0" upper="0.40"/>
+    <link name="brow">
+      <xacro:box_visual size="${0.006*s} ${0.016*s} ${0.005*s}"
+        xyz="0 ${0.020*s} 0" material="dark"/>
+      <xacro:box_visual size="${0.006*s} ${0.016*s} ${0.005*s}"
+        xyz="0 ${-0.020*s} 0" material="dark"/>
+    </link>
+    <xacro:slide name="forehead_frown" parent="head" child="brow"
+      xyz="${0.048*s} 0 ${0.103*s}" axis="0 0 -1" lower="0" upper="${0.007*s}"/>
+    <xacro:eye side="left" sign="1" joint_name="left_eye_horizontal"/>
+    <xacro:eye side="right" sign="-1" joint_name="right_eye_horizontal"/>
+  </xacro:macro>
+</robot>

@@ -1,0 +1,246 @@
+{
+  "schema_version": "alice-description-motor-register/v1",
+  "model_version": "alice-planning-v1",
+  "purpose": "visualization and wiring inventory; not a controller configuration",
+  "height_status": "assumed_not_measured",
+  "reference_height_m": 0.62,
+  "disconnected_channels": [
+    7
+  ],
+  "head_actuators": [
+    {
+      "channel": 0,
+      "joint": "neck_rotation",
+      "function": "Neck rotation",
+      "controller": "Pololu Mini Maestro 12-channel",
+      "function_status": "operator_confirmed",
+      "geometry_status": "unmeasured_proxy",
+      "pulse_to_si": null,
+      "increasing_decreasing_effect": null,
+      "evidence": "hardware/motor-map.md (operator observations 2026-08-28)",
+      "connector_pinout": null
+    },
+    {
+      "channel": 1,
+      "joint": "head_tilt",
+      "function": "Gimbal left/right used to tilt head",
+      "controller": "Pololu Mini Maestro 12-channel",
+      "function_status": "operator_confirmed",
+      "geometry_status": "unmeasured_proxy",
+      "pulse_to_si": null,
+      "increasing_decreasing_effect": null,
+      "evidence": "hardware/motor-map.md (operator observations 2026-08-28)",
+      "connector_pinout": null
+    },
+    {
+      "channel": 2,
+      "joint": "face_pitch",
+      "function": "Face up/down",
+      "controller": "Pololu Mini Maestro 12-channel",
+      "function_status": "operator_confirmed",
+      "geometry_status": "unmeasured_proxy",
+      "pulse_to_si": null,
+      "increasing_decreasing_effect": null,
+      "evidence": "hardware/motor-map.md (operator observations 2026-08-28)",
+      "connector_pinout": null
+    },
+    {
+      "channel": 3,
+      "joint": "lower_eyelids",
+      "function": "Lower eyelids, both eyes",
+      "controller": "Pololu Mini Maestro 12-channel",
+      "function_status": "operator_confirmed",
+      "geometry_status": "unmeasured_proxy",
+      "pulse_to_si": null,
+      "increasing_decreasing_effect": null,
+      "evidence": "hardware/motor-map.md (operator observations 2026-08-28)",
+      "connector_pinout": null
+    },
+    {
+      "channel": 4,
+      "joint": "upper_eyelids",
+      "function": "Upper eyelids, both eyes",
+      "controller": "Pololu Mini Maestro 12-channel",
+      "function_status": "operator_confirmed",
+      "geometry_status": "unmeasured_proxy",
+      "pulse_to_si": null,
+      "increasing_decreasing_effect": null,
+      "evidence": "hardware/motor-map.md (operator observations 2026-08-28)",
+      "connector_pinout": null
+    },
+    {
+      "channel": 5,
+      "joint": "forehead_frown",
+      "function": "Forehead frown actuator",
+      "controller": "Pololu Mini Maestro 12-channel",
+      "function_status": "operator_confirmed",
+      "geometry_status": "unmeasured_proxy",
+      "pulse_to_si": null,
+      "increasing_decreasing_effect": null,
+      "evidence": "hardware/motor-map.md (operator observations 2026-08-28)",
+      "connector_pinout": null
+    },
+    {
+      "channel": 6,
+      "joint": "mouth_open",
+      "function": "Mouth opening; chin up/down",
+      "controller": "Pololu Mini Maestro 12-channel",
+      "function_status": "operator_confirmed",
+      "geometry_status": "unmeasured_proxy",
+      "pulse_to_si": null,
+      "increasing_decreasing_effect": "decreasing closes; increasing opens",
+      "evidence": "hardware/motor-map.md (operator observations 2026-08-28)",
+      "connector_pinout": null
+    },
+    {
+      "channel": 8,
+      "joint": "right_eye_horizontal",
+      "function": "Right-eye horizontal movement",
+      "controller": "Pololu Mini Maestro 12-channel",
+      "function_status": "operator_confirmed",
+      "geometry_status": "unmeasured_proxy",
+      "pulse_to_si": null,
+      "increasing_decreasing_effect": "decreasing looks right; increasing looks left",
+      "evidence": "hardware/motor-map.md (operator observations 2026-08-28)",
+      "connector_pinout": null
+    },
+    {
+      "channel": 9,
+      "joint": "left_mouth_corner",
+      "function": "Left mouth corner, vertical smile/frown",
+      "controller": "Pololu Mini Maestro 12-channel",
+      "function_status": "operator_confirmed",
+      "geometry_status": "unmeasured_proxy",
+      "pulse_to_si": null,
+      "increasing_decreasing_effect": "decreasing lowers (frown); increasing raises (smile)",
+      "evidence": "hardware/motor-map.md (operator observations 2026-08-28)",
+      "connector_pinout": null
+    },
+    {
+      "channel": 10,
+      "joint": "left_eye_horizontal",
+      "function": "Left-eye horizontal movement",
+      "controller": "Pololu Mini Maestro 12-channel",
+      "function_status": "operator_confirmed",
+      "geometry_status": "unmeasured_proxy",
+      "pulse_to_si": null,
+      "increasing_decreasing_effect": "decreasing looks right; increasing looks left",
+      "evidence": "hardware/motor-map.md (operator observations 2026-08-28)",
+      "connector_pinout": null
+    },
+    {
+      "channel": 11,
+      "joint": "right_mouth_corner",
+      "function": "Right mouth corner, vertical smile/frown",
+      "controller": "Pololu Mini Maestro 12-channel",
+      "function_status": "operator_confirmed",
+      "geometry_status": "unmeasured_proxy",
+      "pulse_to_si": null,
+      "increasing_decreasing_effect": "decreasing raises (smile); increasing lowers (frown)",
+      "evidence": "hardware/motor-map.md (operator observations 2026-08-28)",
+      "connector_pinout": null
+    }
+  ],
+  "body_actuators": [
+    {
+      "joint": "left_shoulder_pitch",
+      "function": "left shoulder pitch hypothesis",
+      "channel": null,
+      "controller": null,
+      "motor_model": null,
+      "connector_pinout": null,
+      "status": "hypothesis",
+      "evidence": "visual joint region in user-supplied photograph; axis, mechanism and actuator existence not verified"
+    },
+    {
+      "joint": "left_elbow_pitch",
+      "function": "left elbow pitch hypothesis",
+      "channel": null,
+      "controller": null,
+      "motor_model": null,
+      "connector_pinout": null,
+      "status": "hypothesis",
+      "evidence": "visual joint region in user-supplied photograph; axis, mechanism and actuator existence not verified"
+    },
+    {
+      "joint": "left_hip_pitch",
+      "function": "left hip pitch hypothesis",
+      "channel": null,
+      "controller": null,
+      "motor_model": null,
+      "connector_pinout": null,
+      "status": "hypothesis",
+      "evidence": "visual joint region in user-supplied photograph; axis, mechanism and actuator existence not verified"
+    },
+    {
+      "joint": "left_knee_pitch",
+      "function": "left knee pitch hypothesis",
+      "channel": null,
+      "controller": null,
+      "motor_model": null,
+      "connector_pinout": null,
+      "status": "hypothesis",
+      "evidence": "visual joint region in user-supplied photograph; axis, mechanism and actuator existence not verified"
+    },
+    {
+      "joint": "left_ankle_pitch",
+      "function": "left ankle pitch hypothesis",
+      "channel": null,
+      "controller": null,
+      "motor_model": null,
+      "connector_pinout": null,
+      "status": "hypothesis",
+      "evidence": "visual joint region in user-supplied photograph; axis, mechanism and actuator existence not verified"
+    },
+    {
+      "joint": "right_shoulder_pitch",
+      "function": "right shoulder pitch hypothesis",
+      "channel": null,
+      "controller": null,
+      "motor_model": null,
+      "connector_pinout": null,
+      "status": "hypothesis",
+      "evidence": "visual joint region in user-supplied photograph; axis, mechanism and actuator existence not verified"
+    },
+    {
+      "joint": "right_elbow_pitch",
+      "function": "right elbow pitch hypothesis",
+      "channel": null,
+      "controller": null,
+      "motor_model": null,
+      "connector_pinout": null,
+      "status": "hypothesis",
+      "evidence": "visual joint region in user-supplied photograph; axis, mechanism and actuator existence not verified"
+    },
+    {
+      "joint": "right_hip_pitch",
+      "function": "right hip pitch hypothesis",
+      "channel": null,
+      "controller": null,
+      "motor_model": null,
+      "connector_pinout": null,
+      "status": "hypothesis",
+      "evidence": "visual joint region in user-supplied photograph; axis, mechanism and actuator existence not verified"
+    },
+    {
+      "joint": "right_knee_pitch",
+      "function": "right knee pitch hypothesis",
+      "channel": null,
+      "controller": null,
+      "motor_model": null,
+      "connector_pinout": null,
+      "status": "hypothesis",
+      "evidence": "visual joint region in user-supplied photograph; axis, mechanism and actuator existence not verified"
+    },
+    {
+      "joint": "right_ankle_pitch",
+      "function": "right ankle pitch hypothesis",
+      "channel": null,
+      "controller": null,
+      "motor_model": null,
+      "connector_pinout": null,
+      "status": "hypothesis",
+      "evidence": "visual joint region in user-supplied photograph; axis, mechanism and actuator existence not verified"
+    }
+  ]
+}

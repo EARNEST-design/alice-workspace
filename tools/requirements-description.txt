@@ -1,0 +1,4 @@
+numpy==2.5.3
+pytest==9.1.1
+xacro==2.1.1
+urdf-parser-py==0.0.4

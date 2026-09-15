@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Alice — assembly study</title>
+<style>
+:root{color-scheme:light;font-family:system-ui,sans-serif;color:#293838;background:#f3f1eb}
+*{box-sizing:border-box}body{margin:0}header{padding:24px 32px 18px;border-bottom:1px solid #d7dbd4;display:flex;justify-content:space-between;align-items:center;gap:20px}
+h1{font-size:25px;font-weight:550;letter-spacing:-1px;margin:4px 0}.eyebrow{font-size:11px;letter-spacing:2px;text-transform:uppercase;color:#607472}.tag{font-size:12px;padding:8px 12px;border:1px solid #c4cdc5;border-radius:30px;white-space:nowrap}
+main{display:grid;grid-template-columns:minmax(0,1fr) 290px;max-width:1450px;margin:auto}.stage{position:relative;min-width:0}#viewport{height:660px;width:100%;touch-action:none}canvas{display:block;width:100%;height:100%}.caption{position:absolute;left:26px;bottom:24px;font-size:12px;color:#586b67}.scale{position:absolute;top:24px;left:26px;font-size:13px;line-height:1.7}
+aside{padding:26px 24px;border-left:1px solid #d7dbd4;display:flex;flex-direction:column;gap:23px;background:#faf9f5}h2{font-size:13px;font-weight:600;margin:0 0 12px}label{display:block;font-size:12px;margin-bottom:7px}select{max-width:100%;width:100%;background:transparent;border:1px solid #bdc8c0;border-radius:7px;padding:10px;color:inherit;font:inherit;font-size:13px}input[type=range]{width:100%;accent-color:#be602d}button,a.action{font:inherit;font-size:12px;border:1px solid #bdc8c0;background:transparent;border-radius:7px;padding:8px 11px;color:inherit;cursor:pointer;text-decoration:none;display:inline-block}button:hover,a.action:hover{background:#e6ebe4}.buttons{display:flex;gap:7px;flex-wrap:wrap}.detail{font-size:12px;line-height:1.7;color:#586b67;min-height:96px}.value{font-variant-numeric:tabular-nums;float:right;color:#293838}hr{width:100%;border:0;border-top:1px solid #d7dbd4;margin:0}.legend{font-size:12px;line-height:1.9}.dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px}.known{background:#388575}.unknown{background:#bd672c}.small{font-size:12px;color:#586b67;line-height:1.6;margin:0}.check{display:flex;align-items:center;gap:7px;font-size:12px}.check input{accent-color:#388575}#error{color:#a43f32;font-size:13px;padding:18px;display:none}details{max-width:1450px;margin:auto;padding:20px 30px;border-top:1px solid #d7dbd4}summary{cursor:pointer;font-size:13px}table{border-collapse:collapse;width:100%;font-size:12px;margin-top:18px}th,td{text-align:left;border-bottom:1px solid #d7dbd4;padding:9px 10px;vertical-align:top;overflow-wrap:anywhere}th{color:#586b67;font-weight:500}footer{padding:16px 30px;font-size:11px;color:#586b67}.live{font-size:12px;min-height:18px}
+@media(max-width:800px){header{padding:18px;flex-wrap:wrap}main{grid-template-columns:1fr}#viewport{height:480px}aside{border-left:0;border-top:1px solid #d7dbd4;display:grid;grid-template-columns:1fr 1fr;gap:22px}.detail{min-height:0}aside hr{display:none}details{padding:20px 15px}}
+@media(max-width:460px){aside{grid-template-columns:1fr}#viewport{height:440px}h1{font-size:23px}.tag{font-size:11px}th,td{padding:7px 4px}.caption{left:16px;font-size:11px}.scale{left:16px}}
+</style>
+<script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/"}}</script>
+</head>
+<body>
+<header><div><div class="eyebrow">Alice robotics / reassembly planning</div><h1>Body + head assembly study</h1></div><span class="tag">v0.1 · Approximate geometry</span></header>
+<main>
+<section class="stage" aria-label="Interactive 3D robot model">
+  <div class="scale">Assumed height <strong id="height-label"></strong><br><span class="small">Robot coordinates: X forward · Y left · Z up</span></div>
+  <div id="viewport" role="img" aria-label="Articulated humanoid with pale shells, orange joints, dark feet and a schematic expressive head"></div>
+  <div class="caption">Drag to orbit · Scroll to zoom · Select a joint to inspect its movement</div>
+  <div id="error" role="alert"></div>
+</section>
+<aside>
+  <section><h2>Inspect a joint</h2><label for="joint-select">Head / face / body</label><select id="joint-select"></select>
+    <div style="margin-top:17px"><label for="joint-angle">Preview position <output id="joint-value" class="value"></output></label><input id="joint-angle" type="range" value="0"></div>
+    <div id="joint-detail" class="detail"></div><p class="small">Slider ranges are illustrative. They are not calibrated motor limits.</p>
+  </section>
+  <hr>
+  <section><h2>Pose & view</h2><div class="buttons"><button id="neutral">Neutral</button><button id="tucked">Tucked arms</button><button id="front">Front</button><button id="three-quarter">3/4 view</button></div>
+    <label class="check" style="margin-top:15px"><input type="checkbox" id="show-joints" checked>Joint centers</label>
+    <p id="pose-status" class="live" aria-live="polite">Neutral visualization pose</p>
+  </section>
+  <hr>
+  <section><h2>Evidence</h2><div class="legend"><span class="dot known"></span>11 mapped head/face functions<br><span class="dot unknown"></span>10 hypothetical body hinges</div><p class="small" style="margin-top:8px">Body motor IDs and connectors are unassigned. All pivot positions are estimates.</p></section>
+  <section><a class="action" href="alice.urdf" download>Download expanded URDF</a><p class="small" style="margin-top:9px">Display model only · No hardware connection</p></section>
+</aside>
+</main>
+<details><summary>Motor register — known functions and open assignments</summary><table><thead><tr><th>Joint / function</th><th>Channel</th><th>Evidence</th></tr></thead><tbody id="motor-register"></tbody></table></details>
+<footer>Original schematic geometry derived from the supplied photograph and local motor notes. Facial parts are rigid proxies; physical wiring and linkage geometry require inspection.</footer>
+<script id="model-data" type="application/json">__ALICE_MODEL_JSON__</script>
+<script type="module">
+try {
+const THREE = await import('three');
+const { OrbitControls } = await import('three/addons/controls/OrbitControls.js');
+const data = JSON.parse(document.getElementById('model-data').textContent);
+const scale = data.height_m / .62;
+const viewport = document.getElementById('viewport');
+const scene = new THREE.Scene(); scene.background = new THREE.Color('#f3f1eb');
+const camera = new THREE.PerspectiveCamera(35, 1, .005*scale, 20*scale); camera.up.set(0,0,1);
+const renderer = new THREE.WebGLRenderer({antialias:true, preserveDrawingBuffer:true});
+renderer.setPixelRatio(Math.min(devicePixelRatio,2)); renderer.shadowMap.enabled=true;
+renderer.shadowMap.type=THREE.PCFSoftShadowMap; viewport.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera,renderer.domElement); controls.target.set(0,0,.31*scale);
+controls.minDistance=.16*scale; controls.maxDistance=3*scale; controls.maxPolarAngle=Math.PI*.52;
+const hemi = new THREE.HemisphereLight('#fff8ee','#829289',2.7); hemi.position.set(0,0,2);scene.add(hemi);
+const key = new THREE.DirectionalLight('#fff4e8',3.0);key.position.set(1,-.8,1.6);key.castShadow=true;
+key.shadow.mapSize.set(2048,2048);key.shadow.camera.left=-scale;key.shadow.camera.right=scale;key.shadow.camera.top=scale;key.shadow.camera.bottom=-scale;key.shadow.camera.near=.1;key.shadow.camera.far=10;key.shadow.bias=-.0003;scene.add(key);
+const ground = new THREE.Mesh(new THREE.PlaneGeometry(3*scale,3*scale),new THREE.MeshStandardMaterial({color:'#e1e5dd',roughness:1}));ground.position.z=-.001*scale;ground.receiveShadow=true;scene.add(ground);
+const grid=new THREE.GridHelper(1.2*scale,12,'#bac7bc','#d1d8ce');grid.rotation.x=Math.PI/2;grid.position.z=-.0005*scale;scene.add(grid);
+const frames = new Map();
+for(const link of data.links){
+  const group=new THREE.Group();group.name=link.name;frames.set(link.name,group);
+  for(const v of link.visuals){
+    const g=v.geometry;let geometry;
+    if(g.type==='box') geometry=new THREE.BoxGeometry(...g.size);
+    else if(g.type==='sphere') geometry=new THREE.SphereGeometry(g.radius,40,24);
+    else if(g.type==='cylinder'){geometry=new THREE.CylinderGeometry(g.radius,g.radius,g.length,40);geometry.rotateX(Math.PI/2);}
+    else throw new Error('Unsupported URDF visual '+g.type);
+    const material=new THREE.MeshStandardMaterial({color:new THREE.Color(...v.color.slice(0,3)),roughness:.57,metalness:.08});
+    const mesh=new THREE.Mesh(geometry,material);mesh.position.fromArray(v.xyz);
+    mesh.rotation.set(...v.rpy,'ZYX');mesh.castShadow=true;mesh.receiveShadow=true;group.add(mesh);
+  }
+}
+const poses=new Map();const joints=new Map(data.joints.map(j=>[j.name,j]));
+const records=new Map([...data.register.head_actuators,...data.register.body_actuators].map(r=>[r.joint,r]));
+const markers=[];
+for(const j of data.joints){
+  const node=frames.get(j.child);node.position.fromArray(j.xyz);node.rotation.set(...j.rpy,'ZYX');frames.get(j.parent).add(node);poses.set(j.name,0);
+  if(j.type!=='fixed' && !j.mimic){
+    const marker=new THREE.Mesh(new THREE.SphereGeometry(.005*scale,18,12),new THREE.MeshBasicMaterial({color:records.get(j.name).channel===null?'#bd672c':'#388575',depthTest:false,transparent:true,opacity:.8}));
+    marker.renderOrder=5;node.add(marker);markers.push({mesh:marker,joint:j.name});
+  }
+}
+scene.add(frames.get('base_link'));
+const selectedAxes=new THREE.AxesHelper(.07*scale);selectedAxes.material.depthTest=false;selectedAxes.renderOrder=6;
+const select=document.getElementById('joint-select');const slider=document.getElementById('joint-angle');
+const valueLabel=document.getElementById('joint-value');const detail=document.getElementById('joint-detail');
+function label(name){return name.replaceAll('_',' ');}
+for(const [groupName,items] of [['Head & face — mapped functions',data.register.head_actuators],['Body — hypothetical hinges',data.register.body_actuators]]){
+  const group=document.createElement('optgroup');group.label=groupName;
+  for(const r of items){const option=document.createElement('option');option.value=r.joint;option.textContent=(r.channel===null?'?':`CH ${r.channel}`)+' · '+label(r.joint);group.appendChild(option);}select.appendChild(group);
+}
+function updatePose(){
+  for(const j of data.joints){
+    const node=frames.get(j.child);node.position.fromArray(j.xyz);node.quaternion.setFromEuler(new THREE.Euler(...j.rpy,'ZYX'));
+    const value=j.mimic ? poses.get(j.mimic.joint)*j.mimic.multiplier+j.mimic.offset : poses.get(j.name);
+    if(j.type==='revolute') node.quaternion.multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(...j.axis),value));
+    if(j.type==='prismatic') node.position.add(new THREE.Vector3(...j.axis).applyQuaternion(node.quaternion).multiplyScalar(value));
+  }
+  scene.updateMatrixWorld(true);
+}
+function updateValue(){const j=joints.get(select.value);const value=poses.get(j.name);valueLabel.textContent=j.type==='prismatic'?(value*1000).toFixed(1)+' mm':(value*180/Math.PI).toFixed(1)+'°';slider.value=String(value);}
+function chooseJoint(){
+  const j=joints.get(select.value);const r=records.get(j.name);slider.min=j.limit.lower;slider.max=j.limit.upper;slider.step=(j.limit.upper-j.limit.lower)/200;updateValue();
+  frames.get(j.child).add(selectedAxes);
+  detail.textContent=r.channel===null?'Body joint hypothesis. Controller, motor ID, axis and connector are unverified.':`Maestro channel ${r.channel} · ${r.function}. Function confirmed; pivot and movement geometry unmeasured.`;
+  if(r.increasing_decreasing_effect){const p=document.createElement('div');p.textContent='Recorded PWM effect: '+r.increasing_decreasing_effect+'.';detail.appendChild(p);}
+}
+select.addEventListener('change',chooseJoint);
+slider.addEventListener('input',()=>{poses.set(select.value,Number(slider.value));updateValue();updatePose();document.getElementById('pose-status').textContent='Previewing '+label(select.value);});
+document.getElementById('neutral').onclick=()=>{for(const key of poses.keys())poses.set(key,0);updatePose();updateValue();document.getElementById('pose-status').textContent='Neutral visualization pose';};
+document.getElementById('tucked').onclick=()=>{for(const key of poses.keys())poses.set(key,0);for(const side of ['left','right']){poses.set(side+'_shoulder_pitch',.35);poses.set(side+'_elbow_pitch',1.2);}updatePose();updateValue();document.getElementById('pose-status').textContent='Illustrative tucked-arm pose';};
+function view(front=false){camera.position.set(1.13*scale,front?0:-.86*scale,.60*scale);controls.target.set(0,0,.31*scale);controls.update();}
+document.getElementById('front').onclick=()=>view(true);document.getElementById('three-quarter').onclick=()=>view(false);
+document.getElementById('show-joints').onchange=event=>{for(const marker of markers)marker.mesh.visible=event.target.checked;selectedAxes.visible=event.target.checked;};
+const tbody=document.getElementById('motor-register');
+for(const r of records.values()){const tr=document.createElement('tr');for(const text of [label(r.joint),r.channel===null?'Unassigned':String(r.channel),r.channel===null?'Hypothesis from photograph':'Observed function; geometry unmeasured']){const td=document.createElement('td');td.textContent=text;tr.appendChild(td);}tbody.appendChild(tr);}
+document.getElementById('height-label').textContent=data.height_m.toFixed(2)+' m';
+new ResizeObserver(()=>{camera.aspect=viewport.clientWidth/viewport.clientHeight;camera.updateProjectionMatrix();renderer.setSize(viewport.clientWidth,viewport.clientHeight);}).observe(viewport);
+chooseJoint();updatePose();view();
+renderer.setAnimationLoop(()=>{controls.update();renderer.render(scene,camera);});
+}catch(error){document.getElementById('error').style.display='block';document.getElementById('error').textContent='3D preview could not load. Check WebGL and CDN connectivity. '+error.message;console.error(error);}
+</script>
+</body></html>

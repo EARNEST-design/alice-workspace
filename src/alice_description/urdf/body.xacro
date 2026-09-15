@@ -1,0 +1,99 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+  <xacro:macro name="arm" params="side sign">
+    <link name="${side}_upper_arm">
+      <xacro:sphere_visual radius="${0.033*s}" xyz="0 0 0" material="orange"/>
+      <xacro:cylinder_visual radius="${0.023*s}" length="${upper_arm*0.72}"
+        xyz="0 0 ${-upper_arm/2}" material="shell"/>
+      <xacro:box_collision size="${0.052*s} ${0.052*s} ${upper_arm}"
+        xyz="0 0 ${-upper_arm/2}"/>
+    </link>
+    <xacro:hinge name="${side}_shoulder_pitch" parent="torso" child="${side}_upper_arm"
+      xyz="0 ${sign*shoulder_spacing/2} ${shoulder_height}" axis="0 -1 0" lower="-1.2" upper="1.5"/>
+    <link name="${side}_forearm">
+      <xacro:sphere_visual radius="${0.026*s}" xyz="0 0 0" material="orange"/>
+      <xacro:cylinder_visual radius="${0.022*s}" length="${forearm*0.75}"
+        xyz="0 0 ${-forearm/2}" material="shell"/>
+      <xacro:cylinder_visual radius="${0.023*s}" length="${0.017*s}"
+        xyz="0 0 ${-forearm+0.01*s}" material="dark"/>
+      <xacro:box_collision size="${0.05*s} ${0.05*s} ${forearm}" xyz="0 0 ${-forearm/2}"/>
+    </link>
+    <xacro:hinge name="${side}_elbow_pitch" parent="${side}_upper_arm" child="${side}_forearm"
+      xyz="0 0 ${-upper_arm}" axis="0 -1 0" lower="0" upper="1.9"/>
+    <link name="${side}_hand">
+      <xacro:sphere_visual radius="${0.025*s}" xyz="0 0 ${-0.012*s}" material="shell"/>
+      <xacro:box_visual size="${0.035*s} ${0.033*s} ${0.028*s}"
+        xyz="${0.006*s} 0 ${-0.028*s}" material="shell"/>
+      <xacro:sphere_visual radius="${0.011*s}" xyz="${0.018*s} ${-sign*0.02*s} ${-0.01*s}" material="shell"/>
+    </link>
+    <xacro:fixed_joint name="${side}_wrist_fixed" parent="${side}_forearm" child="${side}_hand" xyz="0 0 ${-forearm}"/>
+  </xacro:macro>
+
+  <xacro:macro name="leg" params="side sign">
+    <link name="${side}_thigh">
+      <xacro:sphere_visual radius="${0.033*s}" xyz="0 0 0" material="orange"/>
+      <xacro:box_visual size="${0.065*s} ${0.064*s} ${thigh*0.72}"
+        xyz="0 0 ${-thigh/2}" material="shell"/>
+      <xacro:box_collision size="${0.07*s} ${0.07*s} ${thigh}" xyz="0 0 ${-thigh/2}"/>
+    </link>
+    <xacro:hinge name="${side}_hip_pitch" parent="pelvis" child="${side}_thigh"
+      xyz="0 ${sign*hip_spacing/2} 0" axis="0 -1 0" lower="-0.6" upper="1.2"/>
+    <link name="${side}_shin">
+      <xacro:cylinder_visual radius="${0.032*s}" length="${0.073*s}"
+        xyz="0 0 0" rpy="${pi/2} 0 0" material="dark"/>
+      <xacro:cylinder_visual radius="${0.024*s}" length="${0.006*s}"
+        xyz="0 ${sign*0.039*s} 0" rpy="${pi/2} 0 0" material="orange"/>
+      <xacro:box_visual size="${0.06*s} ${0.062*s} ${shin*0.7}"
+        xyz="${0.003*s} 0 ${-shin/2}" material="shell"/>
+      <xacro:box_collision size="${0.07*s} ${0.073*s} ${shin}" xyz="0 0 ${-shin/2}"/>
+    </link>
+    <xacro:hinge name="${side}_knee_pitch" parent="${side}_thigh" child="${side}_shin"
+      xyz="0 0 ${-thigh}" axis="0 1 0" lower="0" upper="1.8"/>
+    <link name="${side}_foot">
+      <xacro:cylinder_visual radius="${0.022*s}" length="${0.068*s}"
+        xyz="0 0 0" rpy="${pi/2} 0 0" material="orange"/>
+      <xacro:box_visual size="${0.13*s} ${0.087*s} ${0.033*s}"
+        xyz="${0.022*s} 0 ${-0.0115*s}" material="dark"/>
+      <xacro:box_visual size="${0.132*s} ${0.088*s} ${0.007*s}"
+        xyz="${0.022*s} 0 ${-ankle+0.0035*s}" material="orange"/>
+      <xacro:box_visual size="${0.069*s} ${0.07*s} ${0.025*s}"
+        xyz="${0.011*s} 0 ${0.004*s}" material="shell"/>
+      <xacro:box_collision size="${0.132*s} ${0.088*s} ${ankle+0.017*s}"
+        xyz="${0.022*s} 0 ${(-ankle+0.017*s)/2}"/>
+    </link>
+    <xacro:hinge name="${side}_ankle_pitch" parent="${side}_shin" child="${side}_foot"
+      xyz="0 0 ${-shin}" axis="0 1 0" lower="-0.4" upper="0.4"/>
+    <link name="${side}_sole"/>
+    <xacro:fixed_joint name="${side}_sole_fixed" parent="${side}_foot" child="${side}_sole"
+      xyz="${0.022*s} 0 ${-ankle}"/>
+  </xacro:macro>
+
+  <xacro:macro name="body" params="">
+    <link name="base_link"/>
+    <link name="pelvis">
+      <xacro:box_visual size="${0.10*s} ${0.14*s} ${0.04*s}"
+        xyz="0 0 ${0.029*s}" material="shell"/>
+      <xacro:box_visual size="${0.108*s} ${0.16*s} ${0.016*s}"
+        xyz="0 0 ${0.057*s}" material="dark"/>
+      <xacro:box_collision size="${0.11*s} ${0.16*s} ${0.065*s}"
+        xyz="0 0 ${0.0325*s}"/>
+    </link>
+    <xacro:fixed_joint name="base_to_pelvis" parent="base_link" child="pelvis" xyz="0 0 ${ankle+shin+thigh}"/>
+    <!-- No evidence of a waist actuator: keep the waist rigid. -->
+    <link name="torso">
+      <xacro:box_visual size="${0.10*s} ${0.175*s} ${0.108*s}"
+        xyz="0 0 ${0.120*s}" material="shell"/>
+      <xacro:box_visual size="${0.092*s} ${0.184*s} ${0.020*s}"
+        xyz="0 0 ${0.178*s}" material="orange"/>
+      <xacro:box_visual size="${0.006*s} ${0.124*s} ${0.014*s}"
+        xyz="${0.054*s} 0 ${0.084*s}" material="dark"/>
+      <xacro:cylinder_visual radius="${0.024*s}" length="${0.004*s}"
+        xyz="${0.053*s} 0 ${0.138*s}" rpy="0 ${pi/2} 0" material="dark"/>
+      <xacro:box_collision size="${0.11*s} ${0.185*s} ${0.128*s}"
+        xyz="0 0 ${0.127*s}"/>
+    </link>
+    <xacro:fixed_joint name="waist_fixed" parent="pelvis" child="torso" xyz="0 0 0"/>
+    <xacro:arm side="left" sign="1"/><xacro:arm side="right" sign="-1"/>
+    <xacro:leg side="left" sign="1"/><xacro:leg side="right" sign="-1"/>
+  </xacro:macro>
+</robot>

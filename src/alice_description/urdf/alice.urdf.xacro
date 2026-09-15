@@ -1,0 +1,22 @@
+<?xml version="1.0"?>
+<robot name="alice_planning_v1" xmlns:xacro="http://www.ros.org/wiki/xacro">
+  <!-- Visualization only: every dimension/axis/range is unmeasured. -->
+  <xacro:arg name="height_m" default="0.62"/>
+  <xacro:property name="s" value="${float('$(arg height_m)') / 0.62}"/>
+  <xacro:property name="g" value="${xacro.load_yaml('../config/geometry.yaml')}"/>
+  <xacro:property name="ankle" value="${g.ankle_height*s}"/>
+  <xacro:property name="shin" value="${g.shin_length*s}"/>
+  <xacro:property name="thigh" value="${g.thigh_length*s}"/>
+  <xacro:property name="hip_spacing" value="${g.hip_spacing*s}"/>
+  <xacro:property name="hip_to_neck" value="${g.hip_to_neck*s}"/>
+  <xacro:property name="neck" value="${g.neck_length*s}"/>
+  <xacro:property name="head_radius" value="${g.head_radius*s}"/>
+  <xacro:property name="shoulder_height" value="${g.shoulder_height_above_hip*s}"/>
+  <xacro:property name="shoulder_spacing" value="${g.shoulder_spacing*s}"/>
+  <xacro:property name="upper_arm" value="${g.upper_arm_length*s}"/>
+  <xacro:property name="forearm" value="${g.forearm_length*s}"/>
+  <xacro:include filename="primitives.xacro"/>
+  <xacro:include filename="body.xacro"/>
+  <xacro:include filename="head.xacro"/>
+  <xacro:body/><xacro:head_assembly/>
+</robot>
