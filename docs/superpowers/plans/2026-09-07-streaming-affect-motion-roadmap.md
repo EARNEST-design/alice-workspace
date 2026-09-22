@@ -1,5 +1,11 @@
 # Streaming Affect Motion Roadmap
 
+For the next session after the Tasks 1–5 streaming review, start with
+[the coordinated-motion handoff](2026-09-07-ml-architecture-next-session.md)
+and [ADR 0005](../../architecture/0005-coordinated-streaming-motion-learning.md).
+That handoff prioritizes review repairs and an integrated baseline, followed by
+data/evaluation and a small ACT-style challenger. It extends the sequence below.
+
 The approved design is split into independently testable plans:
 
 1. `2026-09-07-affect-motion-foundations.md` — integrate the existing Phase 2
