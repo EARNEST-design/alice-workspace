@@ -6,6 +6,14 @@ The immediate objective is to build a reproducible pipeline joining facial landm
 
 ## Current status
 
+- English/Cantonese live conversation now works through ReSpeaker USB, hosted
+  Qwen ASR, remote Qwen replies and accepted local female voices. The current
+  admission backend is temporarily Qwen; a smaller dedicated model is the next
+  evaluation priority. See [the conversation runbook](docs/conversation-bench.md).
+- Resume with the [September 22 handoff](docs/checkpoints/2026-09-22-conversation-face-handoff.md)
+  and [speech/face plan](docs/superpowers/plans/2026-09-22-conversation-face-integration.md).
+  Synchronized mouth/face and ROS foundations exist separately; the live
+  conversation-to-servos connection and physical expression acceptance are next.
 - Phase 2 full-range actuator characterization and initial live mimicry bring-up
   were completed on 2026-09-02; see
   `docs/experiments/2026-09-02-mimicry-bringup.md`.
@@ -36,7 +44,7 @@ available through `alice-speak`. See [the speech runbook](docs/speech.md) and
 
 ## Next decisions
 
-1. Confirm the GitHub organization slug and repository visibility, then create the new remote.
+1. Qualify a small speak/wait model using the [dedicated admission plan](docs/superpowers/plans/2026-09-22-small-speech-admission.md).
 2. Photograph/identify the motor drivers and trace their connections to the Maestro.
 3. Share any additional repositories and datasets before choosing interfaces or ML frameworks.
 4. Define measurable success criteria for face mesh, emotion inference, and motor expression.
