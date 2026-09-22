@@ -1,0 +1,476 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Alice conversation bench</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #07100f;
+      --panel: rgba(17, 31, 29, .84);
+      --panel-2: #0d1c1a;
+      --line: rgba(166, 225, 205, .14);
+      --muted: #8ba49c;
+      --text: #e5f1ed;
+      --mint: #6de0b6;
+      --cyan: #6ccbe0;
+      --amber: #e7ba67;
+      --red: #f17f79;
+      --radius: 18px;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: var(--text);
+      background:
+        radial-gradient(circle at 15% -10%, rgba(31, 115, 91, .34), transparent 34rem),
+        radial-gradient(circle at 100% 16%, rgba(38, 92, 108, .2), transparent 30rem),
+        var(--bg);
+      font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    button, select { font: inherit; }
+    main { width: min(1440px, calc(100% - 32px)); margin: 0 auto; padding: 26px 0 44px; }
+    header { display: flex; gap: 20px; align-items: flex-start; justify-content: space-between; margin-bottom: 18px; }
+    .eyebrow { color: var(--mint); text-transform: uppercase; letter-spacing: .16em; font-size: 11px; font-weight: 750; }
+    h1 { margin: 4px 0 3px; font-size: clamp(25px, 4vw, 42px); line-height: 1.12; letter-spacing: -.03em; }
+    .subtle, .detail, .metric-label { color: var(--muted); }
+    .connection { display: flex; align-items: center; gap: 9px; padding: 10px 13px; border: 1px solid var(--line); border-radius: 999px; background: var(--panel); white-space: nowrap; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--amber); box-shadow: 0 0 0 4px rgba(231, 186, 103, .1); }
+    .dot.live { background: var(--mint); box-shadow: 0 0 0 4px rgba(109, 224, 182, .1); }
+    .dot.stale { background: var(--red); box-shadow: 0 0 0 4px rgba(241, 127, 121, .1); }
+    .controls, .panel { border: 1px solid var(--line); background: var(--panel); backdrop-filter: blur(18px); box-shadow: 0 18px 45px rgba(0, 0, 0, .18); }
+    .controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 12px; border-radius: var(--radius); margin-bottom: 18px; }
+    select, button { border-radius: 11px; border: 1px solid var(--line); color: var(--text); background: #132723; padding: 9px 13px; }
+    button { cursor: pointer; font-weight: 680; }
+    button:hover { border-color: rgba(109, 224, 182, .48); }
+    button.primary { color: #032017; border-color: transparent; background: var(--mint); }
+    button.stop { color: #ffdeda; border-color: rgba(241, 127, 121, .42); background: rgba(112, 34, 32, .45); }
+    .control-result { flex: 1 1 240px; text-align: right; min-height: 1.5em; }
+    .layout { display: grid; grid-template-columns: minmax(0, 1.8fr) minmax(280px, .85fr); gap: 18px; }
+    .panel { border-radius: var(--radius); padding: 17px; }
+    .panel h2 { margin: 0 0 13px; font-size: 13px; text-transform: uppercase; letter-spacing: .1em; color: #b9cbc5; }
+    .pipeline { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 9px; }
+    .stage { position: relative; min-height: 106px; padding: 12px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 13px; overflow: hidden; }
+    .stage::before { content: ""; position: absolute; inset: 0 auto 0 0; width: 2px; background: #36504a; }
+    .stage[data-active="true"]::before { background: var(--mint); box-shadow: 0 0 16px var(--mint); }
+    .stage-name { color: var(--muted); font-size: 11px; font-weight: 760; letter-spacing: .1em; text-transform: uppercase; }
+    .stage-state { margin: 8px 0 3px; font-size: 16px; font-weight: 720; word-break: break-word; }
+    .detail { font-size: 12px; overflow-wrap: anywhere; }
+    .latency { position: absolute; top: 11px; right: 11px; color: var(--cyan); font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .meters { display: grid; grid-template-columns: repeat(3, 1fr); gap: 11px; margin-top: 14px; }
+    .metric { padding: 11px; border-radius: 12px; background: rgba(5, 16, 15, .62); border: 1px solid var(--line); }
+    .metric-head { display: flex; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+    .metric-value { color: #cce2db; font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .track { height: 7px; background: #1d302d; border-radius: 99px; overflow: hidden; }
+    .fill { height: 100%; width: 0; background: linear-gradient(90deg, var(--mint), var(--cyan)); border-radius: inherit; transition: width 100ms linear; }
+    .conversation { display: grid; grid-template-columns: 1fr 1fr; gap: 11px; margin-top: 14px; }
+    .speech { min-height: 148px; padding: 14px; border-radius: 13px; border: 1px solid var(--line); background: rgba(7, 18, 17, .72); }
+    .speech-label { display: flex; justify-content: space-between; color: var(--muted); text-transform: uppercase; letter-spacing: .1em; font-size: 10px; font-weight: 760; }
+    .speech-text { margin-top: 13px; font-size: 17px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .speech-text.partial { color: #b2c3bd; }
+    .speech-note { min-height: 1.5em; margin-top: 9px; color: var(--muted); font-size: 12px; }
+    .status-strip { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; margin-top: 11px; }
+    .status-item { padding: 10px 11px; background: #0b1917; border-radius: 11px; border: 1px solid var(--line); }
+    .status-item strong { display: block; margin-top: 2px; }
+    .timeline { max-height: 600px; overflow: auto; padding-right: 4px; }
+    .event { display: grid; grid-template-columns: 42px 1fr; gap: 9px; padding: 10px 1px; border-bottom: 1px solid var(--line); }
+    .event-sequence { color: var(--muted); font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .event-title { font-weight: 690; }
+    .event-detail { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+    .empty { color: var(--muted); padding: 18px 0; }
+    @media (max-width: 980px) { .layout { grid-template-columns: 1fr; } .pipeline { grid-template-columns: repeat(2, 1fr); } }
+    @media (max-width: 600px) { main { width: min(100% - 20px, 1440px); padding-top: 16px; } header { flex-direction: column; } .pipeline, .meters, .conversation, .status-strip { grid-template-columns: 1fr; } .control-result { text-align: left; } }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <div class="eyebrow">Attended audio lab</div>
+        <h1>Conversation bench</h1>
+        <div id="session-message" class="subtle">Idle · no session started</div>
+      </div>
+      <div class="connection"><span id="connection-dot" class="dot"></span><span id="connection-state">Connecting</span><span id="connection-age" class="subtle">—</span></div>
+    </header>
+
+    <section class="controls" aria-label="Bench controls">
+      <label for="mode" class="subtle">Mode</label>
+      <select id="mode"><option value="listen">Wake listening</option><option value="conversation">Conversation (wake required)</option></select>
+      <button id="start" class="primary" type="button">Start wake listening</button>
+      <button id="stop" class="stop" type="button">Stop</button>
+      <button id="replay" type="button">Synthetic replay (dry speaker by default)</button>
+      <span id="control-result" class="control-result subtle" role="status"></span>
+    </section>
+
+    <div class="layout">
+      <section class="panel">
+        <h2>Live chain</h2>
+        <div class="pipeline">
+          <article class="stage" data-stage="capture"><div class="stage-name">Capture</div><div id="stage-capture-state" class="stage-state">idle</div><div id="stage-capture-detail" class="detail">Awaiting session</div><div id="stage-capture-latency" class="latency"></div></article>
+          <article class="stage" data-stage="vad"><div class="stage-name">VAD</div><div id="stage-vad-state" class="stage-state">idle</div><div id="stage-vad-detail" class="detail">Awaiting audio</div><div id="stage-vad-latency" class="latency"></div></article>
+          <article class="stage" data-stage="asr"><div class="stage-name">ASR</div><div id="stage-asr-state" class="stage-state">idle</div><div id="stage-asr-detail" class="detail">Awaiting utterance</div><div id="stage-asr-latency" class="latency"></div></article>
+          <article class="stage" data-stage="quality"><div class="stage-name">Audio evidence</div><div id="stage-quality-state" class="stage-state">idle</div><div id="stage-quality-detail" class="detail">Awaiting analysis</div><div id="stage-quality-latency" class="latency"></div></article>
+          <article class="stage" data-stage="engagement"><div class="stage-name">Engagement</div><div id="stage-engagement-state" class="stage-state">inactive</div><div id="stage-engagement-detail" class="detail">Wake gate inactive</div><div id="stage-engagement-latency" class="latency"></div></article>
+          <article class="stage" data-stage="decision"><div class="stage-name">Decision</div><div id="stage-decision-state" class="stage-state">idle</div><div id="stage-decision-detail" class="detail">No turn admitted</div><div id="stage-decision-latency" class="latency"></div></article>
+          <article class="stage" data-stage="llm"><div class="stage-name">Reply model</div><div id="stage-llm-state" class="stage-state">idle</div><div id="stage-llm-detail" class="detail">Awaiting turn</div><div id="stage-llm-latency" class="latency"></div></article>
+          <article class="stage" data-stage="tts"><div class="stage-name">TTS</div><div id="stage-tts-state" class="stage-state">idle</div><div id="stage-tts-detail" class="detail">Queue empty</div><div id="stage-tts-latency" class="latency"></div></article>
+          <article class="stage" data-stage="output"><div class="stage-name">Output</div><div id="stage-output-state" class="stage-state">idle</div><div id="stage-output-detail" class="detail">Dry until enabled</div><div id="stage-output-latency" class="latency"></div></article>
+          <article class="stage" data-stage="ros"><div class="stage-name">ROS observer</div><div id="stage-ros-state" class="stage-state">disconnected</div><div id="stage-ros-detail" class="detail">No bridge heartbeat</div><div id="stage-ros-latency" class="latency"></div></article>
+        </div>
+
+        <div class="meters">
+          <div class="metric"><div class="metric-head"><span class="metric-label">RMS / peak</span><span id="level-value" class="metric-value">—</span></div><div class="track"><div id="level-fill" class="fill"></div></div></div>
+          <div class="metric"><div class="metric-head"><span class="metric-label">Speech probability</span><span id="probability-value" class="metric-value">—</span></div><div class="track"><div id="probability-fill" class="fill"></div></div></div>
+          <div class="metric"><div class="metric-head"><span class="metric-label">Endpoint countdown</span><span id="endpoint-value" class="metric-value">—</span></div><div class="track"><div id="endpoint-fill" class="fill"></div></div></div>
+        </div>
+
+        <div class="conversation">
+          <div class="speech"><div class="speech-label"><span>You</span><span><span id="detected-language">language —</span> · <span id="transcript-state">waiting</span></span></div><div id="transcript" class="speech-text partial">No transcript</div><div id="transcript-note" class="speech-note"></div></div>
+          <div class="speech"><div class="speech-label"><span>Alice</span><span id="reply-state">waiting</span></div><div id="reply" class="speech-text partial">No reply</div></div>
+        </div>
+        <div class="status-strip">
+          <div class="status-item"><span class="metric-label">Turn decision</span><strong id="turn-decision">No turn decision</strong><div id="turn-decision-note" class="detail"></div></div>
+          <div class="status-item"><span class="metric-label">Generation / utterance</span><strong id="identity">— / —</strong></div>
+          <div class="status-item"><span class="metric-label">Decision backend</span><strong id="decision-backend">Awaiting readiness</strong></div>
+          <div class="status-item"><span class="metric-label">ASR / language confidence</span><strong id="asr-confidence">Unknown / unknown</strong><div class="detail">The ASR service does not expose these scores</div></div>
+          <div class="status-item"><span class="metric-label">Speaker estimate</span><strong id="speaker-evidence">Awaiting audio analysis</strong><div class="detail">Window-local estimate; no speaker identity</div></div>
+          <div class="status-item"><span class="metric-label">Decision probabilities</span><strong id="decision-probability">Awaiting decision</strong><div class="detail">Decision evidence, not recognition accuracy</div></div>
+          <div class="status-item"><span class="metric-label">Configured ASR languages</span><strong id="asr-languages">Awaiting readiness event</strong></div>
+          <div class="status-item"><span class="metric-label">Speech language / voice</span><strong id="tts-voice">Awaiting synthesis event</strong></div>
+        </div>
+      </section>
+
+      <aside class="panel">
+        <h2>Bounded event timeline</h2>
+        <div id="timeline" class="timeline"><div id="timeline-empty" class="empty">No events received.</div></div>
+      </aside>
+    </div>
+  </main>
+
+  <script>
+  (() => {
+    'use strict';
+    const byId = id => document.getElementById(id);
+    const knownStages = new Set(['capture','vad','asr','quality','engagement','decision','llm','tts','output','ros']);
+    const activeStates = new Set([
+      'capture:active', 'vad:speech', 'vad:playback_guard', 'vad:reply_guard', 'vad:endpoint',
+      'quality:measuring', 'asr:uploading', 'asr:partial', 'decision:thinking', 'llm:requesting',
+      'llm:streaming', 'tts:generating', 'tts:streaming', 'output:submitting',
+      'ros:connected', 'ros:heartbeat'
+    ]);
+    const streamStaleMs = 3500;
+    let source = null;
+    let reconnectTimer = null;
+    let lastTransportAt = null;
+    let lastRosAt = null;
+    let replyGeneration = null;
+    let cursor = 0;
+    let sessionId = null;
+    let captureState = 'unknown';
+    let latestEngagement = null;
+
+    function text(id, value) { byId(id).textContent = String(value); }
+    function clamp(value) { return Math.max(0, Math.min(1, Number(value))); }
+    function meter(id, value) { byId(id).style.width = `${(clamp(value) * 100).toFixed(1)}%`; }
+    function latency(details) {
+      const value = details.latency_ms ?? details.endpoint_ms;
+      return typeof value === 'number' ? `${Math.round(value)} ms` : '';
+    }
+    function detail(details) {
+      for (const key of ['error','message','text']) {
+        if (typeof details[key] === 'string' && details[key]) return details[key];
+      }
+      return '';
+    }
+    function startLabel(mode) {
+      return mode === 'conversation'
+        ? 'Start conversation · wake required'
+        : 'Start wake listening';
+    }
+    function renderEngagement(event) {
+      const card = document.querySelectorAll('[data-stage="engagement"]')[0];
+      const details = event.details || {};
+      if (captureState === 'stopped') {
+        text('stage-engagement-state', 'inactive');
+        text('stage-engagement-detail', 'Wake gate inactive · microphone stopped');
+        text('stage-engagement-latency', '');
+        if (card) card.dataset.active = 'false';
+        return;
+      }
+      if (event.state === 'awake') {
+        text('stage-engagement-state', 'Wake window active');
+        text('stage-engagement-detail', detail(details) || 'Follow-ups enabled');
+        text('stage-engagement-latency', typeof details.remaining_seconds === 'number'
+          ? `${details.remaining_seconds.toFixed(1)} s` : '');
+        if (card) card.dataset.active = 'true';
+        return;
+      }
+      if (['waiting','expired'].includes(event.state)) {
+        text('stage-engagement-state', 'Waiting for Alice / 愛麗絲');
+        text('stage-engagement-detail', detail(details) || 'Say Alice, 愛麗絲, or 爱丽丝 to begin.');
+      } else {
+        text('stage-engagement-state', 'inactive');
+        text('stage-engagement-detail', detail(details) || 'Wake gate inactive');
+      }
+      text('stage-engagement-latency', '');
+      if (card) card.dataset.active = 'false';
+    }
+    function stageEvent(event) {
+      if (!knownStages.has(event.stage)) return;
+      if (event.stage === 'engagement') {
+        renderEngagement(event);
+        return;
+      }
+      text(`stage-${event.stage}-state`, event.state);
+      const description = detail(event.details || {});
+      if (description) text(`stage-${event.stage}-detail`, description);
+      text(`stage-${event.stage}-latency`, latency(event.details || {}));
+      const card = document.querySelectorAll(`[data-stage="${event.stage}"]`)[0];
+      if (card) card.dataset.active = String(activeStates.has(`${event.stage}:${event.state}`));
+    }
+    function addTimeline(event) {
+      const empty = byId('timeline-empty');
+      if (empty) empty.remove();
+      const row = document.createElement('div');
+      row.className = 'event';
+      const sequence = document.createElement('div');
+      sequence.className = 'event-sequence';
+      sequence.textContent = `#${event.sequence}`;
+      const body = document.createElement('div');
+      const title = document.createElement('div');
+      title.className = 'event-title';
+      title.textContent = `${event.stage} · ${event.state}`;
+      const description = document.createElement('div');
+      description.className = 'event-detail';
+      description.textContent = detail(event.details || {}) || 'state update';
+      body.append(title, description);
+      row.append(sequence, body);
+      const timeline = byId('timeline');
+      timeline.prepend(row);
+      while (timeline.children.length > 80 && timeline.lastElementChild) timeline.lastElementChild.remove();
+    }
+    function applyEvent(event, addToTimeline = true, live = true) {
+      if (!event || typeof event !== 'object' || !event.details) return;
+      cursor = Math.max(cursor, Number(event.sequence) || 0);
+      if (event.stage === 'capture') {
+        captureState = ['stopped','error'].includes(event.state) ? 'stopped' : event.state;
+      }
+      if (event.stage === 'engagement') latestEngagement = event;
+      stageEvent(event);
+      if (event.stage === 'capture' && latestEngagement) renderEngagement(latestEngagement);
+      const d = event.details;
+      if (typeof d.rms === 'number' || typeof d.peak === 'number') {
+        const rms = typeof d.rms === 'number' ? d.rms : 0;
+        const peak = typeof d.peak === 'number' ? d.peak : 0;
+        meter('level-fill', Math.max(rms, peak));
+        text('level-value', `${rms.toFixed(3)} / ${peak.toFixed(3)}`);
+      }
+      if (typeof d.probability === 'number') {
+        meter('probability-fill', d.probability);
+        text('probability-value', `${Math.round(clamp(d.probability) * 100)}%`);
+      }
+      if (typeof d.silence_ms === 'number') {
+        const remaining = Math.max(0, 300 - d.silence_ms);
+        meter('endpoint-fill', 1 - remaining / 300);
+        text('endpoint-value', `${Math.round(remaining)} ms`);
+      }
+      if (event.stage === 'asr') {
+        if (event.state === 'ready') {
+          const languages = Array.isArray(d.languages)
+            ? d.languages.filter(language => typeof language === 'string' && language)
+            : [];
+          text('asr-languages', languages.length ? languages.join(' · ') : 'Not reported by backend');
+        } else if (['unavailable','error'].includes(event.state)) {
+          text('asr-languages', 'Backend unavailable');
+        }
+        if (event.state === 'uploading') {
+          text('detected-language', 'detecting…');
+          text('decision-probability', 'Awaiting decision');
+          text('speaker-evidence', 'Awaiting audio analysis');
+          text('transcript-note', '');
+        }
+        if (['final','ignored'].includes(event.state)) {
+          text('detected-language', typeof d.language === 'string' && d.language ? d.language : 'not reported');
+          text('transcript-note', typeof d.message === 'string' ? d.message : '');
+        }
+        if (typeof d.text === 'string') {
+          text('transcript', d.text || d.message || 'No speech recognized');
+          text('transcript-state', event.state);
+          byId('transcript').className = `speech-text${['final','ignored'].includes(event.state) ? '' : ' partial'}`;
+        }
+      }
+      if (event.stage === 'quality' && d.evidence) {
+        const evidence = d.evidence;
+        const percent = value => typeof value === 'number' ? `${Math.round(value * 100)}%` : 'unknown';
+        const asrConfidence = percent(evidence.asr_confidence);
+        text('asr-confidence', `${asrConfidence[0].toUpperCase() + asrConfidence.slice(1)} / ${percent(evidence.language_confidence)}`);
+        const overlap = evidence.overlap;
+        const count = value => Number.isInteger(value) && value >= 0 ? value : 'unknown';
+        const seconds = value => typeof value === 'number' && Number.isFinite(value) && value >= 0
+          ? value.toFixed(2) : 'unknown';
+        text('speaker-evidence', overlap
+          ? `${count(overlap.max_simultaneous_speakers)} simultaneous · ${count(overlap.max_window_speakers)} local channels · ${seconds(overlap.overlap_seconds)} s overlap`
+          : 'Unknown · analysis unavailable');
+      }
+      if (event.stage === 'decision') {
+        if (typeof d.model === 'string') text('decision-backend', d.model);
+        text('turn-decision', typeof d.text === 'string' && d.text ? d.text : event.state);
+        text('turn-decision-note', typeof d.message === 'string' ? d.message : '');
+        text('decision-probability', typeof d.speak_probability === 'number'
+          ? `Speak ${Math.round(d.speak_probability * 100)}% · coherent ${Math.round(d.coherence_probability * 100)}%`
+          : 'No model score');
+      }
+      if (event.stage === 'llm') {
+        const generation = d.generation_id ?? null;
+        if (event.state === 'started' || generation !== replyGeneration) {
+          replyGeneration = generation;
+          text('reply', '');
+        }
+        if (typeof d.text === 'string') {
+          if (event.state === 'delta') {
+            byId('reply').textContent += d.text;
+          } else {
+            text('reply', d.text);
+          }
+        }
+        text('reply-state', event.state);
+        const complete = ['final','complete'].includes(event.state);
+        byId('reply').className = `speech-text${complete ? '' : ' partial'}`;
+      }
+      if (event.stage === 'tts') {
+        const voice = [d.language, d.voice].filter(value => typeof value === 'string' && value);
+        if (voice.length) text('tts-voice', voice.join(' · '));
+        else if (['unavailable','error'].includes(event.state)) text('tts-voice', 'Unavailable');
+      }
+      if (event.stage === 'ros') {
+        if (live && ['connected','heartbeat'].includes(event.state)) {
+          lastRosAt = Date.now();
+        } else {
+          lastRosAt = null;
+          if (!live && ['connected','heartbeat'].includes(event.state)) {
+            text('stage-ros-state', 'stale');
+            text('stage-ros-detail', 'Awaiting current bridge heartbeat');
+            const card = document.querySelectorAll('[data-stage="ros"]')[0];
+            if (card) card.dataset.active = 'false';
+          }
+        }
+      }
+      if (event.stage === 'session' && typeof d.message === 'string') text('session-message', d.message);
+      if (event.stage === 'session' && ['preparing','listening'].includes(event.state) && ['listen','conversation'].includes(d.mode)) {
+        byId('mode').value = d.mode;
+        text('start', startLabel(d.mode));
+      }
+      if ('generation_id' in d || 'utterance_id' in d) {
+        text('identity', `${d.generation_id ?? '—'} / ${d.utterance_id ?? '—'}`);
+      }
+      if (addToTimeline) addTimeline(event);
+    }
+    function renderSnapshot(snapshot) {
+      sessionId = typeof snapshot.session_id === 'string' ? snapshot.session_id : null;
+      cursor = Number(snapshot.sequence) || 0;
+      lastRosAt = null;
+      const events = Array.isArray(snapshot.events) ? snapshot.events : [];
+      const timeline = byId('timeline');
+      timeline.replaceChildren();
+      if (events.length === 0) {
+        const empty = document.createElement('div');
+        empty.id = 'timeline-empty';
+        empty.className = 'empty';
+        empty.textContent = 'No events received.';
+        timeline.append(empty);
+      }
+      for (const event of events) applyEvent(event, true, false);
+      const stages = snapshot.stages && typeof snapshot.stages === 'object' ? snapshot.stages : {};
+      for (const event of Object.values(stages)) applyEvent(event, false, false);
+    }
+    function connection(state) {
+      text('connection-state', state);
+      byId('connection-dot').className = `dot${state === 'live' ? ' live' : state === 'stale' ? ' stale' : ''}`;
+    }
+    function markTransport(payload) {
+      if (!payload || typeof payload !== 'object') return false;
+      if (sessionId !== null && payload.session_id !== sessionId) return false;
+      if (sessionId === null && typeof payload.session_id === 'string') {
+        sessionId = payload.session_id;
+      }
+      lastTransportAt = Date.now();
+      connection('live');
+      return true;
+    }
+    function openEvents(after) {
+      if (reconnectTimer !== null) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
+      if (source) source.close();
+      const session = sessionId === null ? '' : `&session=${encodeURIComponent(sessionId)}`;
+      const stream = new EventSource(`/api/events?after=${after}${session}`);
+      source = stream;
+      stream.onopen = () => {
+        if (source !== stream) return;
+        lastTransportAt = Date.now();
+        connection('live');
+      };
+      stream.onerror = () => {
+        if (source !== stream) return;
+        stream.close();
+        source = null;
+        connection('stale');
+        reconnectTimer = setTimeout(() => {
+          reconnectTimer = null;
+          openEvents(cursor);
+        }, 1000);
+      };
+      stream.addEventListener('event', message => {
+        const event = JSON.parse(message.data);
+        if (source === stream && markTransport(event)) applyEvent(event, true, true);
+      });
+      stream.addEventListener('reset', message => {
+        const snapshot = JSON.parse(message.data);
+        if (source !== stream) return;
+        renderSnapshot(snapshot);
+        markTransport(snapshot);
+      });
+      stream.addEventListener('heartbeat', message => {
+        const heartbeat = JSON.parse(message.data);
+        if (source === stream) markTransport(heartbeat);
+      });
+    }
+    async function command(payload) {
+      text('control-result', 'Sending…');
+      try {
+        const response = await fetch('/api/control', {
+          method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload)
+        });
+        const result = await response.json();
+        text('control-result', result.message || result.error || (result.ok ? 'Accepted' : 'Rejected'));
+      } catch (_error) { text('control-result', 'Dashboard connection failed'); }
+    }
+    byId('mode').addEventListener('change', event => {
+      text('start', startLabel(event.target.value));
+    });
+    byId('start').addEventListener('click', () => command({action:'start', mode:byId('mode').value}));
+    byId('stop').addEventListener('click', () => command({action:'stop'}));
+    byId('replay').addEventListener('click', () => command({action:'replay'}));
+    setInterval(() => {
+      const transportAge = lastTransportAt === null ? null : Date.now()-lastTransportAt;
+      text('connection-age', transportAge === null ? 'no stream data' : `${Math.floor(transportAge/1000)}s ago`);
+      if (transportAge !== null && transportAge > streamStaleMs) connection('stale');
+      if (lastRosAt !== null && Date.now() - lastRosAt > 5000) {
+        text('stage-ros-state', 'stale');
+        text('stage-ros-detail', 'Bridge heartbeat expired');
+        const card = document.querySelectorAll('[data-stage="ros"]')[0];
+        if (card) card.dataset.active = 'false';
+      }
+    }, 1000);
+    window.__aliceDashboard = {applyEvent, renderSnapshot, openEvents};
+    fetch('/api/state').then(response => response.json()).then(snapshot => {
+      renderSnapshot(snapshot);
+      openEvents(cursor);
+    }).catch(() => connection('stale'));
+  })();
+  </script>
+</body>
+</html>

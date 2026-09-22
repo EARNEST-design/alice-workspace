@@ -23,6 +23,12 @@ speech = [
   "pocket-tts==3.1.0",
   "sounddevice==0.5.6",
 ]
+conversation = [
+  "httpx==0.28.1",
+  "onnxruntime==1.30.0",
+  "opencc-python-reimplemented==0.1.7",
+  "scipy==1.18.1",
+]
 ml = [
   "safetensors>=0.8.0",
   "torch>=2.14.0",
@@ -38,6 +44,7 @@ full = [
 
 [project.scripts]
 alice-speak = "alice.speech.cli:main"
+alice-conversation = "alice.conversation.cli:main"
 alice-jaw-trial = "alice.experiments.jaw_trial_cli:main"
 alice-camera = "alice.perception.cli:main"
 alice-passive-capture = "alice.experiments.passive_capture:main"
